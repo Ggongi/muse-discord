@@ -1,0 +1,117 @@
+# muse-discord configuration.
+# Copy this file to config.yaml and fill it in (SETUP.md walks through
+# every value). config.yaml is yours: it is never overwritten by updates
+# to this package, and it must never contain the bot token itself, only
+# a pointer to where the token lives.
+
+bot:
+  # File holding the Discord bot token (plain text, one line, mode 600).
+  token_file: "~/.config/muse-discord/bot_token"
+  # Alternative to token_file: name of an environment variable holding
+  # the token. Leave null to use token_file. The env var wins when both
+  # are set.
+  token_env: null
+  # Restrict the bot to these guild (server) IDs. Empty = every server
+  # the bot belongs to. Reading and replying are permission-driven (the
+  # bot reads channels it can read and replies where it can send), so
+  # most installs leave this empty.
+  guild_ids: []
+
+owners:
+  # Discord user IDs of the owners (you). Owner messages are exempt
+  # from rate caps, may carry owner_command (the worker may then run
+  # the allowlisted bin/discord-api.py tool), and are the only DMs the
+  # bot reads under the default dm_policy. SETUP.md explains how to
+  # find your user ID.
+  user_ids: []
+
+behavior:
+  # What counts as "addressed to the bot" in server channels.
+  # Options: mention (@mention or the bot's name), reply_to_bot (a
+  # Discord reply to one of the bot's messages).
+  respond_to: [mention, reply_to_bot]
+  # Whose DMs the bot reads and answers:
+  #   owner_only = only the owners' DMs are ever read (default; anyone
+  #                else's DMs are ignored so completely the bot never
+  #                sees them)
+  #   open       = any human's DM (delivered via the gateway; Discord
+  #                gives bots no way to enumerate DM channels)
+  #   off        = DMs are never read or answered
+  dm_policy: owner_only
+  # Burst coalescing: a trigger waits this many seconds so rapid
+  # follow-up messages from the same author fold into one reply.
+  coalesce_seconds: 5
+  # Max total characters of one reply (across all its message parts).
+  max_reply_chars: 1800
+
+safety:
+  # Hold messages matching prompt-injection / exfiltration patterns in
+  # quarantine.json for your review instead of queueing them.
+  injection_quarantine: true
+  # Max replies sent per day across all servers. null = off.
+  daily_reply_cap: 30
+  # Max replies per user per day. null = off (the default).
+  per_user_daily_cap: null
+
+engine:
+  # The REST poll is gap repair for the realtime gateway ingest, and
+  # the cadence for discovery refreshes and the sweep. Seconds.
+  rest_poll_seconds: 30
+  # How often channel/thread discovery re-runs (permission changes and
+  # new channels take effect without a restart). Minutes.
+  discovery_refresh_minutes: 30
+  # Reconciliation sweep: re-reads recent channel history and requeues
+  # any mention that no durable record (ledger, queue, outbox,
+  # quarantine) accounts for. This is the silent-drop backstop.
+  sweep:
+    every_cycles: 6        # in poll cycles (6 x 30s = ~3 min)
+    grace_seconds: 240     # never touch mentions younger than this
+    max_age_hours: 6       # ...or older than this
+    max_recoveries: 2      # requeue a lost mention at most this often
+  # Discord 429 (rate limit) handling: any 429 records a backoff window
+  # (Discord's Retry-After is honored when present); REST work pauses
+  # while the gateway ingest, coalesce flushes, and outbox sends keep
+  # running.
+  backoff:
+    initial_seconds: 60
+    max_seconds: 900
+
+presence:
+  # The presence client keeps the bot visibly online with ONE static
+  # status. No rotation, no scheduling.
+  enabled: true
+  status_text: "for mentions"
+  # watching | playing | listening | streaming | competing | custom
+  status_kind: watching
+
+persona:
+  # The file the worker reads for the bot's personality. Generated
+  # during setup by interviewing you (see SETUP.md); edit it any time.
+  file: "persona.md"
+
+plugins:
+  # New-member welcomes. Params follow the global + per_guild pattern:
+  # a param shaped {default: ..., per_guild: {...}} resolves per_guild
+  # first (keyed by guild ID or server name), then the default.
+  welcome:
+    enabled: false
+    channel:
+      # system = the server's Discord system channel | a channel name
+      # (resolved inside that server) | a channel ID | off
+      default: system
+      per_guild: {}
+    prompt:
+      default: >-
+        Welcome {user} to {server}! Write a short, warm welcome. Point
+        them to this server's rules and getting-started channels if it
+        has them. Do not invite them to talk to the bot.
+      per_guild: {}
+    daily_cap: 10        # per server per day; null = no cap
+    max_age_hours: 24    # skip joins older than this
+  # Image/video generation gate for allowed users. Requires the
+  # worker's runtime to have media generation tools; without them the
+  # worker will simply say it can't (and must never claim it started).
+  media_generation:
+    enabled: false
+    allowed_user_ids: []   # empty = owners only
+    daily_cap: null        # files actually sent per day; null = no cap

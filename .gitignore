@@ -1,0 +1,20 @@
+# Your filled-in config (the example stays tracked)
+config.yaml
+
+# Runtime state and queues (created by the monitor)
+state.json
+reply_queue.json
+reply_outbox.json
+quarantine.json
+mention_ledger.json
+monitor.pid
+watchdog_state.json
+
+# Logs
+*.log
+
+# Downloaded and generated media
+media/
+generated/
+
+__pycache__/

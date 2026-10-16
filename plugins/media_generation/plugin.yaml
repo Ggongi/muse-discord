@@ -1,0 +1,25 @@
+name: media_generation
+description: >-
+  Lets allowed users have the worker generate images/video for them.
+  The plugin supplies the may_generate gate on queue items: when it
+  grants permission, the monitor records a single-use approval and the
+  worker may generate (its judgment, from context) and have the core's
+  attachment pipeline send the result. Off by default; generation also
+  requires the worker's runtime to actually have media tools.
+hooks:
+  - gate_message
+  - generation_sent
+params:
+  allowed_user_ids:
+    default: []
+    description: >-
+      Discord user IDs allowed to trigger generation. Empty (the
+      default) means the owners from the top-level owners.user_ids
+      config, and nobody else.
+  daily_cap:
+    default: null
+    description: >-
+      Max generated files actually SENT per day, across all users.
+      Counted at send time by the generation_sent hook, never at queue
+      time (a granted permission that produces no file costs nothing).
+      null = no cap.

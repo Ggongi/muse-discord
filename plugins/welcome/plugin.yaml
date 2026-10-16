@@ -1,0 +1,40 @@
+name: welcome
+description: >-
+  Greets new members. When a member joins a server (Discord delivers a
+  system join message, type 7), the plugin resolves the target channel
+  from its params and queues a "welcome" item; the worker drafts the
+  greeting using the prompt param. Off by default.
+hooks:
+  - member_join
+params:
+  channel:
+    default: system
+    per_guild: {}
+    description: >-
+      Where welcomes are posted. One of: "system" (the server's Discord
+      system channel), a channel name (resolved inside that server), a
+      channel ID, or "off" (no welcomes in that server). The per_guild
+      map is keyed by guild ID or server name and wins over the default.
+      If the resolved channel is one the bot cannot send in, the welcome
+      is skipped and logged.
+  prompt:
+    default: >-
+      Welcome {user} to {server}! Write a short, warm welcome. Point
+      them to this server's rules and getting-started channels if it
+      has them. Do not invite them to talk to the bot.
+    per_guild: {}
+    description: >-
+      Instructions the worker follows to draft the welcome. {user} is
+      replaced with a mention of the new member and {server} with the
+      server name before the item is queued. Same per_guild override
+      pattern as channel.
+  daily_cap:
+    default: 10
+    description: >-
+      Max welcomes queued per server per day, so a join wave cannot
+      burn unbounded worker tokens. null = no cap.
+  max_age_hours:
+    default: 24
+    description: >-
+      Joins older than this are skipped, so a long monitor outage does
+      not welcome week-old members.
