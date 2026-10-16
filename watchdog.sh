@@ -91,8 +91,8 @@ EOF
 # Poll for a healthy start, breaking early instead of sleeping a fixed time.
 # $1 = alive() pattern, $2 = log marker, $3 = log file, $4 = max seconds.
 wait_healthy() {
-  local i n=$(( ($4 + 4) / 5 ))
-  for i in $(seq 1 "$n"); do
+  local n=$(( ($4 + 4) / 5 ))
+  for _ in $(seq 1 "$n"); do
     sleep 5
     if alive "$1" && grep -q "$2" "$3" 2>/dev/null; then
       return 0

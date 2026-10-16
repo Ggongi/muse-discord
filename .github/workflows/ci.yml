@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest supported (SETUP.md promises 3.10+) and newest.
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install dependencies
+        run: pip install -r requirements.txt ruff
+      - name: Compile every script
+        run: git ls-files '*.py' | xargs python -m py_compile
+      - name: Lint for real bugs (syntax errors, undefined names, dead code)
+        run: ruff check --select E9,F .
+      - name: Parse every YAML file
+        run: |
+          git ls-files '*.yaml' '*.yml' | xargs python -c '
+          import sys, yaml
+          for path in sys.argv[1:]:
+              with open(path) as f:
+                  yaml.safe_load(f)
+              print("ok", path)
+          '
+
+  shell:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check shell scripts
+        run: git ls-files '*.sh' | xargs shellcheck -S warning

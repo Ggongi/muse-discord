@@ -704,7 +704,6 @@ def rate_allows(state, user_id, channel_id=None):
     strangers, not the owner's own use of the bot."""
     if user_id in OWNER_USER_IDS:
         return True
-    now = time.time()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     rate = state["rate"]
 

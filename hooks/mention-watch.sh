@@ -18,6 +18,7 @@
 # simply poll reply_queue.json themselves; the queue protocol in
 # PROTOCOL.md is the real contract.
 set -euo pipefail
+# shellcheck source=/dev/null
 source "$HATCH_HOOK_RUNTIME"
 
 # Package dir: the folder containing this hooks/ dir's parent, unless
