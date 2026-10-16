@@ -3,7 +3,9 @@ description: >-
   Greets new members. When a member joins a server (Discord delivers a
   system join message, type 7), the plugin resolves the target channel
   from its params and queues a "welcome" item; the worker drafts the
-  greeting using the prompt param. Off by default.
+  greeting using the prompt param. Off by default, and only active
+  servers (behavior.active_guild_ids) get welcomes: servers in observe
+  mode never do.
 hooks:
   - member_join
 params:
