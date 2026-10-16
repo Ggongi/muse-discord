@@ -56,5 +56,5 @@ fi
 # hook_state_set is a no-op on dry runs, so testing never consumes a detection.
 hook_state_set '{"last_wake_hash":"'"$qhash"'","last_wake_at":'"$now"'}'
 
-payload=$(jq -c '{count: length, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, welcome, welcome_prompt, reply_to, burst, burst_fragments}]}' "$QUEUE")
+payload=$(jq -c '{count: length, items: [.[] | {message_id, channel_id, channel_name, kind, priority, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, welcome, welcome_prompt, reply_to, burst, burst_fragments}]}' "$QUEUE")
 wake "muse-discord mentions pending" "$payload"

@@ -38,7 +38,8 @@ items it has processed. Item fields:
 | `channel_id`               | Channel to reply in (resolved welcome channel for welcomes)                                                                                                             |
 | `channel_name`             | Guild-qualified display, e.g. `"My Server #general"`, or `"DM with <name>"`                                                                                             |
 | `guild_id`                 | Guild ID, or null for DMs                                                                                                                                               |
-| `kind`                     | `"mention"`, `"dm"`, or `"welcome"`                                                                                                                                     |
+| `kind`                     | `"mention"` (direct address: @mention or reply to the bot), `"name_drop"` (opt-in bare call-name hit), `"dm"`, or `"welcome"`                                           |
+| `priority`                 | `"low"` on `name_drop` items (maybe addressed to the bot; the default verdict is silence), else `"normal"`. Welcome items omit it                                       |
 | `author`, `author_id`      | Triggering user (the new member, for welcomes)                                                                                                                          |
 | `content`                  | Message text; for bursts, all fragments joined oldest-first with newlines                                                                                               |
 | `timestamp`                | ISO timestamp of the trigger                                                                                                                                            |
@@ -106,7 +107,9 @@ updated, recoveries?}}}`. Every mention/DM that reaches a terminal
 state is recorded: `queued` (in flight), `replied`, `quarantined`, or
 `skipped` with a reason (`"no send permission in channel"`,
 `"403 missing access"`, `"recovery cap reached"`, `"enqueue failed
-3x"`, `"duplicate suppressed"`, ...). The reconciliation sweep diffs
+3x"`, `"duplicate suppressed"`, `"predates bot join"`, `"channel quiet
+(burst breaker)"`, ...). Name-drop items are recorded as `queued` but
+the sweep never requeues them: most get no reply by design. The reconciliation sweep diffs
 recent channel history against this ledger (plus queue, outbox,
 quarantine, and replied records) and requeues anything unaccounted
 for. The worker never touches this file.
@@ -122,10 +125,40 @@ are never queued and never auto-replied.
 Working state: per-channel `last_seen`, `replied_to` (bounded),
 rate-limit counters, rolling per-channel `history`, staged coalescing
 bursts (`pending`, including their retry bookkeeping), generation
-approvals and sent-file records, and plugin state under `plugins`.
+approvals and sent-file records, plugin state under `plugins`, and the
+server-safety records below: `guild_joined` (per-guild join watermark,
+epoch seconds), `guild_first_seen` (fallback watermark when Discord
+has not reported the join time), `known_guilds` and `join_notices`
+(new-server detection and owed owner DMs), `breaker` (per-channel
+recent sends and `quiet_until`), and `owner_triggers` and
+`trigger_texts` (bounded, for the breaker).
 Safe to delete while the monitor is stopped: the cost is re-seeding
 `last_seen` (history is treated as already seen) and losing rate-limit
-and plugin counters.
+and plugin counters. Join watermarks are re-read from Discord at
+startup, and the known-server set re-seeds silently.
+
+## Server safety
+
+Enforced by the monitor before anything reaches the queue:
+
+- **Strict triggers.** Only direct address queues work by default: a
+  platform @mention, a reply to the bot, or a DM. Bare-name matching
+  (`name` in `behavior.respond_to`, with `behavior.call_names`) is
+  opt-in and produces low-priority `name_drop` items the worker
+  decides on.
+- **Join watermark.** A message older than the bot's join time in its
+  server is never a trigger, on any path (poll, gateway, restart
+  catch-up, late channel discovery, sweep). It can still appear in a
+  later trigger's `history`.
+- **Observe mode.** Servers not listed in `behavior.active_guild_ids`
+  get no ambient behavior: no name-drop items, no welcomes. Direct
+  address works everywhere. On joining a new server the bot DMs the
+  owners its name, ID, visible channels, mode, and how to activate it.
+- **Burst breaker.** More than `safety.burst_breaker.max_replies`
+  replies in `window_minutes` in one server channel trips a cooldown:
+  queued triggers and drafted replies for that channel are dropped
+  (ledgered as skipped) until it ends, and the owners get a DM with
+  the triggering messages. Replies to owners are exempt.
 
 ## Worker obligations (summary)
 
@@ -142,6 +175,10 @@ and plugin counters.
    you actually started it in this run.
 6. One reply per queue item; reply under the LAST burst fragment when
    `burst_fragments` is present.
+7. Treat `name_drop` items as "maybe addressed to you": the default is
+   to remove them silently. Reply only when the context makes it clear
+   the author is talking to the bot, not about something that shares
+   its name.
 
 ## Plugin hooks
 

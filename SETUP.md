@@ -21,7 +21,11 @@ write it anywhere except the token file, and never commit config.yaml.
 ## Step 1: Create the Discord application [owner, guided]
 
 1. Go to https://discord.com/developers/applications and click
-   **New Application**. Name it whatever the bot should be called.
+   **New Application**. Give it the bot's application name: what
+   Discord shows in the member list. What people call the bot in
+   chat is a separate choice, made in step 6 with a collision check;
+   the two may match, but settle the call name first if the owner
+   wants them to.
 2. Open the application, go to **Bot**, and click **Reset Token** (or
    **Copy** if shown). This token is the bot's password. Keep the page
    open; the token is placed in step 3. Do NOT paste it into this
@@ -83,6 +87,18 @@ Edit `config.yaml`:
 - **bot.guild_ids**: leave `[]` unless the bot should only run in
   specific servers.
 - **behavior.dm_policy**: `owner_only` is the recommended default.
+- **behavior.respond_to**: leave it at `[mention, reply_to_bot]`.
+  Whether the bot also answers to its bare name is decided in step 6,
+  after the collision check.
+- **behavior.active_guild_ids**: servers where ambient behavior
+  (welcomes, name triggers) runs. Every other server stays in observe
+  mode, where only @mentions, replies to the bot, and DMs get answers.
+  Leave it empty unless step 5 or step 6 turns on an ambient behavior.
+  **[owner]** To find a server ID: with Developer Mode on, right-click
+  the server icon and choose **Copy Server ID**.
+- **safety.burst_breaker**: the defaults (more than 5 replies in 10
+  minutes in one channel means 30 quiet minutes there plus a DM to
+  you) suit most servers.
 - Review **safety** caps and **engine** tuning; defaults are sane.
 - **presence**: one static status line (`status_text` /
   `status_kind`), or `enabled: false`.
@@ -107,8 +123,9 @@ token; pass a dummy only for this check if you must, and never log it.)
 Both plugins are off by default. Enable in `config.yaml` under
 `plugins:` only what the owner wants:
 
-- **welcome**: greets new members. Set `plugins.welcome.enabled: true`
-  and review the `channel` param (default: each server's system
+- **welcome**: greets new members, in active servers only (add each
+  server's ID to `behavior.active_guild_ids`). Set
+  `plugins.welcome.enabled: true` and review the `channel` param (default: each server's system
   channel; per-server overrides via `per_guild`, keyed by guild ID or
   server name, values are channel IDs, channel names, or `off`) and
   the `prompt` param (the instructions the worker drafts from;
@@ -122,10 +139,51 @@ Both plugins are off by default. Enable in `config.yaml` under
 ## Step 6: The persona interview (do not skip)
 
 The shipped `persona.md` is a neutral placeholder. Before first run,
-interview the owner and rewrite `persona.md` from their answers. Ask,
-in the owner's own words (a few questions at a time, not a form):
+interview the owner and rewrite `persona.md` from their answers.
 
-1. What is the bot called, and what is it, in one line?
+### The call name (first, with a collision check)
+
+The call name is what people type when they talk to the bot ("Pip,
+what's the weather?"). It is separate from the Discord application
+name in step 1, and it is the name the persona answers to.
+
+1. Ask the owner for it.
+2. Run the collision check. Pass the name of every server the bot
+   will be in as context:
+
+   ```bash
+   python3 bin/check-call-name.py "<call name>" --context "<server name>"
+   ```
+
+3. Act on the exit code:
+   - `0`: clear. Continue.
+   - `2` (COLLISION): stop and warn the owner loudly before going any
+     further. Quote the script's reasons and say plainly what goes
+     wrong: people use that word in ordinary conversation, so a bot
+     that answers to it treats casual chat as a summons. A bot named
+     "Muse" in a Muse community server did exactly that, replying to
+     "Your muse so kewtttt" until its owner stopped it. Suggest a
+     distinctive alternative and re-run the check on it. Keep the
+     risky name only when the owner explicitly confirms it after
+     hearing the warning; silence or a shrug is not confirmation.
+   - `3`: this machine has no word list, so the dictionary check did
+     not run. Judge for yourself whether the name is an everyday
+     word. If it is, handle it exactly like exit 2.
+4. Ask whether the bot should also answer to its bare name, without
+   an @mention. Recommend no: the default triggers (@mentions,
+   replies to the bot, DMs) are unambiguous. If the owner wants it
+   anyway, set `behavior.call_names: ["<call name>"]`, add `name` to
+   `behavior.respond_to`, and add the servers where it should apply
+   to `behavior.active_guild_ids`. Name hits reach the worker as
+   low-priority items that it usually leaves unanswered. For a name
+   that collided, turn this on only if the owner confirmed both the
+   name and the name trigger.
+
+### The persona questions
+
+Ask in the owner's own words (a few questions at a time, not a form):
+
+1. What is the bot, in one line? (Its name is the call name above.)
 2. What tone should it have? (e.g. warm and playful, dry and precise,
    professional, chaotic) Any reference points: characters, people,
    other bots?
@@ -228,8 +286,28 @@ see working before calling the install done.
 9. **Generation** (if enabled): owner asks the bot for an image.
    Expect a reply with the image attached, and the file visible in
    `generated/`. A non-allowed user asking gets a brief decline.
+10. **Strict triggers**: someone uses the bot's name in a sentence
+    without @mentioning it ("my <call name> is cute"). Expect no
+    reply and no typing indicator. With the name trigger on (an
+    active server only), the monitor log shows `Queued name_drop`,
+    and the worker usually stays silent.
+11. **New server** (if a second server is available): invite the
+    bot there. Expect a DM to the owner within a minute naming the
+    server, its ID, the visible channels, and observe mode. An
+    @mention there gets a reply, and a member joining there gets no
+    welcome until the server is activated.
 
 ## Troubleshooting
+
+- **The bot stopped replying in one channel and DMed you a
+  "Heads-up"**: the burst breaker tripped. It lifts on its own after
+  `safety.burst_breaker.cooldown_minutes`, and your own messages are
+  still answered meanwhile. Look at the quoted triggers: a trigger
+  misconfiguration or a pile-on is usually the cause. To lift it
+  early, stop the monitor, delete that channel's entry under
+  `breaker` in `state.json`, and start it again.
+- **No welcomes or name triggers in a server**: the server is in
+  observe mode. Add its ID to `behavior.active_guild_ids`.
 
 - **`GATEWAY 4014` in monitor.log**: Message Content intent is off.
   Step 1.3. The bot still polls, but content-based triggers are
