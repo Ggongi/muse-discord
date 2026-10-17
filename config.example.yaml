@@ -32,37 +32,20 @@ behavior:
   # Options:
   #   mention      = a Discord @mention of the bot
   #   reply_to_bot = a Discord reply to one of the bot's messages
-  #   name         = OPT-IN, off by default: the text contains one of
-  #                  call_names as a bare word. The deterministic layer
-  #                  cannot tell "Muse, look at this" from "my Muse can
-  #                  post a selfie", so name hits are queued as
-  #                  low-priority "maybe addressed to you" items and the
-  #                  worker stays silent unless context makes the address
-  #                  clear. Only works in active servers (see below).
   respond_to: [mention, reply_to_bot]
-  # The name(s) people address the bot by in chat, used only by the
-  # "name" trigger. Separate from the Discord application name on
-  # purpose. Setup runs bin/check-call-name.py on each one: an everyday
-  # word, a product name, or the server's own name ("Muse" in a Muse
-  # server) turns casual conversation into summonses.
-  call_names: []
-  # Servers (guild IDs, as quoted strings) where ambient behavior is
-  # on: name-drop triggers and welcomes. Every other server is in
-  # observe mode: @mentions, replies to the bot, and DMs still work.
+  # Servers (guild IDs, as quoted strings) where ambient behavior
+  # (welcomes) is on. Every other server is in observe mode:
+  # @mentions, replies to the bot, and DMs still work.
   # When the bot joins a server it DMs the owners a summary with the ID
   # to add here. Re-read when this file changes; no restart needed.
   active_guild_ids: []
   # Other bots (including other people's Muses):
   #   direct = a bot that @mentions this bot or replies to one of its
   #            messages gets an answer, the same as a human (default).
-  #            Bots never trigger name-drops or welcomes. The worker
-  #            ends bot conversations the way a person would.
+  #            Bots never trigger welcomes. The worker ends bot
+  #            conversations the way a person would.
   #   off    = messages from bots are ignored entirely
   bots: direct
-  # Optional hard stop for bot-to-bot conversations: after this many
-  # consecutive bot messages in a channel with no human in between, stop
-  # answering bots there until a human speaks. null = no cap.
-  max_bot_turns: null
   # Whose DMs the bot reads and answers:
   #   owner_only = only the owners' DMs are ever read (default; anyone
   #                else's DMs are ignored so completely the bot never
@@ -89,7 +72,7 @@ safety:
   # quarantine.json for your review instead of queueing them.
   injection_quarantine: true
   # Max items queued for the worker per day across all servers, to
-  # bound token spend. Counted at queue time, so name-drops the worker
+  # bound token spend. Counted at queue time, so items the worker
   # leaves unanswered and sweep re-queues count too. Owners' messages
   # are exempt. null = off (the default); 0 = strangers never queue.
   daily_reply_cap: null

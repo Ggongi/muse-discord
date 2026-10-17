@@ -23,9 +23,8 @@ write it anywhere except the token file, and never commit config.yaml.
 1. Go to https://discord.com/developers/applications and click
    **New Application**. Give it the bot's application name: what
    Discord shows in the member list. What people call the bot in
-   chat is a separate choice, made in step 6 with a collision check;
-   the two may match, but settle the call name first if the owner
-   wants them to.
+   chat is a separate choice, made in step 6; the two may match, but
+   settle the call name first if the owner wants them to.
 2. Open the application, go to **Bot**, and click **Reset Token** (or
    **Copy** if shown). This token is the bot's password. Keep the page
    open; the token is placed in step 3. Do NOT paste it into this
@@ -95,12 +94,10 @@ Edit `config.yaml`:
   specific servers.
 - **behavior.dm_policy**: `owner_only` is the recommended default.
 - **behavior.respond_to**: leave it at `[mention, reply_to_bot]`.
-  Whether the bot also answers to its bare name is decided in step 6,
-  after the collision check.
 - **behavior.active_guild_ids**: servers where ambient behavior
-  (welcomes, name triggers) runs. Every other server stays in observe
-  mode, where only @mentions, replies to the bot, and DMs get answers.
-  Leave it empty unless step 5 or step 6 turns on an ambient behavior.
+  (welcomes) runs. Every other server stays in observe mode, where
+  only @mentions, replies to the bot, and DMs get answers. Leave it
+  empty unless step 5 turns on an ambient behavior.
   **[owner]** To find a server ID: with Developer Mode on, right-click
   the server icon and choose **Copy Server ID**.
 - **safety**: reply caps are off by default. If the owner wants to
@@ -110,9 +107,7 @@ Edit `config.yaml`:
 - Review **engine** tuning; defaults are sane.
 - **behavior.bots**: `direct` (default) lets other bots, such as
   other people's Muses, talk to this one by @mention or reply. Set
-  `off` to ignore bots entirely. `behavior.max_bot_turns` (default
-  `null`, no cap) optionally stops bot-to-bot runs after that many
-  bot messages in a row with no human.
+  `off` to ignore bots entirely.
 - **presence**: keeps the bot shown as online. By default there is no
   status line under its name; set `status_text` (and `status_kind`)
   for one, or `enabled: false` to skip the presence process.
@@ -155,43 +150,12 @@ Both plugins are off by default. Enable in `config.yaml` under
 The shipped `persona.md` is a neutral placeholder. Before first run,
 interview the owner and rewrite `persona.md` from their answers.
 
-### The call name (first, with a collision check)
+### The call name (first)
 
 The call name is what people type when they talk to the bot ("Pip,
 what's the weather?"). It is separate from the Discord application
-name in step 1, and it is the name the persona answers to.
-
-1. Ask the owner for it.
-2. Run the collision check. Pass the name of every server the bot
-   will be in as context:
-
-   ```bash
-   python3 bin/check-call-name.py "<call name>" --context "<server name>"
-   ```
-
-3. Act on the exit code:
-   - `0`: clear. Continue.
-   - `2` (COLLISION): stop and warn the owner loudly before going any
-     further. Quote the script's reasons and say plainly what goes
-     wrong: people use that word in ordinary conversation, so a bot
-     that answers to it treats casual chat as a summons. A bot named
-     "Muse" in a Muse community server did exactly that, replying to
-     "Your muse so kewtttt" until its owner stopped it. Suggest a
-     distinctive alternative and re-run the check on it. Keep the
-     risky name only when the owner explicitly confirms it after
-     hearing the warning; silence or a shrug is not confirmation.
-   - `3`: this machine has no word list, so the dictionary check did
-     not run. Judge for yourself whether the name is an everyday
-     word. If it is, handle it exactly like exit 2.
-4. Ask whether the bot should also answer to its bare name, without
-   an @mention. Recommend no: the default triggers (@mentions,
-   replies to the bot, DMs) are unambiguous. If the owner wants it
-   anyway, set `behavior.call_names: ["<call name>"]`, add `name` to
-   `behavior.respond_to`, and add the servers where it should apply
-   to `behavior.active_guild_ids`. Name hits reach the worker as
-   low-priority items that it usually leaves unanswered. For a name
-   that collided, turn this on only if the owner confirmed both the
-   name and the name trigger.
+name in step 1, and it is the name the persona answers to. Ask the
+owner for it.
 
 ### The persona questions
 
@@ -304,17 +268,12 @@ see working before calling the install done.
    Expect a reply with the image attached, and the file visible in
    `generated/<message id>/`. A non-allowed user asking gets a brief
    decline.
-10. **Strict triggers**: someone uses the bot's name in a sentence
-    without @mentioning it ("my <call name> is cute"). Expect no
-    reply and no typing indicator. With the name trigger on (an
-    active server only), the monitor log shows `Queued name_drop`,
-    and the worker usually stays silent.
-11. **New server** (if a second server is available): invite the
+10. **New server** (if a second server is available): invite the
     bot there. Expect a DM to the owner within a minute naming the
     server, its ID, the visible channels, and observe mode. An
     @mention there gets a reply, and a member joining there gets no
     welcome until the server is activated.
-12. **Another bot** (if one is in the server): have it @mention this
+11. **Another bot** (if one is in the server): have it @mention this
     bot or reply to one of its messages. Expect a reply that reaches
     the other bot as a real mention or reply, and expect the exchange
     to wind down on its own (silence or a reaction) instead of
@@ -322,8 +281,8 @@ see working before calling the install done.
 
 ## Troubleshooting
 
-- **No welcomes or name triggers in a server**: the server is in
-  observe mode. Add its ID to `behavior.active_guild_ids`.
+- **No welcomes in a server**: the server is in observe mode. Add
+  its ID to `behavior.active_guild_ids`.
 
 - **`GATEWAY DISABLED (code 4014)` in monitor.log** (the watchdog
   alerts "monitor degraded"): Message Content intent is off.

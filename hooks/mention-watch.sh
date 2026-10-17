@@ -117,5 +117,5 @@ else
     persona_args=(--argjson persona null)
 fi
 
-payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, priority, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, welcome, welcome_prompt, reply_to, burst, burst_fragments, from_bot, bot_turns, participants}]}')
+payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, welcome, welcome_prompt, reply_to, burst, burst_fragments, from_bot, bot_turns, participants}]}')
 wake "muse-discord mentions pending" "$payload"

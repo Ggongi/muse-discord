@@ -71,7 +71,6 @@ LEDGER_FILE = os.path.join(BASE_DIR, "mention_ledger.json")
 # Touched by the main loop; the watchdog restarts a monitor whose
 # heartbeat goes stale (a live process whose loop is stuck).
 HEARTBEAT_FILE = os.path.join(BASE_DIR, "monitor.heartbeat")
-OWNER_COMMANDS_FILE = os.path.join(BASE_DIR, "owner_commands.json")
 # The monitor and the worker both edit the queue and the outbox. Every
 # read-modify-write of either file happens under an exclusive flock on
 # this file (see shared_lock and PROTOCOL.md), so neither side can write
@@ -92,8 +91,8 @@ DEFAULT_CONFIG = {
             "token_env": None, "guild_ids": []},
     "owners": {"user_ids": []},
     "behavior": {"respond_to": ["mention", "reply_to_bot"],
-                 "call_names": [], "active_guild_ids": [],
-                 "bots": "direct", "max_bot_turns": None,
+                 "active_guild_ids": [],
+                 "bots": "direct",
                  "dm_policy": "owner_only", "coalesce_seconds": 5,
                  "max_reply_chars": 1800},
     "safety": {"injection_quarantine": True, "daily_reply_cap": None,
@@ -175,22 +174,17 @@ OWNER_USER_IDS = {str(u) for u in
 GUILD_ALLOWLIST = {str(g) for g in BOT_CFG.get("guild_ids") or []}
 _BEHAVIOR = CFG.get("behavior") or {}
 RESPOND_TO = set(_BEHAVIOR.get("respond_to") or ["mention", "reply_to_bot"])
-# Names people address the bot by in chat. Only used by the opt-in
-# "name" trigger; deliberately separate from the Discord username.
-CALL_NAMES = [str(n).strip() for n in _BEHAVIOR.get("call_names") or []
-              if str(n).strip()]
-CALL_NAME_RE = re.compile(
-    r"\b(?:" + "|".join(re.escape(n.lower()) for n in CALL_NAMES) + r")\b"
-) if CALL_NAMES else None
+if "name" in RESPOND_TO or _BEHAVIOR.get("call_names"):
+    print("WARNING: the bare-name trigger was removed; \"name\" in "
+          "behavior.respond_to and behavior.call_names are ignored.",
+          flush=True)
 # Other bots: "direct" = a bot that @mentions or replies to this bot gets
-# an answer, like a human would (never name-drops or welcomes); "off" =
-# bots are ignored entirely.
+# an answer, like a human would (never welcomes); "off" = bots are
+# ignored entirely.
 BOTS_POLICY = str(_BEHAVIOR.get("bots") or "direct").lower()
-# Optional hard stop: after this many consecutive bot messages in a
-# channel with no human in between, stop answering bots there until a
-# human speaks. None = no cap: the worker ends conversations by
-# judgment, the way a person would.
-MAX_BOT_TURNS = _BEHAVIOR.get("max_bot_turns")
+if _BEHAVIOR.get("max_bot_turns") is not None:
+    print("WARNING: behavior.max_bot_turns was removed and is ignored; "
+          "the worker ends bot conversations by judgment.", flush=True)
 DM_POLICY = str(_BEHAVIOR.get("dm_policy") or "owner_only").lower()
 # 0 = no coalescing: every trigger is queued on the next tick.
 COALESCE_SECS = _cfg_num(_BEHAVIOR, "coalesce_seconds", 5, float,
@@ -336,13 +330,7 @@ DISCORD_MAX_BYTES = 8 * 1024 * 1024  # unboosted server upload cap
 # the owner's message is actually asking the bot to DO something is the
 # worker's job (natural-language understanding), not a regex's.
 # Strangers never get the flag, so the discord-api.py tool stays locked
-# for them no matter what their message text claims. The tool enforces
-# that in code too: it acts only with --for <message_id> naming a live
-# owner command, which only the monitor records (OWNER_COMMANDS_FILE,
-# written when an owner_command item is queued). A worker tricked by a
-# stranger's item has no such id to cite.
-OWNER_COMMAND_TTL_SECS = 3600
-OWNER_COMMANDS_MAX = 50
+# for them no matter what their message text claims.
 
 # Conversation history: rolling window of recent messages kept per
 # channel/DM so the reply worker drafts with context. Stored in state.json,
@@ -912,6 +900,10 @@ def load_state():
     # Leftovers from the removed burst breaker.
     for key in ("breaker", "owner_triggers", "trigger_texts"):
         state.pop(key, None)
+    state.pop("bot_runs", None)  # leftover from the removed bot turn cap
+    # Bursts staged by the removed name trigger: not direct address.
+    state["pending"] = {k: v for k, v in state.get("pending", {}).items()
+                        if v.get("kind") != "name_drop"}
     return state
 
 
@@ -1132,8 +1124,8 @@ def predates_join(state, msg, gid):
 
 # ---------------------------------------------------------------------------
 # Observe mode. Every server starts in observe mode: direct @mentions,
-# replies to the bot, and DMs work, while ambient behaviors (name-drop
-# triggers, welcomes) stay off until the owner lists the server in
+# replies to the bot, and DMs work, while ambient behavior (welcomes)
+# stays off until the owner lists the server in
 # behavior.active_guild_ids. That list is re-read whenever config.yaml
 # changes, so activating a server needs no restart. When the bot joins a
 # new server, the owners get a DM summary.
@@ -1207,8 +1199,8 @@ def _join_summary(gid, ginfo, channels):
         shown += f", and {len(visible) - 40} more"
     return (f"I just joined **{name}** (server ID {gid}).\n"
             f"Mode: **observe**. I answer @mentions, replies to my "
-            f"messages, and DMs there. Ambient behavior (name-drop "
-            f"replies, welcomes) stays off.\n"
+            f"messages, and DMs there. Ambient behavior (welcomes) "
+            f"stays off.\n"
             f"Channels I can see ({len(visible)}): {shown or 'none'}\n"
             f"To activate that server, add \"{gid}\" to "
             f"behavior.active_guild_ids in config.yaml. No restart "
@@ -1282,33 +1274,20 @@ def is_mention(msg):
     return any(m.get("id") == BOT_ID for m in msg.get("mentions", []))
 
 
-def is_name_drop(msg):
-    """True when the text contains one of behavior.call_names as a
-    standalone word. Only consulted when "name" is in respond_to, and
-    even then the hit is only a "maybe addressed to you": the worker
-    decides, and its default verdict is silence."""
-    return bool(CALL_NAME_RE
-                and CALL_NAME_RE.search((msg.get("content") or "").lower()))
-
-
 def trigger_kind(msg):
     """Classify how a message addresses the bot, per behavior.respond_to:
-    "mention" (a platform @mention or a reply to the bot: direct address),
-    "name_drop" (opt-in bare call-name hit: low priority, worker decides),
+    "mention" (a platform @mention or a reply to the bot: direct address)
     or None. The bot's own messages never trigger. Other bots trigger by
     direct address only, and only under behavior.bots: direct."""
     author = msg.get("author", {}) or {}
     if author.get("id") == BOT_ID:
         return None
-    from_bot = bool(author.get("bot"))
-    if from_bot and BOTS_POLICY != "direct":
+    if author.get("bot") and BOTS_POLICY != "direct":
         return None
     if "mention" in RESPOND_TO and is_mention(msg):
         return "mention"
     if "reply_to_bot" in RESPOND_TO and is_reply_to_bot(msg):
         return "mention"
-    if not from_bot and "name" in RESPOND_TO and is_name_drop(msg):
-        return "name_drop"
     return None
 
 
@@ -1351,14 +1330,7 @@ def get_reply_context(msg):
     }
 
 
-def _upgrade_burst(entry, kind):
-    """A direct mention folding into a name-drop burst makes the whole
-    burst direct address."""
-    if kind == "mention" and entry.get("kind") == "name_drop":
-        entry["kind"] = "mention"
-
-
-def hold_fragment(state, channel_id, msg, kind=None):
+def hold_fragment(state, channel_id, msg):
     """If (channel, author) already has a burst being coalesced, append this
     message to it as a fragment and return True (caller must not classify it
     independently). The trigger message itself is never a fragment."""
@@ -1367,7 +1339,6 @@ def hold_fragment(state, channel_id, msg, kind=None):
     entry = state.get("pending", {}).get(key)
     if entry and msg["id"] != entry["first_id"]:
         entry["fragments"].append(msg)
-        _upgrade_burst(entry, kind)
         print(f"Holding fragment from "
               f"{(msg.get('author', {}) or {}).get('username')} in "
               f"{entry['channel_name']} for one coalesced reply.",
@@ -1391,7 +1362,6 @@ def stage_trigger(state, msg, cname, guild_id, kind, dm=False):
                 f["id"] == msg["id"] for f in entry["fragments"]):
             return  # already in this burst (staged twice): nothing to add
         entry["fragments"].append(msg)
-        _upgrade_burst(entry, kind)
         print(f"Additional trigger from "
               f"{(msg.get('author', {}) or {}).get('username')} folded into "
               f"pending burst in {cname}.", flush=True)
@@ -1402,7 +1372,7 @@ def stage_trigger(state, msg, cname, guild_id, kind, dm=False):
         "channel_name": cname,
         "guild_id": guild_id,
         "author_id": author_id,
-        "kind": kind,  # "mention" | "name_drop" | "dm"
+        "kind": kind,  # "mention" | "dm"
         "dm": dm,
         "first_seen": time.time(),
         "window": BOT_COALESCE_SECS
@@ -1514,16 +1484,10 @@ def flush_pending(state, queue, force=False):
         if force or early or now - entry["first_seen"] >= entry.get(
                 "window", COALESCE_SECS):
             trigger = entry["trigger"]
-            if entry["kind"] == "dm":
-                ok = enqueue_message(trigger, entry["channel_name"], state,
-                                     queue, dm=True,
-                                     fragments=entry["fragments"],
-                                     guild_id=entry["guild_id"])
-            else:
-                ok = enqueue_message(trigger, entry["channel_name"], state,
-                                     queue, fragments=entry["fragments"],
-                                     guild_id=entry["guild_id"],
-                                     kind=entry["kind"])
+            ok = enqueue_message(trigger, entry["channel_name"], state,
+                                 queue, dm=entry["kind"] == "dm",
+                                 fragments=entry["fragments"],
+                                 guild_id=entry["guild_id"])
             n_frag = len(entry["fragments"])
             why = " (author stopped typing)" if early and not force else ""
             print(f"Flushed {entry['kind']} burst "
@@ -1541,8 +1505,8 @@ def flush_pending(state, queue, force=False):
                 del pending[key]
             elif trigger["id"] in _quarantine_ids() \
                     or _ledger_terminal(trigger["id"]):
-                # quarantine() or an enqueue gate (join watermark, bot
-                # turn cap) already ledgered it.
+                # quarantine() or an enqueue gate (join watermark)
+                # already ledgered it.
                 del pending[key]
             else:
                 # No silent drops: retry a few times, then record the
@@ -1632,11 +1596,11 @@ def send_typing(channel_id):
 # flicker until the reply arrived. A daemon thread now pings every
 # active channel on its own clock. The main loop only says which
 # channels are active (typing_refresh): a channel types while it has a
-# pending burst (not in enqueue back-off) or a queue item that is not
-# low priority, for at most TYPING_MAX_SECS per burst or item so a dead
-# worker does not type forever. process_outbox stops an item's typing
-# right before its reply goes out (sending a message ends the indicator;
-# the beats in send_fragmented cover multi-part replies).
+# pending burst (not in enqueue back-off) or a queue item, for at most
+# TYPING_MAX_SECS per burst or item so a dead worker does not type
+# forever. process_outbox stops an item's typing right before its reply
+# goes out (sending a message ends the indicator; the beats in
+# send_fragmented cover multi-part replies).
 # ---------------------------------------------------------------------------
 TYPING_EVERY_SECS = 8
 TYPING_MAX_SECS = 180
@@ -1671,18 +1635,16 @@ def typing_refresh(state):
     now = time.time()
     bursts = {}
     for key, entry in state.get("pending", {}).items():
-        # Name-drop bursts never type (most get no reply), and neither
-        # does a burst backing off after a failed enqueue (a rate cap
-        # would otherwise keep it typing for the ~15 min of retries).
-        if entry.get("kind") in ("mention", "dm") \
-                and entry.get("next_try", 0) <= now:
+        # A burst backing off after a failed enqueue does not type (a
+        # rate cap would otherwise keep it typing for the ~15 min of
+        # retries).
+        if entry.get("next_try", 0) <= now:
             bursts["burst:" + key] = (entry["channel_id"],
                                       entry.get("first_seen", now))
     typing_sync("burst:", bursts)
     items = {}
     for item in load_queue():
-        if not isinstance(item, dict) or item.get("priority") == "low" \
-                or not item.get("channel_id") \
+        if not isinstance(item, dict) or not item.get("channel_id") \
                 or not item.get("message_id"):
             continue
         start = item.get("queued_at") or _snowflake_ts(item["message_id"])
@@ -2464,17 +2426,6 @@ def record_history(state, channel_id, messages):
     excludes it when attaching history to a queue item."""
     hist = state.setdefault("history", {}).setdefault(channel_id, [])
     seen_ids = {h["id"] for h in hist}
-    runs = state.setdefault("bot_runs", {})
-    if channel_id not in runs:
-        # Start the counter from whatever run the history already shows.
-        n = 0
-        for h in reversed(hist):
-            if not h.get("bot"):
-                break
-            n += 1
-        runs[channel_id] = {"n": n, "ids": {},
-                            "last": max((h["id"] for h in hist), key=int,
-                                        default="0")}
     for m in sorted(messages, key=lambda x: int(x["id"])):
         if m["id"] in seen_ids:
             continue
@@ -2499,19 +2450,6 @@ def record_history(state, channel_id, messages):
             entry["display"] = display
         hist.append(entry)
         seen_ids.add(m["id"])
-        # Consecutive bot messages since a human last spoke, counted here
-        # rather than from the 12-entry window so behavior.max_bot_turns
-        # above 12 can trigger. In id order only: a message older than
-        # the newest counted one (gap repair, a re-read) was counted or
-        # is history.
-        run = runs[channel_id]
-        if int(m["id"]) > int(run["last"]):
-            run["n"] = run["n"] + 1 if entry["bot"] else 0
-            run["last"] = m["id"]
-            if entry["bot"]:
-                run["ids"][m["id"]] = run["n"]
-                for mid in list(run["ids"])[:-30]:
-                    del run["ids"][mid]
     # Sorted: the poll re-reads messages the gateway already recorded,
     # and an old one re-added must not land after newer ones.
     hist.sort(key=lambda h: int(h["id"]))
@@ -2624,8 +2562,8 @@ def classify_message(state, msg, channel_name, guild_id=None):
     """Classify a single message exactly the way check_channel's loop does.
 
     Shared by the REST poll path and the gateway fast path so both ingest
-    routes behave identically. Returns "mention", "name_drop", "join", or
-    None (folded into a burst, skipped, or not actionable).
+    routes behave identically. Returns "mention", "join", or None
+    (folded into a burst, skipped, or not actionable).
     """
     if predates_join(state, msg, guild_id):
         # Older than the bot's arrival in this guild: never a trigger,
@@ -2639,21 +2577,9 @@ def classify_message(state, msg, channel_name, guild_id=None):
         return None  # the bot's own messages: never triggers or fragments
     if author.get("bot") and BOTS_POLICY != "direct":
         return None
-    kind = trigger_kind(msg)
-    if kind == "name_drop" and not guild_active(guild_id):
-        kind = None  # name-drops are ambient: off in observe mode
-    if kind:
-        # The trigger check runs BEFORE the generic fragment fold: a
-        # mention arriving while the author's burst is still open folds
-        # into that burst (which flushes with mention semantics), but it
-        # must be classified as a mention first, never swallowed
-        # unclassified by the fragment path.
-        if hold_fragment(state, msg.get("channel_id"), msg, kind):
-            return None
-        return kind
     if hold_fragment(state, msg.get("channel_id"), msg):
         return None  # folded into a burst already being coalesced
-    return None
+    return trigger_kind(msg)
 
 
 def is_join_message(msg):
@@ -2761,18 +2687,6 @@ def bot_run_length(history, msg):
     return run
 
 
-def bot_turns_for(state, msg, history):
-    """Consecutive bot messages ending at msg since a human last spoke,
-    from the per-channel counter record_history keeps (unbounded by the
-    history window). Falls back to bot_run_length for a message the
-    counter did not see in order. 0 when msg is from a human."""
-    if not (msg.get("author", {}) or {}).get("bot"):
-        return 0
-    run = state.get("bot_runs", {}).get(msg["channel_id"]) or {}
-    n = (run.get("ids") or {}).get(msg["id"])
-    return n if n is not None else bot_run_length(history, msg)
-
-
 def conversation_participants(history, msg, reply_ctx):
     """Everyone visible in the conversation, as [{name, display?, id, bot,
     you?}], so the worker can address them with <@id>: a bare "@Name" in
@@ -2824,35 +2738,11 @@ def link_mentions(text, channel_id, state):
     return pattern.sub(lambda m: f"<@{names[m.group(1).lower()]}>", text)
 
 
-def record_owner_command(ids):
-    """Mark message ids as live owner commands for bin/discord-api.py's
-    --for check: {message_id: expiry epoch}, expired entries pruned, the
-    newest OWNER_COMMANDS_MAX kept. Written atomically; never raises."""
-    try:
-        with open(OWNER_COMMANDS_FILE) as f:
-            live = json.load(f)
-    except (OSError, ValueError):
-        live = {}
-    now = time.time()
-    if not isinstance(live, dict):
-        live = {}
-    live = {k: v for k, v in live.items()
-            if isinstance(v, (int, float)) and v > now}
-    for mid in ids:
-        live[mid] = now + OWNER_COMMAND_TTL_SECS
-    keep = sorted(live.items(), key=lambda kv: kv[1])[-OWNER_COMMANDS_MAX:]
-    try:
-        atomic_write(OWNER_COMMANDS_FILE, dict(keep))
-    except OSError as e:
-        print(f"Could not record owner command(s) {ids}: {e}", flush=True)
-
-
 def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
-                    guild_id=None, kind="mention"):
+                    guild_id=None):
     """Run one message (plus any burst fragments coalesced with it) through
     the quarantine/rate-limit/media pipeline and append a SINGLE item to
-    the queue. kind is "mention" or "name_drop" (ignored for DMs).
-    Returns True if queued."""
+    the queue. Returns True if queued."""
     fragments = [f for f in (fragments or []) if f["id"] != msg["id"]]
     if any(q["message_id"] == msg["id"] for q in queue):
         return False
@@ -2872,16 +2762,7 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         return False
     chan_hist = state.get("history", {}).get(msg["channel_id"], [])
     from_bot = bool(msg.get("author", {}).get("bot"))
-    bot_turns = bot_turns_for(state, msg, chan_hist)
-    if from_bot and MAX_BOT_TURNS is not None \
-            and bot_turns >= int(MAX_BOT_TURNS):
-        ledger_record_many(burst_ids, "skipped",
-                           f"bot turn cap ({MAX_BOT_TURNS})",
-                           channel_id=msg.get("channel_id"),
-                           author=author_name)
-        print(f"Bot turn cap: not answering {author_name} in {cname} "
-              f"({bot_turns} bot messages in a row).", flush=True)
-        return False
+    bot_turns = bot_run_length(chan_hist, msg)
     # The worker sees the whole burst as one message: fragments joined in
     # order under the trigger's text.
     parts = [msg.get("content", "")]
@@ -2975,10 +2856,7 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         "channel_id": msg["channel_id"],
         "channel_name": cname,
         "guild_id": guild_id,
-        "kind": "dm" if dm else kind,
-        # name_drop items are "maybe addressed to you": the worker
-        # decides from context, and its default verdict is silence.
-        "priority": "low" if not dm and kind == "name_drop" else "normal",
+        "kind": "dm" if dm else "mention",
         "author": msg["author"].get("username"),
         "author_id": author_id,
         "content": content,
@@ -3006,16 +2884,11 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         "queued_at": note_queued(state, msg["id"]),
     }
     item.update(extra)
-    if owner_command:
-        # The capability bin/discord-api.py checks (--for <message_id>);
-        # recorded before the worker can see the item.
-        record_owner_command([msg["id"]] + [f["id"] for f in fragments])
     queue.append(item)
     burst_note = f" (+{len(fragments)} fragment(s))" if fragments else ""
     print(f"Queued {item['kind']} from {msg['author'].get('username')} in "
           f"{cname}{burst_note}: {content[:80]}", flush=True)
-    # (Typing comes from the typing thread, via typing_refresh: never for
-    # a low-priority name-drop, which most likely gets no reply.)
+    # (Typing comes from the typing thread, via typing_refresh.)
     ledger_record_many(burst_ids, "queued",
                        channel_id=msg.get("channel_id"),
                        author=msg.get("author", {}).get("username"))
@@ -3257,9 +3130,8 @@ def process_outbox(state):
                      if isinstance(e, str) and e.strip()][:5]
         if item.get("silent"):
             # The worker decided no reply is warranted (a conversation
-            # that has run its course, a name-drop that wasn't an
-            # address). Recording it keeps the sweep from waking the
-            # worker again for the same message.
+            # that has run its course). Recording it keeps the sweep
+            # from waking the worker again for the same message.
             _settle(state, item, "skipped", "no reply (worker's call)",
                     replied=True)
             typing_clear(typing_keys)
@@ -3850,8 +3722,7 @@ def sweep_mentions(state, queue, channels):
                 if author.get("bot") \
                         or author.get("id") not in OWNER_USER_IDS:
                     continue
-            # Direct address only: name-drops are best-effort and most
-            # get no reply, so "no reply" is not evidence of a loss.
+            # Direct address only.
             elif trigger_kind(m) != "mention":
                 continue
             if predates_join(state, m, info.get("guild_id")):
@@ -3900,8 +3771,8 @@ def sweep_mentions(state, queue, channels):
                 print(f"Sweep recovered lost mention {mid} from "
                       f"{author.get('username')} in {cname}.", flush=True)
             elif not _ledger_terminal(mid):
-                # (A gate inside enqueue, e.g. quarantine or the bot
-                # turn cap, may already have recorded a terminal state.)
+                # (A gate inside enqueue, e.g. quarantine or the join
+                # watermark, may already have recorded a terminal state.)
                 ledger_record(mid, "enqueue_failed",
                               "sweep enqueue failed", cid,
                               author.get("username"),
@@ -4114,15 +3985,6 @@ def main():
     # Join watermarks for every guild, plus the owner summary for any
     # guild joined while the monitor was down.
     sync_guilds(state, GUILDS, CHANNELS)
-    if "name" in RESPOND_TO:
-        if CALL_NAMES:
-            print(f"Name trigger on for {', '.join(CALL_NAMES)} (active "
-                  f"servers only; low priority, worker decides).",
-                  flush=True)
-        else:
-            print("WARNING: respond_to includes \"name\" but "
-                  "behavior.call_names is empty; the name trigger is "
-                  "inert.", flush=True)
 
     # Seed last_seen for any monitored channel not tracked yet, so its
     # history is never mistaken for fresh mentions (first run, or a
