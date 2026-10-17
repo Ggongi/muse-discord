@@ -3,6 +3,31 @@
 Newest first. **Action needed** lists what an existing install must
 do after updating; UPDATING.md walks a Muse through it.
 
+## 2026-10-17: Less code: three features removed
+
+Removed:
+
+- The bare-name trigger (`name` in `behavior.respond_to`,
+  `behavior.call_names`, and `bin/check-call-name.py`). The bot answers
+  @mentions, replies to it, and DMs; its name alone in a sentence is
+  not a trigger. Observe mode stays, for welcomes.
+- The optional `behavior.max_bot_turns` cap. The worker ends bot
+  conversations by judgment, as before; `bot_turns` on queue items
+  still tells it how long a run has gone (up to 12).
+- The `--for` check in `bin/discord-api.py`. Owner commands still
+  reach the tool only through owner items; uploads still come only
+  from `generated/`, and ids are still validated. A leading `--for`
+  is accepted and ignored.
+
+**Action needed:**
+
+- None required. Old `call_names`, a `name` trigger, or a
+  `max_bot_turns` value in config.yaml print one warning at startup and
+  are ignored; delete them to silence it.
+- Optional: reinstall the worker prompt (name-drop and `--for` text
+  removed).
+- Optional: delete a leftover `owner_commands.json`.
+
 ## 2026-10-17: Faster replies, and fixes from a full code review
 
 Faster and smoother:

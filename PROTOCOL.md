@@ -59,8 +59,7 @@ fields:
 | `channel_id`               | Channel to reply in (resolved welcome channel for welcomes)                                                                                                             |
 | `channel_name`             | Guild-qualified display, e.g. `"My Server #general"`, or `"DM with <name>"`                                                                                             |
 | `guild_id`                 | Guild ID, or null for DMs                                                                                                                                               |
-| `kind`                     | `"mention"` (direct address: @mention or reply to the bot), `"name_drop"` (opt-in bare call-name hit), `"dm"`, or `"welcome"`                                           |
-| `priority`                 | `"low"` on `name_drop` items (maybe addressed to the bot; the default verdict is silence), else `"normal"`. Welcome items omit it                                       |
+| `kind`                     | `"mention"` (direct address: @mention or reply to the bot), `"dm"`, or `"welcome"`                                                                                      |
 | `author`, `author_id`      | Triggering user (the new member, for welcomes)                                                                                                                          |
 | `content`                  | Message text; for bursts, all fragments joined oldest-first with newlines                                                                                               |
 | `timestamp`                | ISO timestamp of the trigger                                                                                                                                            |
@@ -169,9 +168,7 @@ updated, recoveries?}}}`. Every mention/DM that reaches a terminal
 state is recorded: `queued` (in flight), `replied`, `quarantined`, or
 `skipped` with a reason (`"no send permission in channel"`,
 `"403 missing access"`, `"recovery cap reached"`, `"enqueue failed
-3x"`, `"duplicate suppressed"`, `"predates bot join"`, ...).
-Name-drop items are recorded as `queued` but
-the sweep never requeues them: most get no reply by design. Every
+3x"`, `"duplicate suppressed"`, `"predates bot join"`, ...). Every
 message of a burst is recorded with its trigger's status, and an
 outcome under any of them (a reply under the last fragment, a
 `silent` item naming any fragment) settles them all. The
@@ -214,21 +211,17 @@ from Discord at startup, and the known-server set re-seeds silently.
 
 Enforced by the monitor before anything reaches the queue:
 
-- **Strict triggers.** Only direct address queues work by default: a
-  platform @mention, a reply to the bot, or a DM. Other bots count as
-  direct address too (`behavior.bots: direct`), never for name-drops
-  or welcomes. Bare-name matching
-  (`name` in `behavior.respond_to`, with `behavior.call_names`) is
-  opt-in and produces low-priority `name_drop` items the worker
-  decides on.
+- **Strict triggers.** Only direct address queues work: a platform
+  @mention, a reply to the bot, or a DM. Other bots count as direct
+  address too (`behavior.bots: direct`), never for welcomes.
 - **Join watermark.** A message older than the bot's join time in its
   server is never a trigger, on any path (poll, gateway, restart
   catch-up, late channel discovery, sweep). It can still appear in a
   later trigger's `history`.
 - **Observe mode.** Servers not listed in `behavior.active_guild_ids`
-  get no ambient behavior: no name-drop items, no welcomes. Direct
-  address works everywhere. On joining a new server the bot DMs the
-  owners its name, ID, visible channels, mode, and how to activate it.
+  get no ambient behavior: no welcomes. Direct address works
+  everywhere. On joining a new server the bot DMs the owners its
+  name, ID, visible channels, mode, and how to activate it.
 
 ## Worker obligations (summary)
 
@@ -249,11 +242,7 @@ Enforced by the monitor before anything reaches the queue:
    you actually started it in this run.
 6. One reply per queue item; reply under the LAST burst fragment when
    `burst_fragments` is present.
-7. Treat `name_drop` items as "maybe addressed to you": the default is
-   a `silent` outbox item. Reply only when the context makes it clear
-   the author is talking to the bot, not about something that shares
-   its name.
-8. Address people and agents with `<@id>` from `participants` or by
+7. Address people and agents with `<@id>` from `participants` or by
    replying to their message; a bare "@Name" notifies nobody (the
    monitor converts names it recognizes, as a safety net). End
    conversations that have run their course: silence, a reaction, or
