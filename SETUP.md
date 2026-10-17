@@ -110,9 +110,7 @@ Edit `config.yaml`:
 - Review **engine** tuning; defaults are sane.
 - **behavior.bots**: `direct` (default) lets other bots, such as
   other people's Muses, talk to this one by @mention or reply. Set
-  `off` to ignore bots entirely. `behavior.max_bot_turns` (default
-  `null`, no cap) optionally stops bot-to-bot runs after that many
-  bot messages in a row with no human.
+  `off` to ignore bots entirely.
 - **presence**: keeps the bot shown as online. By default there is no
   status line under its name; set `status_text` (and `status_kind`)
   for one, or `enabled: false` to skip the presence process.

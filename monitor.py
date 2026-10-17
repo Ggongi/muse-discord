@@ -93,7 +93,7 @@ DEFAULT_CONFIG = {
     "owners": {"user_ids": []},
     "behavior": {"respond_to": ["mention", "reply_to_bot"],
                  "call_names": [], "active_guild_ids": [],
-                 "bots": "direct", "max_bot_turns": None,
+                 "bots": "direct",
                  "dm_policy": "owner_only", "coalesce_seconds": 5,
                  "max_reply_chars": 1800},
     "safety": {"injection_quarantine": True, "daily_reply_cap": None,
@@ -186,11 +186,9 @@ CALL_NAME_RE = re.compile(
 # an answer, like a human would (never name-drops or welcomes); "off" =
 # bots are ignored entirely.
 BOTS_POLICY = str(_BEHAVIOR.get("bots") or "direct").lower()
-# Optional hard stop: after this many consecutive bot messages in a
-# channel with no human in between, stop answering bots there until a
-# human speaks. None = no cap: the worker ends conversations by
-# judgment, the way a person would.
-MAX_BOT_TURNS = _BEHAVIOR.get("max_bot_turns")
+if _BEHAVIOR.get("max_bot_turns") is not None:
+    print("WARNING: behavior.max_bot_turns was removed and is ignored; "
+          "the worker ends bot conversations by judgment.", flush=True)
 DM_POLICY = str(_BEHAVIOR.get("dm_policy") or "owner_only").lower()
 # 0 = no coalescing: every trigger is queued on the next tick.
 COALESCE_SECS = _cfg_num(_BEHAVIOR, "coalesce_seconds", 5, float,
@@ -912,6 +910,7 @@ def load_state():
     # Leftovers from the removed burst breaker.
     for key in ("breaker", "owner_triggers", "trigger_texts"):
         state.pop(key, None)
+    state.pop("bot_runs", None)  # leftover from the removed bot turn cap
     return state
 
 
@@ -1541,8 +1540,8 @@ def flush_pending(state, queue, force=False):
                 del pending[key]
             elif trigger["id"] in _quarantine_ids() \
                     or _ledger_terminal(trigger["id"]):
-                # quarantine() or an enqueue gate (join watermark, bot
-                # turn cap) already ledgered it.
+                # quarantine() or an enqueue gate (join watermark)
+                # already ledgered it.
                 del pending[key]
             else:
                 # No silent drops: retry a few times, then record the
@@ -2464,17 +2463,6 @@ def record_history(state, channel_id, messages):
     excludes it when attaching history to a queue item."""
     hist = state.setdefault("history", {}).setdefault(channel_id, [])
     seen_ids = {h["id"] for h in hist}
-    runs = state.setdefault("bot_runs", {})
-    if channel_id not in runs:
-        # Start the counter from whatever run the history already shows.
-        n = 0
-        for h in reversed(hist):
-            if not h.get("bot"):
-                break
-            n += 1
-        runs[channel_id] = {"n": n, "ids": {},
-                            "last": max((h["id"] for h in hist), key=int,
-                                        default="0")}
     for m in sorted(messages, key=lambda x: int(x["id"])):
         if m["id"] in seen_ids:
             continue
@@ -2499,19 +2487,6 @@ def record_history(state, channel_id, messages):
             entry["display"] = display
         hist.append(entry)
         seen_ids.add(m["id"])
-        # Consecutive bot messages since a human last spoke, counted here
-        # rather than from the 12-entry window so behavior.max_bot_turns
-        # above 12 can trigger. In id order only: a message older than
-        # the newest counted one (gap repair, a re-read) was counted or
-        # is history.
-        run = runs[channel_id]
-        if int(m["id"]) > int(run["last"]):
-            run["n"] = run["n"] + 1 if entry["bot"] else 0
-            run["last"] = m["id"]
-            if entry["bot"]:
-                run["ids"][m["id"]] = run["n"]
-                for mid in list(run["ids"])[:-30]:
-                    del run["ids"][mid]
     # Sorted: the poll re-reads messages the gateway already recorded,
     # and an old one re-added must not land after newer ones.
     hist.sort(key=lambda h: int(h["id"]))
@@ -2761,18 +2736,6 @@ def bot_run_length(history, msg):
     return run
 
 
-def bot_turns_for(state, msg, history):
-    """Consecutive bot messages ending at msg since a human last spoke,
-    from the per-channel counter record_history keeps (unbounded by the
-    history window). Falls back to bot_run_length for a message the
-    counter did not see in order. 0 when msg is from a human."""
-    if not (msg.get("author", {}) or {}).get("bot"):
-        return 0
-    run = state.get("bot_runs", {}).get(msg["channel_id"]) or {}
-    n = (run.get("ids") or {}).get(msg["id"])
-    return n if n is not None else bot_run_length(history, msg)
-
-
 def conversation_participants(history, msg, reply_ctx):
     """Everyone visible in the conversation, as [{name, display?, id, bot,
     you?}], so the worker can address them with <@id>: a bare "@Name" in
@@ -2872,16 +2835,7 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         return False
     chan_hist = state.get("history", {}).get(msg["channel_id"], [])
     from_bot = bool(msg.get("author", {}).get("bot"))
-    bot_turns = bot_turns_for(state, msg, chan_hist)
-    if from_bot and MAX_BOT_TURNS is not None \
-            and bot_turns >= int(MAX_BOT_TURNS):
-        ledger_record_many(burst_ids, "skipped",
-                           f"bot turn cap ({MAX_BOT_TURNS})",
-                           channel_id=msg.get("channel_id"),
-                           author=author_name)
-        print(f"Bot turn cap: not answering {author_name} in {cname} "
-              f"({bot_turns} bot messages in a row).", flush=True)
-        return False
+    bot_turns = bot_run_length(chan_hist, msg)
     # The worker sees the whole burst as one message: fragments joined in
     # order under the trigger's text.
     parts = [msg.get("content", "")]
@@ -3900,8 +3854,8 @@ def sweep_mentions(state, queue, channels):
                 print(f"Sweep recovered lost mention {mid} from "
                       f"{author.get('username')} in {cname}.", flush=True)
             elif not _ledger_terminal(mid):
-                # (A gate inside enqueue, e.g. quarantine or the bot
-                # turn cap, may already have recorded a terminal state.)
+                # (A gate inside enqueue, e.g. quarantine or the join
+                # watermark, may already have recorded a terminal state.)
                 ledger_record(mid, "enqueue_failed",
                               "sweep enqueue failed", cid,
                               author.get("username"),
