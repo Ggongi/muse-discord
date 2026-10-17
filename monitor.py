@@ -118,6 +118,35 @@ def load_config():
 
 CFG = load_config()
 
+
+def _cfg_num(section, key, default, cast, name, minimum=None,
+             maximum=None):
+    """Resolve one numeric setting. Only a missing or null value means
+    "use the default": an explicit 0 is honored wherever 0 is a real
+    setting (the old `value or default` silently turned it back into the
+    default). Where a value would busy-loop, divide by zero, or blank
+    every reply, it is clamped into [minimum, maximum] with a warning
+    printed once, here at import, instead of being silently replaced."""
+    raw = section.get(key)
+    if raw is None:
+        return cast(default)
+    try:
+        val = cast(raw)
+    except (TypeError, ValueError):
+        print(f"WARNING: config {name}={raw!r} is not a number; using "
+              f"the default {default}.", flush=True)
+        return cast(default)
+    if minimum is not None and val < minimum:
+        print(f"WARNING: config {name}={raw!r} is below the minimum "
+              f"{minimum}; using {minimum}.", flush=True)
+        return cast(minimum)
+    if maximum is not None and val > maximum:
+        print(f"WARNING: config {name}={raw!r} is above the maximum "
+              f"{maximum}; using {maximum}.", flush=True)
+        return cast(maximum)
+    return val
+
+
 # --- Resolved settings (read once at import) ---
 BOT_CFG = CFG.get("bot") or {}
 OWNER_USER_IDS = {str(u) for u in
@@ -142,28 +171,51 @@ BOTS_POLICY = str(_BEHAVIOR.get("bots") or "direct").lower()
 # judgment, the way a person would.
 MAX_BOT_TURNS = _BEHAVIOR.get("max_bot_turns")
 DM_POLICY = str(_BEHAVIOR.get("dm_policy") or "owner_only").lower()
-COALESCE_SECS = float(_BEHAVIOR.get("coalesce_seconds") or 5)
+# 0 = no coalescing: every trigger is queued on the next tick.
+COALESCE_SECS = _cfg_num(_BEHAVIOR, "coalesce_seconds", 5, float,
+                         "behavior.coalesce_seconds", minimum=0)
 # Bots running this package send long replies as 2-4 parts with a 2-4s
 # typing beat between them, so a bot's burst gets a longer window to
 # arrive whole before its trigger is queued.
 BOT_COALESCE_SECS = max(COALESCE_SECS, 15.0)
-MAX_REPLY_CHARS = int(_BEHAVIOR.get("max_reply_chars") or 1800)
+# Every part is cut to this length too, so it may not exceed Discord's
+# 2000-character message limit; 0 would blank every reply.
+MAX_REPLY_CHARS = _cfg_num(_BEHAVIOR, "max_reply_chars", 1800, int,
+                           "behavior.max_reply_chars", minimum=1,
+                           maximum=2000)
 _SAFETY = CFG.get("safety") or {}
 INJECTION_QUARANTINE = bool(_SAFETY.get("injection_quarantine", True))
 DAILY_REPLY_CAP = _SAFETY.get("daily_reply_cap")        # None = off
 PER_USER_DAILY_CAP = _SAFETY.get("per_user_daily_cap")  # None = off
 _ENGINE = CFG.get("engine") or {}
-POLL_INTERVAL = int(_ENGINE.get("rest_poll_seconds") or 30)
+# Each full poll is a request per channel: 0 would busy-loop the main
+# loop and hammer Discord's per-IP rate limit.
+POLL_INTERVAL = _cfg_num(_ENGINE, "rest_poll_seconds", 30, int,
+                         "engine.rest_poll_seconds", minimum=10)
 _SWEEP_CFG = _ENGINE.get("sweep") or {}
-SWEEP_EVERY_CYCLES = int(_SWEEP_CFG.get("every_cycles") or 6)
-SWEEP_GRACE_SECS = float(_SWEEP_CFG.get("grace_seconds") or 240)
-SWEEP_MAX_AGE_SECS = float(_SWEEP_CFG.get("max_age_hours") or 6) * 3600
-SWEEP_MAX_RECOVERIES = int(_SWEEP_CFG.get("max_recoveries") or 2)
+# Used as a modulus: 0 would abort every poll cycle midway.
+SWEEP_EVERY_CYCLES = _cfg_num(_SWEEP_CFG, "every_cycles", 6, int,
+                              "engine.sweep.every_cycles", minimum=1)
+SWEEP_GRACE_SECS = _cfg_num(_SWEEP_CFG, "grace_seconds", 240, float,
+                            "engine.sweep.grace_seconds", minimum=0)
+# 0 = no mention is young enough to sweep: recovery is off, by choice.
+SWEEP_MAX_AGE_SECS = _cfg_num(_SWEEP_CFG, "max_age_hours", 6, float,
+                              "engine.sweep.max_age_hours",
+                              minimum=0) * 3600
+# 0 = never requeue; a lost mention is ledgered as skipped instead.
+SWEEP_MAX_RECOVERIES = _cfg_num(_SWEEP_CFG, "max_recoveries", 2, int,
+                                "engine.sweep.max_recoveries", minimum=0)
 _BACKOFF_CFG = _ENGINE.get("backoff") or {}
-BACKOFF_INITIAL_SECS = float(_BACKOFF_CFG.get("initial_seconds") or 60)
-BACKOFF_MAX_SECS = float(_BACKOFF_CFG.get("max_seconds") or 900)
+# A zero backoff would answer a 429 with more requests at once.
+BACKOFF_INITIAL_SECS = _cfg_num(_BACKOFF_CFG, "initial_seconds", 60, float,
+                                "engine.backoff.initial_seconds",
+                                minimum=1)
+BACKOFF_MAX_SECS = _cfg_num(_BACKOFF_CFG, "max_seconds", 900, float,
+                            "engine.backoff.max_seconds", minimum=1)
+# Discovery probes every channel; 0 would re-run it on every poll.
 CHANNEL_REFRESH_CYCLES = max(
-    1, round(float(_ENGINE.get("discovery_refresh_minutes") or 30) * 60
+    1, round(_cfg_num(_ENGINE, "discovery_refresh_minutes", 30, float,
+                      "engine.discovery_refresh_minutes", minimum=1) * 60
              / POLL_INTERVAL))
 
 
@@ -2807,6 +2859,35 @@ class PluginAPI:
         return param_for(self.params, key, guild_id, guild_name)
 
 
+def _plugin_param_defaults(name):
+    """The param defaults a plugin declares in its plugin.yaml, shaped
+    as a config block so the user's block can be merged over them: a
+    param declared with per_guild keeps the {default, per_guild} shape
+    param_for resolves, any other param becomes its plain default. This
+    is what makes a documented default (welcome's daily_cap: 10) real
+    when the user's config never repeats it."""
+    path = os.path.join(PLUGINS_DIR, name, "plugin.yaml")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path) as f:
+            meta = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError) as e:
+        print(f"Plugin {name}: plugin.yaml unreadable ({e}); using the "
+              f"config block alone.", flush=True)
+        return {}
+    out = {}
+    for key, spec in (meta.get("params") or {}).items():
+        if not isinstance(spec, dict) or "default" not in spec:
+            continue
+        if "per_guild" in spec:
+            out[key] = {"default": copy.deepcopy(spec["default"]),
+                        "per_guild": copy.deepcopy(spec["per_guild"] or {})}
+        else:
+            out[key] = copy.deepcopy(spec["default"])
+    return out
+
+
 def load_plugins():
     """Import every enabled plugin under plugins/ and collect its hooks."""
     global GEN_PLUGIN_ENABLED
@@ -2820,6 +2901,9 @@ def load_plugins():
         pcfg = plugins_cfg.get(name) or {}
         if not pcfg.get("enabled"):
             continue
+        # User config wins key by key (an explicit null, e.g. daily_cap:
+        # null = no cap, still overrides the declared default).
+        pcfg = _deep_merge(_plugin_param_defaults(name), pcfg)
         try:
             spec = importlib.util.spec_from_file_location(
                 f"muse_discord_plugin_{name}", pfile)

@@ -220,7 +220,9 @@ pipeline.
 
 ### Plugin params: global + per_guild
 
-Params come from the plugin's block under `plugins:` in config.yaml.
+Params come from the plugin's block under `plugins:` in config.yaml,
+merged over the param defaults its `plugin.yaml` declares (the config
+wins key by key; an explicit `null` overrides a default too).
 Resolution for a param `key` for one guild (implemented by the core's
 `param_for`, used via `api.param`):
 

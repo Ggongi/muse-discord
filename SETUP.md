@@ -31,10 +31,12 @@ write it anywhere except the token file, and never commit config.yaml.
    open; the token is placed in step 3. Do NOT paste it into this
    repo, a chat log, or any file other than the token file.
 3. Still under **Bot**, scroll to **Privileged Gateway Intents** and
-   enable BOTH:
-   - **Server Members Intent** (member resolution and joins)
+   enable:
    - **Message Content Intent** (REQUIRED: without it Discord closes
      the gateway with code 4014 and the bot cannot read message text)
+   - **Server Members Intent** is NOT needed; leave it off. The
+     monitor never requests it: joins (for the welcome plugin) arrive
+     as Discord's join system messages in the server's system channel.
 4. (Optional) Under **Bot**, set the bot's username/avatar as desired.
    Under **General Information**, note the **Application ID**; it is
    the `client_id` for the invite URL in step 2.
@@ -44,12 +46,16 @@ write it anywhere except the token file, and never commit config.yaml.
 Build the invite URL (replace `<APP_ID>`):
 
 ```
-https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=274878024768
+https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=2252074691710016
 ```
 
 The permission integer grants: View Channel, Send Messages, Send
 Messages in Threads, Read Message History, Attach Files, Embed Links,
-Add Reactions. No administrator, no moderation permissions.
+Add Reactions, Pin Messages (for the owner's `pin`/`unpin` commands;
+since February 2026 Discord requires it to pin, and Manage Messages
+no longer suffices). No administrator, no moderation permissions.
+A bot invited with an older URL lacks Pin Messages: in Server
+Settings, Roles, enable **Pin Messages** on the bot's role.
 
 Open the URL, pick a server, authorize. The bot appears in the member
 list (offline until step 8). Per-channel overrides still apply: the
@@ -97,8 +103,9 @@ Edit `config.yaml`:
   **[owner]** To find a server ID: with Developer Mode on, right-click
   the server icon and choose **Copy Server ID**.
 - **safety**: reply caps are off by default. If the owner wants to
-  bound token spend, set `daily_reply_cap` (all replies per day)
-  and/or `per_user_daily_cap`; their own messages are always exempt.
+  bound token spend, set `daily_reply_cap` (all items queued for the
+  worker per day, answered or not) and/or `per_user_daily_cap`; their
+  own messages are always exempt.
 - Review **engine** tuning; defaults are sane.
 - **behavior.bots**: `direct` (default) lets other bots, such as
   other people's Muses, talk to this one by @mention or reply. Set
