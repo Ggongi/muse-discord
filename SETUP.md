@@ -301,7 +301,8 @@ see working before calling the install done.
    a welcome in the resolved channel, drafted from the prompt param.
 9. **Generation** (if enabled): owner asks the bot for an image.
    Expect a reply with the image attached, and the file visible in
-   `generated/`. A non-allowed user asking gets a brief decline.
+   `generated/<message id>/`. A non-allowed user asking gets a brief
+   decline.
 10. **Strict triggers**: someone uses the bot's name in a sentence
     without @mentioning it ("my <call name> is cute"). Expect no
     reply and no typing indicator. With the name trigger on (an

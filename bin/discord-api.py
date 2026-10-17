@@ -7,6 +7,20 @@ and ONLY for a queue item the monitor stamped with owner_command=true
 verified user IDs). It is how "react to your post in #showcase" actually
 does something instead of getting a chatter reply.
 
+That rule is enforced here, not only in the worker's prompt: every call
+must say which owner command it serves, as `--for <message_id>` before
+the subcommand, and the tool refuses unless the monitor recorded that id
+as a live owner command (owner_commands.json, written by the monitor
+when it queues an owner_command item, valid for an hour). A worker
+talked into using the tool by a stranger's message has no id to cite.
+Reads are gated too: the bot can read channels the conversation's
+audience cannot, and what the tool prints can end up in a public reply.
+
+Every id argument must be a plain Discord id (ids are interpolated into
+API paths, so "1/../../guilds/2/bans/3" must never get through), files
+can only be uploaded from the package's generated/ dir, and messages
+never ping roles, @everyone or @here.
+
 Subcommands are a deliberate allowlist. Moderation (ban/kick/timeout),
 server settings, webhooks, roles, and anything else are NOT implemented:
 if the owner asks for something outside this list, the worker says so
@@ -20,15 +34,59 @@ MUSE_DISCORD_CONFIG) bot.token_env env var first, then bot.token_file
 import json
 import mimetypes
 import os
+import re
 import sys
+import time
 import urllib.parse
 import urllib.request
 import urllib.error
 import uuid
 
 PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GENERATED_DIR = os.path.join(PACKAGE_DIR, "generated")
+OWNER_COMMANDS_FILE = os.path.join(PACKAGE_DIR, "owner_commands.json")
 API = "https://discord.com/api/v10"
 TIMEOUT = 30
+# Messages may ping users (<@id>), never roles or @everyone/@here.
+ALLOWED_MENTIONS = {"parse": ["users"]}
+
+
+def snowflake(value):
+    """Return value if it is a plain Discord id, else refuse."""
+    if not re.fullmatch(r"[0-9]{17,20}", value or ""):
+        raise SystemExit(f"Refusing: {value!r} is not a Discord id.")
+    return value
+
+
+def generated_file(path):
+    """Resolve an upload path, refusing anything that is not a regular
+    file inside the package's generated/ dir after resolving symlinks
+    (the same rule as monitor.py's _validate_gen_paths). Keeps the tool
+    from ever posting the token file, SSH keys, or anything else."""
+    root = os.path.realpath(GENERATED_DIR)
+    rp = os.path.realpath(os.path.expanduser(path))
+    if not rp.startswith(root + os.sep) or not os.path.isfile(rp):
+        raise SystemExit(f"Refusing to upload {path!r}: only files inside "
+                         f"{GENERATED_DIR}/ can be attached.")
+    return rp
+
+
+def owner_command_error(message_id):
+    """None when message_id is a live owner command the monitor recorded,
+    else the reason to refuse."""
+    if not re.fullmatch(r"[0-9]{17,20}", message_id or ""):
+        return f"--for needs a Discord message id, not {message_id!r}."
+    try:
+        with open(OWNER_COMMANDS_FILE) as f:
+            live = json.load(f)
+        expires = live.get(message_id) if isinstance(live, dict) else None
+    except (OSError, ValueError):
+        expires = None
+    if not isinstance(expires, (int, float)) or expires <= time.time():
+        return (f"Refusing: {message_id} is not a live owner command. Use "
+                f"the message_id of a queue item stamped "
+                f"owner_command: true, within an hour of it.")
+    return None
 
 
 def _bot_cfg():
@@ -129,12 +187,12 @@ def api_multipart(path, payload, file_path):
 
 def cmd_resolve_channel(args):
     """resolve-channel <guild_id> <name> -- find a guild channel by name ("#" optional)."""
-    guild_id, name = args[0], args[1].lstrip("#").lower()
+    guild_id, name = snowflake(args[0]), args[1].lstrip("#").lower()
     channels = api("GET", f"/guilds/{guild_id}/channels")
     hits = [c for c in channels if c.get("name", "").lower() == name]
     if not hits:
         names = sorted(c.get("name", "?") for c in channels)
-        raise SystemExit(f"No channel named '{args[0]}'. Guild channels: "
+        raise SystemExit(f"No channel named '{args[1]}'. Guild channels: "
                          + ", ".join("#" + n for n in names))
     for c in hits:
         print(f"{c['id']}  #{c['name']}  type={c['type']}")
@@ -142,7 +200,7 @@ def cmd_resolve_channel(args):
 
 def cmd_read(args):
     """read <channel_id> [n] -- recent messages, newest last."""
-    cid = args[0]
+    cid = snowflake(args[0])
     n = int(args[1]) if len(args) > 1 else 10
     msgs = api("GET", f"/channels/{cid}/messages?limit={min(n, 50)}")
     for m in reversed(msgs):
@@ -153,7 +211,7 @@ def cmd_read(args):
 
 def cmd_list_threads(args):
     """list-threads <guild_id> <forum_channel_id> -- active threads, with owner ids."""
-    guild_id, forum_id = args[0], args[1]
+    guild_id, forum_id = snowflake(args[0]), snowflake(args[1])
     data = api("GET", f"/guilds/{guild_id}/threads/active")
     mine = [t for t in data.get("threads", [])
             if t.get("parent_id") == forum_id]
@@ -167,8 +225,9 @@ def cmd_list_threads(args):
 
 def cmd_post(args):
     """post <channel_id> <text> -- send a message as the bot."""
-    cid, text = args[0], args[1]
-    m = api("POST", f"/channels/{cid}/messages", {"content": text})
+    cid, text = snowflake(args[0]), args[1]
+    m = api("POST", f"/channels/{cid}/messages",
+            {"content": text, "allowed_mentions": ALLOWED_MENTIONS})
     print(f"posted message {m['id']}")
 
 
@@ -176,14 +235,17 @@ def cmd_thread(args):
     """thread <forum_channel_id> <title> <text> [file] -- create a forum post.
 
     With the optional file argument, the image/file is attached to the
-    starter post itself (multipart upload, no external link).
+    starter post itself (multipart upload, no external link). Only files
+    inside the package's generated/ dir can be attached.
     """
-    forum_id, title, text = args[0], args[1], args[2]
+    forum_id, title, text = snowflake(args[0]), args[1], args[2]
+    upload = generated_file(args[3]) if len(args) > 3 else None
     payload = {"name": title,
-               "message": {"content": text},
+               "message": {"content": text,
+                           "allowed_mentions": ALLOWED_MENTIONS},
                "auto_archive_duration": 1440}
-    if len(args) > 3:
-        t = api_multipart(f"/channels/{forum_id}/threads", payload, args[3])
+    if upload:
+        t = api_multipart(f"/channels/{forum_id}/threads", payload, upload)
     else:
         t = api("POST", f"/channels/{forum_id}/threads", payload)
     print(f"created thread {t['id']} '{t.get('name')}'")
@@ -197,37 +259,40 @@ def cmd_thread(args):
 
 def cmd_react(args):
     """react <channel_id> <message_id> <emoji> -- add a reaction as the bot."""
-    cid, mid, emoji = args[0], args[1], args[2]
-    enc = urllib.parse.quote(emoji)
+    cid, mid, emoji = snowflake(args[0]), snowflake(args[1]), args[2]
+    enc = urllib.parse.quote(emoji, safe="")  # "/" stays in the segment
     api("PUT", f"/channels/{cid}/messages/{mid}/reactions/{enc}/@me")
     print(f"reacted {emoji} on {mid}")
 
 
 def cmd_pin(args):
     """pin <channel_id> <message_id>"""
-    api("PUT", f"/channels/{args[0]}/pins/{args[1]}")
-    print(f"pinned {args[1]}")
+    cid, mid = snowflake(args[0]), snowflake(args[1])
+    api("PUT", f"/channels/{cid}/messages/pins/{mid}")
+    print(f"pinned {mid}")
 
 
 def cmd_unpin(args):
     """unpin <channel_id> <message_id>"""
-    api("DELETE", f"/channels/{args[0]}/pins/{args[1]}")
-    print(f"unpinned {args[1]}")
+    cid, mid = snowflake(args[0]), snowflake(args[1])
+    api("DELETE", f"/channels/{cid}/messages/pins/{mid}")
+    print(f"unpinned {mid}")
 
 
 def cmd_edit(args):
     """edit <channel_id> <message_id> <text> -- edit ONLY the bot's message."""
-    cid, mid, text = args[0], args[1], args[2]
+    cid, mid, text = snowflake(args[0]), snowflake(args[1]), args[2]
     m = api("GET", f"/channels/{cid}/messages/{mid}")
     if (m.get("author") or {}).get("id") != bot_id():
         raise SystemExit("Refusing: that message was not sent by the bot.")
-    api("PATCH", f"/channels/{cid}/messages/{mid}", {"content": text})
+    api("PATCH", f"/channels/{cid}/messages/{mid}",
+        {"content": text, "allowed_mentions": ALLOWED_MENTIONS})
     print(f"edited {mid}")
 
 
 def cmd_delete_own(args):
     """delete-own <channel_id> <message_id> -- delete ONLY the bot's message."""
-    cid, mid = args[0], args[1]
+    cid, mid = snowflake(args[0]), snowflake(args[1])
     m = api("GET", f"/channels/{cid}/messages/{mid}")
     if (m.get("author") or {}).get("id") != bot_id():
         raise SystemExit("Refusing: that message was not sent by the bot.")
@@ -250,15 +315,29 @@ COMMANDS = {
 
 
 def main(argv):
-    if len(argv) < 2 or argv[1] not in COMMANDS:
-        print("usage: discord-api.py <" + "|".join(sorted(COMMANDS)) + "> ...",
-              file=sys.stderr)
+    # --for <message_id> must come first, so it can never be mistaken
+    # for (or eat) a text argument.
+    for_id = None
+    args = argv[1:]
+    if len(args) >= 2 and args[0] == "--for":
+        for_id, args = args[1], args[2:]
+    if not args or args[0] not in COMMANDS:
+        print("usage: discord-api.py --for <owner command message_id> <"
+              + "|".join(sorted(COMMANDS)) + "> ...", file=sys.stderr)
         return 2
-    fn, min_args = COMMANDS[argv[1]]
-    if len(argv) - 2 < min_args:
+    fn, min_args = COMMANDS[args[0]]
+    if len(args) - 1 < min_args:
         print(fn.__doc__.strip(), file=sys.stderr)
         return 2
-    fn(argv[2:])
+    if for_id is None:
+        print("Refusing: every call needs --for <message_id> (the owner "
+              "command it serves) before the subcommand.", file=sys.stderr)
+        return 2
+    err = owner_command_error(for_id)
+    if err:
+        print(err, file=sys.stderr)
+        return 3
+    fn(args[1:])
     return 0
 
 
