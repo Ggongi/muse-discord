@@ -115,8 +115,8 @@ updated, recoveries?}}}`. Every mention/DM that reaches a terminal
 state is recorded: `queued` (in flight), `replied`, `quarantined`, or
 `skipped` with a reason (`"no send permission in channel"`,
 `"403 missing access"`, `"recovery cap reached"`, `"enqueue failed
-3x"`, `"duplicate suppressed"`, `"predates bot join"`, `"channel quiet
-(burst breaker)"`, ...). Name-drop items are recorded as `queued` but
+3x"`, `"duplicate suppressed"`, `"predates bot join"`, `"bot turn cap
+(N)"`, ...). Name-drop items are recorded as `queued` but
 the sweep never requeues them: most get no reply by design. The reconciliation sweep diffs
 recent channel history against this ledger (plus queue, outbox,
 quarantine, and replied records) and requeues anything unaccounted
@@ -137,9 +137,7 @@ approvals and sent-file records, plugin state under `plugins`, and the
 server-safety records below: `guild_joined` (per-guild join watermark,
 epoch seconds), `guild_first_seen` (fallback watermark when Discord
 has not reported the join time), `known_guilds` and `join_notices`
-(new-server detection and owed owner DMs), `breaker` (per-channel
-recent sends and `quiet_until`), `owner_triggers` and
-`trigger_texts` (bounded, for the breaker), and `reply_aliases`
+(new-server detection and owed owner DMs), and `reply_aliases`
 (burst fragment id -> trigger id, so a reply under the last fragment
 settles the trigger in the ledger).
 Safe to delete while the monitor is stopped: the cost is re-seeding
@@ -167,11 +165,6 @@ Enforced by the monitor before anything reaches the queue:
   get no ambient behavior: no name-drop items, no welcomes. Direct
   address works everywhere. On joining a new server the bot DMs the
   owners its name, ID, visible channels, mode, and how to activate it.
-- **Burst breaker.** More than `safety.burst_breaker.max_replies`
-  replies in `window_minutes` in one server channel trips a cooldown:
-  queued triggers and drafted replies for that channel are dropped
-  (ledgered as skipped) until it ends, and the owners get a DM with
-  the triggering messages. Replies to owners are exempt.
 
 ## Worker obligations (summary)
 

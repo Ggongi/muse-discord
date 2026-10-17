@@ -96,10 +96,10 @@ Edit `config.yaml`:
   Leave it empty unless step 5 or step 6 turns on an ambient behavior.
   **[owner]** To find a server ID: with Developer Mode on, right-click
   the server icon and choose **Copy Server ID**.
-- **safety.burst_breaker**: the defaults (more than 5 replies in 10
-  minutes in one channel means 30 quiet minutes there plus a DM to
-  you) suit most servers.
-- Review **safety** caps and **engine** tuning; defaults are sane.
+- **safety**: reply caps are off by default. If the owner wants to
+  bound token spend, set `daily_reply_cap` (all replies per day)
+  and/or `per_user_daily_cap`; their own messages are always exempt.
+- Review **engine** tuning; defaults are sane.
 - **behavior.bots**: `direct` (default) lets other bots, such as
   other people's Muses, talk to this one by @mention or reply. Set
   `off` to ignore bots entirely. `behavior.max_bot_turns` (default
@@ -310,13 +310,6 @@ see working before calling the install done.
 
 ## Troubleshooting
 
-- **The bot stopped replying in one channel and DMed you a
-  "Heads-up"**: the burst breaker tripped. It lifts on its own after
-  `safety.burst_breaker.cooldown_minutes`, and your own messages are
-  still answered meanwhile. Look at the quoted triggers: a trigger
-  misconfiguration or a pile-on is usually the cause. To lift it
-  early, stop the monitor, delete that channel's entry under
-  `breaker` in `state.json`, and start it again.
 - **No welcomes or name triggers in a server**: the server is in
   observe mode. Add its ID to `behavior.active_guild_ids`.
 

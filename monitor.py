@@ -73,10 +73,8 @@ DEFAULT_CONFIG = {
                  "bots": "direct", "max_bot_turns": None,
                  "dm_policy": "owner_only", "coalesce_seconds": 5,
                  "max_reply_chars": 1800},
-    "safety": {"injection_quarantine": True, "daily_reply_cap": 30,
-               "per_user_daily_cap": None,
-               "burst_breaker": {"max_replies": 5, "window_minutes": 10,
-                                 "cooldown_minutes": 30}},
+    "safety": {"injection_quarantine": True, "daily_reply_cap": None,
+               "per_user_daily_cap": None},
     "engine": {"rest_poll_seconds": 30, "discovery_refresh_minutes": 30,
                "sweep": {"every_cycles": 6, "grace_seconds": 240,
                          "max_age_hours": 6, "max_recoveries": 2},
@@ -138,8 +136,8 @@ CALL_NAME_RE = re.compile(
 BOTS_POLICY = str(_BEHAVIOR.get("bots") or "direct").lower()
 # Optional hard stop: after this many consecutive bot messages in a
 # channel with no human in between, stop answering bots there until a
-# human speaks. None = no cap (the worker ends conversations by
-# judgment; the burst breaker is the backstop).
+# human speaks. None = no cap: the worker ends conversations by
+# judgment, the way a person would.
 MAX_BOT_TURNS = _BEHAVIOR.get("max_bot_turns")
 DM_POLICY = str(_BEHAVIOR.get("dm_policy") or "owner_only").lower()
 COALESCE_SECS = float(_BEHAVIOR.get("coalesce_seconds") or 5)
@@ -152,13 +150,6 @@ _SAFETY = CFG.get("safety") or {}
 INJECTION_QUARANTINE = bool(_SAFETY.get("injection_quarantine", True))
 DAILY_REPLY_CAP = _SAFETY.get("daily_reply_cap")        # None = off
 PER_USER_DAILY_CAP = _SAFETY.get("per_user_daily_cap")  # None = off
-_BREAKER_CFG = _SAFETY.get("burst_breaker")             # None = off
-BREAKER_ENABLED = isinstance(_BREAKER_CFG, dict) \
-    and _BREAKER_CFG.get("enabled", True) is not False
-_BREAKER_CFG = _BREAKER_CFG if isinstance(_BREAKER_CFG, dict) else {}
-BREAKER_MAX_REPLIES = int(_BREAKER_CFG.get("max_replies") or 5)
-BREAKER_WINDOW_SECS = float(_BREAKER_CFG.get("window_minutes") or 10) * 60
-BREAKER_COOLDOWN_SECS = float(_BREAKER_CFG.get("cooldown_minutes") or 30) * 60
 _ENGINE = CFG.get("engine") or {}
 POLL_INTERVAL = int(_ENGINE.get("rest_poll_seconds") or 30)
 _SWEEP_CFG = _ENGINE.get("sweep") or {}
@@ -627,6 +618,9 @@ def load_state():
     state.setdefault("replied_to", [])
     state.setdefault("rate", {"day": "", "day_count": 0, "users": {}})
     state.setdefault("history", {})
+    # Leftovers from the removed burst breaker.
+    for key in ("breaker", "owner_triggers", "trigger_texts"):
+        state.pop(key, None)
     return state
 
 
@@ -964,94 +958,6 @@ def on_guild_event(state, ev):
         print(f"Removed from server {name or gid}.", flush=True)
 
 
-# ---------------------------------------------------------------------------
-# Burst breaker. If the bot sends more than safety.burst_breaker.max_replies
-# replies within window_minutes in one server channel, it goes quiet there
-# for cooldown_minutes and DMs the owners the triggering examples. A fuse
-# against trigger misconfigurations, pile-ons, and loops even when every
-# single trigger looked legitimate. Replies to the owners' own messages
-# neither count nor get blocked. State: state["breaker"][channel_id] =
-# {"sends": [{ts, author, trigger, reply}], "quiet_until"}.
-# ---------------------------------------------------------------------------
-def _owner_triggered(state, item):
-    return item.get("reply_to") in state.get("owner_triggers", [])
-
-
-def channel_quiet(state, cid):
-    entry = state.get("breaker", {}).get(cid)
-    return bool(entry) and entry.get("quiet_until", 0) > time.time()
-
-
-def _trigger_text(state, cid, mid):
-    """What the message a reply answers said: the excerpt kept at enqueue
-    (trigger_texts), else the channel's rolling history."""
-    text = state.get("trigger_texts", {}).get(mid)
-    if text is None:
-        text = next((h["text"] for h in state.get("history", {}).get(cid, [])
-                     if h["id"] == mid), None)
-    return text if text is not None else "(text unavailable)"
-
-
-def breaker_admit(state, item):
-    """Gate one outbox reply. Returns False when the channel is quiet or
-    this reply would exceed the burst limit (which trips the breaker)."""
-    cid = item.get("channel_id")
-    if not BREAKER_ENABLED or cid not in CHANNELS \
-            or _owner_triggered(state, item):
-        return True
-    now = time.time()
-    entry = state.setdefault("breaker", {}).setdefault(cid, {"sends": []})
-    entry["sends"] = [s for s in entry["sends"]
-                      if now - s["ts"] < BREAKER_WINDOW_SECS]
-    if entry.get("quiet_until", 0) > now:
-        return False
-    if len(entry["sends"]) < BREAKER_MAX_REPLIES:
-        return True
-    entry["quiet_until"] = now + BREAKER_COOLDOWN_SECS
-    cname = channel_display(CHANNELS[cid])
-    until = datetime.fromtimestamp(entry["quiet_until"], timezone.utc)
-    print(f"BURST BREAKER tripped in {cname}: {len(entry['sends'])} "
-          f"replies in {BREAKER_WINDOW_SECS / 60:.0f} min; quiet until "
-          f"{until:%H:%M} UTC.", flush=True)
-    examples = [f"- {s['author']}: \"{s['trigger'][:120]}\""
-                for s in entry["sends"]]
-    blocked = _trigger_text(state, cid, item.get("reply_to"))
-    examples.append(f"- {item.get('author')} (not answered): "
-                    f"\"{blocked[:120]}\"")
-    notify_owners(
-        f"Heads-up: I sent {len(entry['sends'])} replies in {cname} "
-        f"within {BREAKER_WINDOW_SECS / 60:.0f} minutes, so I've stopped "
-        f"replying there until {until:%H:%M} UTC. Your own messages "
-        f"still get answers.\nWhat triggered me:\n" + "\n".join(examples))
-    return False
-
-
-def breaker_record(state, item, parts):
-    cid = item.get("channel_id")
-    if not BREAKER_ENABLED or cid not in CHANNELS \
-            or _owner_triggered(state, item):
-        return
-    entry = state.setdefault("breaker", {}).setdefault(cid, {"sends": []})
-    entry["sends"].append({
-        "ts": time.time(),
-        "author": item.get("author") or "?",
-        "trigger": _trigger_text(state, cid, item.get("reply_to")),
-        "reply": (parts[0] if parts else "")[:120],
-    })
-
-
-def sweep_breaker(state):
-    """Forget channels with no recent sends and no active cooldown."""
-    now = time.time()
-    breaker = state.get("breaker", {})
-    for cid in list(breaker):
-        entry = breaker[cid]
-        if entry.get("quiet_until", 0) <= now and not any(
-                now - s["ts"] < BREAKER_WINDOW_SECS
-                for s in entry.get("sends", [])):
-            del breaker[cid]
-
-
 def is_mention(msg):
     """True when the message @mentions the bot on the platform. Plain
     text containing the bot's name is NOT a mention: in a server whose
@@ -1228,8 +1134,8 @@ def flush_pending(state, queue, force=False):
                 del pending[key]
             elif trigger["id"] in _quarantine_ids() \
                     or _ledger_terminal(trigger["id"]):
-                # quarantine() or an enqueue gate (join watermark,
-                # burst breaker) already ledgered it.
+                # quarantine() or an enqueue gate (join watermark, bot
+                # turn cap) already ledgered it.
                 del pending[key]
             else:
                 # No silent drops: retry a few times, then record the
@@ -2139,13 +2045,6 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         ledger_record(msg["id"], "skipped", "predates bot join",
                       channel_id=msg.get("channel_id"), author=author_name)
         return False
-    if BREAKER_ENABLED and author_id not in OWNER_USER_IDS \
-            and channel_quiet(state, msg["channel_id"]):
-        ledger_record(msg["id"], "skipped", "channel quiet (burst breaker)",
-                      channel_id=msg.get("channel_id"), author=author_name)
-        print(f"Burst breaker: not queueing {author_name} in {cname} "
-              f"(channel quiet).", flush=True)
-        return False
     chan_hist = state.get("history", {}).get(msg["channel_id"], [])
     from_bot = bool(msg.get("author", {}).get("bot"))
     bot_turns = bot_run_length(chan_hist, msg)
@@ -2215,14 +2114,6 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     #    verified user ID in code. The worker decides with natural-language
     #    understanding whether the message asks the bot to DO something.
     owner_command = author_id in OWNER_USER_IDS
-    # Remember what the trigger said under every id the worker may reply
-    # to, so a burst-breaker notice can quote it after the channel's
-    # rolling history has moved on. Bounded.
-    texts = state.setdefault("trigger_texts", {})
-    for mid in [msg["id"]] + [f["id"] for f in fragments]:
-        texts[mid] = content[:120]
-    for mid in list(texts)[:-100]:
-        del texts[mid]
     # The worker replies under the LAST fragment, but the ledger and the
     # sweep track the trigger: remember which trigger each fragment
     # belongs to so a reply (or a silent pass) settles the trigger too.
@@ -2232,13 +2123,6 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
             aliases[f["id"]] = msg["id"]
         for mid in list(aliases)[:-200]:
             del aliases[mid]
-    if owner_command:
-        # Replies to the owners never count toward (or get stopped by)
-        # the burst breaker; outbox items only carry reply_to, so keep
-        # the ids the worker may reply under.
-        state["owner_triggers"] = (state.get("owner_triggers", [])
-                                   + [msg["id"]]
-                                   + [f["id"] for f in fragments])[-200:]
 
     # 7. Reply context: when the trigger used Discord's reply feature, say
     #    whose message it was replying to so the worker knows whether the
@@ -2343,12 +2227,6 @@ def process_outbox(state):
             _settle(state, item, "skipped", "no reply (worker's call)",
                     replied=True)
             continue
-        if parts and not breaker_admit(state, item):
-            print(f"Burst breaker: dropping reply to {item.get('author')} "
-                  f"in {item.get('channel_name')} (channel quiet).",
-                  flush=True)
-            _settle(state, item, "skipped", "channel quiet (burst breaker)")
-            continue
         # Attachments: only from the generated dir. The normal gate is
         # the monitor's may_generate approval for this message (tracked
         # in gen_approved; the worker's outbox item doesn't carry the
@@ -2423,7 +2301,6 @@ def process_outbox(state):
                                 attachments)
                 print(f"Sent reply to {item.get('author')} in {item.get('channel_name')} "
                       f"({len(parts)} part(s)): {parts[0][:60]}", flush=True)
-                breaker_record(state, item, parts)
             for emoji in reactions:
                 if reply_to and add_reaction(item["channel_id"], reply_to, emoji):
                     print(f"Added reaction {emoji} for {item.get('author')} "
@@ -2794,8 +2671,8 @@ def sweep_mentions(state, queue, channels):
                 print(f"Sweep recovered lost mention {mid} from "
                       f"{author.get('username')} in {cname}.", flush=True)
             elif not _ledger_terminal(mid):
-                # (A gate inside enqueue, e.g. quarantine or the burst
-                # breaker, may already have recorded a terminal state.)
+                # (A gate inside enqueue, e.g. quarantine or the bot
+                # turn cap, may already have recorded a terminal state.)
                 ledger_record(mid, "enqueue_failed",
                               "sweep enqueue failed", cid,
                               author.get("username"),
@@ -3112,8 +2989,6 @@ def main():
                 if entry.get("kind") in ("mention", "dm"):
                     typing_targets.add(entry["channel_id"])
             for cid in typing_targets:
-                if channel_quiet(state, cid):
-                    continue
                 if now - last_typing.get(cid, 0) >= 8:
                     send_typing(cid)
                     last_typing[cid] = now
@@ -3196,7 +3071,6 @@ def main():
                     save_state(state)
 
                 flush_join_notices(state, GUILDS, CHANNELS)
-                sweep_breaker(state)
                 sweep_media()
                 sweep_generated()
                 sweep_gen_state(state)

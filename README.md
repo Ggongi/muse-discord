@@ -83,17 +83,14 @@ crash. This one was hardened in production against each of them.
   can see. Welcomes and name triggers stay off there until you
   activate the server. It never answers messages from before it
   joined.
-- **Burst breaker:** more than 5 replies in 10 minutes in one channel
-  and the bot goes quiet there for 30 minutes and DMs you what set it
-  off.
 - **Channels:** the bot replies wherever Discord lets it send messages. To keep
   it out of a channel, deny it View Channel there.
 - **DMs:** by default it reads only your DMs. You can open DMs to everyone or
   turn them off.
 - **Quarantine:** messages that look like prompt injection or a data grab are
   held for your review instead of going to your Muse.
-- **Reply caps:** 30 replies a day in total by default, plus optional per-user
-  caps. Your own messages are exempt.
+- **Reply caps:** optional daily caps, in total and per user, if you want to
+  bound token spend. Off by default; your own messages are always exempt.
 - **Token:** stored in one private file outside the repo by default. Only the
   bot's own processes read it; your Muse never gets it while replying.
 
