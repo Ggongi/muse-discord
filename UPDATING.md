@@ -21,7 +21,9 @@ Updates never need to overwrite these, so never discard them:
   outbox, logs.
 
 Any other tracked file the owner (or a Muse on their behalf) edited is
-a **local modification**, handled in step 3b.
+a **local modification**, handled in step 3b. When the owner wants a
+new customization, steer it to `config.yaml`, `persona.md`, or a
+plugin where possible: those never conflict with an update.
 
 ## Step 1: Look before touching anything
 

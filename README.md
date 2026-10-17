@@ -30,13 +30,8 @@ Send your Muse this message:
 Update muse-discord by following UPDATING.md
 ```
 
-It tells you what's new, asks before touching anything you customized,
-and restarts the bot. The watchdog checks once a day and prints a line
-when an update is out. [CHANGELOG.md](CHANGELOG.md) lists every change
-and anything you need to do.
-
-Customize through `config.yaml`, `persona.md`, and plugins where you
-can: those are never touched by updates.
+It asks before touching anything you customized. See
+[CHANGELOG.md](CHANGELOG.md) for what changed.
 
 ## 🤝 Join the community
 
