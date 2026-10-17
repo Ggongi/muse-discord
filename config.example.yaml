@@ -118,6 +118,12 @@ presence:
   # watching | playing | listening | streaming | competing | custom
   status_kind: watching
 
+updates:
+  # The watchdog checks upstream for a new version at most once a day
+  # and prints one "UPDATE:" line per new version. It never applies
+  # updates itself (see UPDATING.md). false = never check.
+  check: true
+
 persona:
   # The file the worker reads for the bot's personality. Generated
   # during setup by interviewing you (see SETUP.md); edit it any time.

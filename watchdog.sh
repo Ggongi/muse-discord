@@ -10,7 +10,11 @@
 #   - "ALERT: ..." printed ONLY on a NEW failure needing the operator's
 #     attention. Repeat runs while the same failure persists print
 #     "OK (already alerted)".
-#   - State lives in watchdog_state.json; log in watchdog.log.
+#   - "UPDATE: ..." printed ONCE per new upstream version (checked at
+#     most daily; updates.check in config.yaml turns it off). Never an
+#     alert, and the watchdog never applies updates: see UPDATING.md.
+#   - State lives in watchdog_state.json and update_check.json; log in
+#     watchdog.log.
 #
 # Health contract with the processes (do not change casually):
 #   - monitor.py prints a line containing "Bot user id" at startup,
@@ -199,5 +203,47 @@ else
     set_state ""
     log "recovered; alert state cleared"
     echo "OK recovered; previous alert cleared"
+  fi
+fi
+
+# ---------------- updates ----------------
+# At most once a day, fetch the upstream branch and print ONE "UPDATE:"
+# line per new upstream version. Never pulls: applying an update is the
+# owner's call, and their Muse does it by following UPDATING.md. Skipped
+# quietly for installs that are not a git clone with an upstream.
+UPDATE_STATE="$DIR/update_check.json"
+upd_get() {
+  python3 - "$UPDATE_STATE" "$1" <<'PYEOF' 2>/dev/null || echo ""
+import json, sys
+print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))
+PYEOF
+}
+upd_set() {
+  python3 - "$UPDATE_STATE" "$1" "$2" <<'PYEOF' 2>/dev/null
+import json, sys
+json.dump({"checked": int(sys.argv[2]), "announced": sys.argv[3]},
+          open(sys.argv[1], "w"))
+PYEOF
+}
+if [ "$(cfg_get updates.check true)" = "true" ] \
+    && git -C "$DIR" rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then
+  now=$(date +%s)
+  last_check="$(upd_get checked)"
+  announced="$(upd_get announced)"
+  if [ $(( now - ${last_check:-0} )) -ge 86400 ]; then
+    to=""
+    command -v timeout >/dev/null 2>&1 && to="timeout 60"
+    if GIT_TERMINAL_PROMPT=0 $to git -C "$DIR" fetch --quiet >>"$LOG" 2>&1; then
+      behind=$(git -C "$DIR" rev-list --count 'HEAD..@{upstream}' 2>/dev/null || echo 0)
+      upstream_head=$(git -C "$DIR" rev-parse '@{upstream}' 2>/dev/null || echo "")
+      if [ "${behind:-0}" -gt 0 ] && [ "$upstream_head" != "$announced" ]; then
+        log "update available: $behind new commit(s) upstream"
+        echo "UPDATE: muse-discord has $behind new commit(s) upstream. Ask your Muse to update it by following UPDATING.md."
+        announced="$upstream_head"
+      fi
+    else
+      log "update check: git fetch failed; retrying tomorrow"
+    fi
+    upd_set "$now" "$announced"
   fi
 fi

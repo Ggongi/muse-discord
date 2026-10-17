@@ -250,7 +250,9 @@ Then schedule `watchdog.sh` to run every ~10 minutes in whatever
 scheduler the environment has (cron, a scheduled agent job, systemd
 timer). The watchdog is idempotent and safe to run any time; it
 alerts only on NEW failures (its output contract is documented at the
-top of the script). To stop everything: kill the PIDs in
+top of the script). Once a day it also checks for a new muse-discord
+version and prints one `UPDATE:` line when there is one; tell the
+owner, and update by following UPDATING.md when they say so. To stop everything: kill the PIDs in
 `monitor.pid` and the presence process (`pkill -f presence.py`).
 
 Equivalent manual start (no watchdog):
