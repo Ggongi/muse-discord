@@ -76,7 +76,8 @@ chmod 600 ~/.config/muse-discord/bot_token
 Verify WITHOUT printing it: `test -s ~/.config/muse-discord/bot_token`
 should succeed. If the install must use a different path or an env
 var, set `bot.token_file` / `bot.token_env` in config.yaml (step 4)
-instead.
+instead. An env var must be set wherever the watchdog runs: the
+processes it starts inherit its environment.
 
 ## Step 4: Fill config.yaml
 
@@ -300,7 +301,8 @@ see working before calling the install done.
    a welcome in the resolved channel, drafted from the prompt param.
 9. **Generation** (if enabled): owner asks the bot for an image.
    Expect a reply with the image attached, and the file visible in
-   `generated/`. A non-allowed user asking gets a brief decline.
+   `generated/<message id>/`. A non-allowed user asking gets a brief
+   decline.
 10. **Strict triggers**: someone uses the bot's name in a sentence
     without @mentioning it ("my <call name> is cute"). Expect no
     reply and no typing indicator. With the name trigger on (an
@@ -322,15 +324,22 @@ see working before calling the install done.
 - **No welcomes or name triggers in a server**: the server is in
   observe mode. Add its ID to `behavior.active_guild_ids`.
 
-- **`GATEWAY 4014` in monitor.log**: Message Content intent is off.
+- **`GATEWAY DISABLED (code 4014)` in monitor.log** (the watchdog
+  alerts "monitor degraded"): Message Content intent is off.
   Step 1.3. The bot still polls, but content-based triggers are
   blind; fix the intent and restart.
-- **401 from Discord / watchdog says token rejected**: the token was
-  reset in the portal. Repeat step 3 with the fresh token.
+- **`TOKEN REJECTED` in monitor.log / watchdog says token
+  rejected**: the token was reset in the portal. Repeat step 3 with
+  the fresh token; the watchdog starts the bot on its next run.
 - **Watchdog kills the monitor at startup**: the monitor prints the
-  `Bot user id` marker BEFORE discovery on purpose; if monitor.log
-  has no such line at all, the token file is unreadable or Python
-  deps are missing (check the log's first lines).
+  `Bot user id` marker (or `Bot identity pending` while Discord rate
+  limits it) BEFORE discovery on purpose; if monitor.log has neither
+  line, the token is unreadable or Python deps are missing (check
+  the log's first lines). Each restart keeps the previous run's log
+  as `monitor.log.1`.
+- **Watchdog says the monitor was stuck**: its main loop stopped
+  touching `monitor.heartbeat` for 10+ minutes, so the watchdog
+  restarted it. The stuck run's log is `monitor.log.1`.
 - **"no readable channels found"**: the bot lacks View Channel in
   every channel, or hasn't been invited. Check step 2 and channel
   overrides.

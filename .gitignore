@@ -7,12 +7,15 @@ reply_queue.json
 reply_outbox.json
 quarantine.json
 mention_ledger.json
+owner_commands.json
 monitor.pid
+monitor.heartbeat
 watchdog_state.json
 update_check.json
 
-# Logs
+# Logs (the previous run's log is kept as <name>.log.1)
 *.log
+*.log.1
 
 # Downloaded and generated media
 media/

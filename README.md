@@ -78,13 +78,14 @@ crash. This one was hardened in production against each of them.
 
 - Every mention ends with a recorded outcome in `mention_ledger.json`: replied,
   quarantined, or skipped with a reason.
-- Every few minutes the bot rereads recent channel history and requeues any
-  mention that has no outcome.
+- Every few minutes the bot rereads recent channel history and your DMs with
+  it, and requeues any mention or DM that has no outcome.
 - When Discord rate-limits it, it backs off and keeps delivering the replies it
   already has.
 - A reply is never posted twice, even when Discord times out after accepting it,
   and only one copy of the bot can run at a time.
-- A watchdog restarts the bot if it stops and raises one alert per new failure.
+- A watchdog restarts the bot if it stops or gets stuck, alerts you when
+  Discord rejects its token, and raises one alert per new failure.
 
 ## 🔒 Security
 

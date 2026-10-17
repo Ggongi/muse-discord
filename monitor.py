@@ -22,7 +22,8 @@ Security model:
      caps bound the token budget an attacker could burn by spamming
      mentions (config: safety.*).
   3. Output validation: worker-drafted replies are length-capped and
-     mass mentions (@everyone/@here) are neutralized before sending.
+     mass mentions (@everyone/@here) are neutralized before sending;
+     sends only ever ping users (allowed_mentions), never roles.
   4. Send dedup: never send two replies to the same message (protects
      against overlapping worker runs).
   5. The bot token is read from the configured token file (or env var)
@@ -36,15 +37,18 @@ import copy
 import fcntl
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import os
 import queue as pyqueue
 import random
 import re
+import socket
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import urllib.parse
 from datetime import datetime, timezone
@@ -62,6 +66,10 @@ QUEUE_FILE = os.path.join(BASE_DIR, "reply_queue.json")
 OUTBOX_FILE = os.path.join(BASE_DIR, "reply_outbox.json")
 QUARANTINE_FILE = os.path.join(BASE_DIR, "quarantine.json")
 LEDGER_FILE = os.path.join(BASE_DIR, "mention_ledger.json")
+# Touched by the main loop; the watchdog restarts a monitor whose
+# heartbeat goes stale (a live process whose loop is stuck).
+HEARTBEAT_FILE = os.path.join(BASE_DIR, "monitor.heartbeat")
+OWNER_COMMANDS_FILE = os.path.join(BASE_DIR, "owner_commands.json")
 MEDIA_DIR = os.path.join(BASE_DIR, "media")
 GENERATED_DIR = os.path.join(BASE_DIR, "generated")
 PLUGINS_DIR = os.path.join(BASE_DIR, "plugins")
@@ -261,8 +269,12 @@ BOT_USER_ID = None
 MEDIA_TTL_SECS = 3600  # downloaded media older than this is swept each poll
 # Embeds are only downloaded from known media hosts (attachments always
 # come from the chat CDN). Keeps a malicious link unfurl from becoming a
-# download from an arbitrary server.
+# download from an arbitrary server. A host matches a suffix exactly or
+# as a subdomain ("media.tenor.com"), never as a lookalike
+# ("evil-tenor.com"); see embed_host_allowed and _fetch_addrs, which
+# _fetch_complete applies to every URL and every redirect hop.
 EMBED_MEDIA_HOST_SUFFIXES = ("discordapp.com", "discordapp.net", "tenor.com", "giphy" + ".com", "klipy.com")
+FETCH_MAX_REDIRECTS = 3
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 CTYPE_EXT = {"image/gif": ".gif", "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
 
@@ -272,6 +284,12 @@ MAX_VIDEO_BYTES = 32 * 1024 * 1024
 VIDEO_FRAME_COUNT = 5
 VIDEO_EXTS = (".mp4", ".mov", ".webm", ".avi", ".mkv")
 FFMPEG_TIMEOUT = 60
+# ffprobe/ffmpeg pick a demuxer from the downloaded bytes, not the
+# extension, so a crafted HLS or concat playlist saved as a "video" would
+# make them read other local files or fetch URLs. Only the expected
+# container demuxers may run, and only on a plain local file.
+FFMPEG_INPUT_GUARD = ["-format_whitelist", "mov,mp4,matroska,webm,avi",
+                      "-protocol_whitelist", "file"]
 
 # Documents: download text-ish attachments and extract their text so the
 # worker can read them. The extracted text is inlined on the queue item
@@ -290,10 +308,12 @@ PDFTOTEXT_TIMEOUT = 30
 
 # Generated media: when the media_generation plugin grants permission
 # on a queue item, the worker may write generated files into
-# GENERATED_DIR; the send path attaches files from this directory only
-# (validated in _validate_gen_paths). Generation approvals are
-# single-use and keyed by the triggering message id, because the
-# worker's outbox item does not carry the permission flag.
+# GENERATED_DIR/<the item's message_id>/; the send path attaches a reply's
+# files from its own item's directory only (validated in
+# _validate_gen_paths), so one item's image can never ride on another
+# item's reply. Generation approvals are single-use, keyed by the
+# triggering message id and bound to its channel, because the worker's
+# outbox item does not carry the permission flag.
 GENERATED_TTL_SECS = 3600
 DISCORD_MAX_BYTES = 8 * 1024 * 1024  # unboosted server upload cap
 
@@ -303,7 +323,13 @@ DISCORD_MAX_BYTES = 8 * 1024 * 1024  # unboosted server upload cap
 # the owner's message is actually asking the bot to DO something is the
 # worker's job (natural-language understanding), not a regex's.
 # Strangers never get the flag, so the discord-api.py tool stays locked
-# for them no matter what their message text claims.
+# for them no matter what their message text claims. The tool enforces
+# that in code too: it acts only with --for <message_id> naming a live
+# owner command, which only the monitor records (OWNER_COMMANDS_FILE,
+# written when an owner_command item is queued). A worker tricked by a
+# stranger's item has no such id to cite.
+OWNER_COMMAND_TTL_SECS = 3600
+OWNER_COMMANDS_MAX = 50
 
 # Conversation history: rolling window of recent messages kept per
 # channel/DM so the reply worker drafts with context. Stored in state.json,
@@ -337,6 +363,9 @@ def channel_display(info):
 
 # Channel types the bot can meaningfully read: 0 = text, 5 = announcement.
 READABLE_CHANNEL_TYPES = (0, 5)
+# Forum (15) and media (16) channels hold no messages themselves, only
+# threads (posts), whose send permission comes from them.
+THREAD_PARENT_TYPES = (15, 16)
 
 # Re-check for brand-new threads this often (in poll cycles). Threads are
 # where forum posts live; a new post should be picked up within a few
@@ -346,13 +375,15 @@ THREAD_REFRESH_CYCLES = 5
 
 def get_guilds():
     """Return [(guild_id, guild_name)] for every guild the bot is in
-    (restricted to bot.guild_ids when that config list is non-empty)."""
+    (restricted to bot.guild_ids when that config list is non-empty), or
+    None when the list could not be fetched: a failure is not "in no
+    guilds", and must not unmonitor everything."""
     try:
         out = [(g["id"], g.get("name") or g["id"])
                for g in api_get("/users/@me/guilds")]
     except Exception as e:
         print(f"Guild discovery failed: {e}", flush=True)
-        return []
+        return None
     if GUILD_ALLOWLIST:
         out = [g for g in out if g[0] in GUILD_ALLOWLIST]
     return out
@@ -424,7 +455,14 @@ def _channel_perms(gid, base_perms, overwrites, member_role_ids):
     return perms
 
 
-def discover_channels():
+def _no_access(e):
+    """True when a read probe failed because the bot cannot read the
+    channel (403 Missing Access, 404 Unknown Channel). Anything else (429,
+    timeout, 5xx) is transient and says nothing about access."""
+    return getattr(e, "code", None) in (403, 404)
+
+
+def discover_channels(previous=None):
     """Return ({channel_id: info}, {guild_id: guild_info}).
 
     Covers every guild text channel the bot can actually read right now,
@@ -433,10 +471,21 @@ def discover_channels():
     info carries can_send: the bot's effective Send Messages permission
     (for threads, Send Messages in Threads on the parent channel),
     computed from guild roles + channel overwrites; None when the
-    computation was unavailable."""
+    computation was unavailable.
+
+    previous is what a refresh monitored so far (None at startup). Only
+    a 403/404 means "no access": when the guild list, a guild's channel
+    list, or one channel's probe fails transiently (or REST is backing
+    off from a 429), the previous entries are kept as they were instead
+    of unmonitoring those channels (no poll, no sweep) until the next
+    refresh."""
+    previous = previous or {}
     found = {}
     guilds_out = {}
-    for gid, gname in get_guilds():
+    guild_list = get_guilds()
+    if guild_list is None:
+        return dict(previous), dict(GUILDS)
+    for gid, gname in guild_list:
         try:
             gobj = api_get(f"/guilds/{gid}")
         except Exception as e:
@@ -452,23 +501,36 @@ def discover_channels():
             channels = api_get(f"/guilds/{gid}/channels")
         except Exception as e:
             print(f"Channel list failed for {gname}: {e}", flush=True)
+            found.update({c: i for c, i in previous.items()
+                          if i.get("guild_id") == gid})
             continue
         names_by_id = {ch["id"]: ch.get("name", "?") for ch in channels}
         perms_by_id = {}
         for ch in channels:
-            if ch.get("type") not in READABLE_CHANNEL_TYPES:
+            ctype = ch.get("type")
+            if ctype not in READABLE_CHANNEL_TYPES + THREAD_PARENT_TYPES:
                 continue
             cid = ch["id"]
-            try:
-                api_get(f"/channels/{cid}/messages?limit=1")
-            except Exception:
-                continue  # no read access; skip quietly
-            can_send = None
+            perms = None
             if base_perms is not None:
                 perms = _channel_perms(gid, base_perms,
                                        ch.get("permission_overwrites"),
                                        member_roles)
                 perms_by_id[cid] = perms
+            if ctype not in READABLE_CHANNEL_TYPES:
+                continue  # forum/media: only their threads are read
+            if rest_backing_off():
+                if cid in previous:
+                    found[cid] = previous[cid]
+                continue  # probing on would only extend the rate limit
+            try:
+                api_get(f"/channels/{cid}/messages?limit=1")
+            except Exception as e:
+                if not _no_access(e) and cid in previous:
+                    found[cid] = previous[cid]  # transient: keep it
+                continue  # no read access; skip quietly
+            can_send = None
+            if perms is not None:
                 can_send = bool(perms & PERM_SEND_MESSAGES)
             found[cid] = {"name": ch["name"], "guild_id": gid,
                           "guild_name": gname, "can_send": can_send}
@@ -476,12 +538,13 @@ def discover_channels():
         # guild channel list, so they need their own discovery or the bot
         # is blind inside every post.
         found.update(discover_threads_for_guild(gid, gname, names_by_id,
-                                                found, perms_by_id))
+                                                found, perms_by_id,
+                                                previous))
     return found, guilds_out
 
 
 def discover_threads_for_guild(gid, gname, names_by_id, known_ids,
-                               perms_by_id=None):
+                               perms_by_id=None, previous=None):
     """Return {thread_id: info} for active threads in one guild that the
     bot can read and whose ids aren't in known_ids yet.
 
@@ -496,20 +559,30 @@ def discover_threads_for_guild(gid, gname, names_by_id, known_ids,
     needs Send Messages in Threads there (Send Messages on the parent is
     also accepted; the send-time 403 net catches any residual mismatch).
     perms_by_id maps parent channel id -> effective permissions; when it
-    is None (light thread-only refresh), can_send is left unknown."""
+    is None (light thread-only refresh), can_send is left unknown.
+    previous: as in discover_channels, kept on transient failures."""
     out = {}
+    previous = previous or {}
     try:
         resp = api_get(f"/guilds/{gid}/threads/active")
     except Exception as e:
         print(f"Thread list failed for {gname}: {e}", flush=True)
-        return out
+        return {t: i for t, i in previous.items()
+                if i.get("guild_id") == gid and i.get("thread")
+                and t not in known_ids}
     for t in resp.get("threads", []):
         tid = t["id"]
         if tid in known_ids or tid in out:
             continue
+        if rest_backing_off():
+            if tid in previous:
+                out[tid] = previous[tid]
+            continue
         try:
             api_get(f"/channels/{tid}/messages?limit=1")
-        except Exception:
+        except Exception as e:
+            if not _no_access(e) and tid in previous:
+                out[tid] = previous[tid]  # transient: keep it
             continue  # no read access; skip quietly
         can_send = None
         if perms_by_id is not None:
@@ -525,18 +598,34 @@ def discover_threads_for_guild(gid, gname, names_by_id, known_ids,
     return out
 
 
+def now_snowflake():
+    """A message id for "now": every later message is newer than it."""
+    return str((int(time.time() * 1000) - 1420070400000) << 22)
+
+
 def seed_channel_seen(cid, cname, state):
     """Mark a newly discovered channel's current messages as seen so its
-    history is not treated as fresh mentions."""
+    history is not treated as fresh mentions. Only a channel with no
+    last_seen is seeded: one dropped and re-added by discovery, or an
+    archived thread a new message brought back, keeps its watermark so
+    the poll still reads what arrived in between. When the channel is
+    empty or the read fails, the watermark is "now": the history stays
+    seen and the next message is still new."""
+    if cid in state["last_seen"]:
+        return
     try:
         msgs = api_get(f"/channels/{cid}/messages?limit=5")
-        if msgs:
-            newest = max(msgs, key=lambda m: int(m["id"]))
-            state["last_seen"][cid] = newest["id"]
-            print(f"Tracking new channel #{cname} from message "
-                  f"{newest['id']}.", flush=True)
     except Exception as e:
         print(f"Init error #{cname}: {e}", flush=True)
+        msgs = None
+    if msgs:
+        newest = max(msgs, key=lambda m: int(m["id"]))
+        state["last_seen"][cid] = newest["id"]
+        print(f"Tracking new channel #{cname} from message "
+              f"{newest['id']}.", flush=True)
+    else:
+        state["last_seen"][cid] = now_snowflake()
+        print(f"Tracking new channel #{cname} from now.", flush=True)
 
 # Prompt-injection / exfiltration patterns. A match means the message is
 # quarantined for the owner's review instead of queued for auto-reply.
@@ -628,12 +717,58 @@ def _rl_note_clean_cycle():
 
 
 def _api_call(fn):
+    global _token_rejected
     try:
         return fn()
     except Exception as e:
         if getattr(e, "code", None) == 429:
             _note_rate_limit(e)
+        elif getattr(e, "code", None) == 401:
+            _token_rejected = "401 from the REST API"
         raise
+    finally:
+        # A call that returned (or failed) is progress: long but live
+        # stretches (discovery, the sweep, an outbox backlog) never look
+        # stuck to the watchdog; a call that hangs does.
+        touch_heartbeat()
+
+
+# ---------------------------------------------------------------------------
+# Token rejection and liveness, for the watchdog. A reset token makes
+# every REST call answer 401 and the gateway close with 4004; neither
+# heals by retrying, and a monitor that keeps running deaf hides the
+# problem from the watchdog (it only restarts dead processes). So the
+# monitor prints the "TOKEN REJECTED" marker and exits; the watchdog
+# greps for it and raises the token alert. The main loop also touches
+# HEARTBEAT_FILE so the watchdog can tell a stuck loop from a live one.
+# ---------------------------------------------------------------------------
+EXIT_TOKEN_REJECTED = 3
+_token_rejected = None  # set (to where) by a 401 on any REST call
+_heartbeat_at = 0.0
+
+
+def token_rejected_exit(where):
+    print(f"TOKEN REJECTED: Discord refused the bot token ({where}); it "
+          f"was probably reset in the developer portal. Exiting. Store a "
+          f"fresh token and the watchdog starts the monitor again.",
+          flush=True)
+    sys.exit(EXIT_TOKEN_REJECTED)
+
+
+def touch_heartbeat():
+    """Mark the monitor as making progress (throttled to one touch per
+    30s). Called from the main loop and after every REST call."""
+    global _heartbeat_at
+    now = time.time()
+    if now - _heartbeat_at < 30:
+        return
+    _heartbeat_at = now
+    try:
+        with open(HEARTBEAT_FILE, "a"):
+            pass
+        os.utime(HEARTBEAT_FILE, None)
+    except OSError:
+        pass
 
 
 def api_get(path):
@@ -693,7 +828,9 @@ def is_suspicious(content):
     return False
 
 
-def quarantine(msg, channel_name, matched_pattern):
+def quarantine(msg, channel_name, matched_pattern, fragments=()):
+    """Hold a message (and its burst fragments: a split injection must
+    not have its second half swept back in alone) for the owner."""
     entry = {
         "message_id": msg["id"],
         "channel_id": msg.get("channel_id"),
@@ -705,15 +842,20 @@ def quarantine(msg, channel_name, matched_pattern):
         "timestamp": msg.get("timestamp"),
         "quarantined_at": datetime.now(timezone.utc).isoformat(),
     }
+    if fragments:
+        entry["fragments"] = [{"message_id": f["id"],
+                               "content": f.get("content", "")}
+                              for f in fragments]
     q = []
     if os.path.exists(QUARANTINE_FILE):
         with open(QUARANTINE_FILE) as f:
             q = json.load(f)
     q.append(entry)
     atomic_write(QUARANTINE_FILE, q[-100:])  # keep last 100
-    ledger_record(msg["id"], "quarantined", matched_pattern,
-                  channel_id=msg.get("channel_id"),
-                  author=entry["author"])
+    ledger_record_many([msg["id"]] + [f["id"] for f in fragments],
+                       "quarantined", matched_pattern,
+                       channel_id=msg.get("channel_id"),
+                       author=entry["author"])
     print(f"Quarantined suspicious message from {entry['author']} in #{channel_name} "
           f"(matched: {matched_pattern}): {entry['content'][:80]}", flush=True)
 
@@ -751,17 +893,27 @@ def _ledger_save(d):
 
 def ledger_record(mid, status, reason="", channel_id=None, author=None,
                   recoveries=None):
-    if not mid:
+    ledger_record_many([mid], status, reason, channel_id, author,
+                       recoveries)
+
+
+def ledger_record_many(mids, status, reason="", channel_id=None,
+                       author=None, recoveries=None):
+    """ledger_record for several ids in one write: a burst's trigger and
+    its fragments always share one outcome."""
+    mids = [m for m in mids if m]
+    if not mids:
         return
     d = _ledger_load()
-    ent = d["entries"].get(mid, {})
-    ent.update({"status": status, "reason": reason,
-                "channel_id": channel_id or ent.get("channel_id"),
-                "author": author or ent.get("author"),
-                "updated": time.time()})
-    if recoveries is not None:
-        ent["recoveries"] = recoveries
-    d["entries"][mid] = ent
+    for mid in mids:
+        ent = d["entries"].get(mid, {})
+        ent.update({"status": status, "reason": reason,
+                    "channel_id": channel_id or ent.get("channel_id"),
+                    "author": author or ent.get("author"),
+                    "updated": time.time()})
+        if recoveries is not None:
+            ent["recoveries"] = recoveries
+        d["entries"][mid] = ent
     _ledger_save(d)
 
 
@@ -774,7 +926,12 @@ def _quarantine_ids():
     if os.path.exists(QUARANTINE_FILE):
         try:
             with open(QUARANTINE_FILE) as f:
-                return {e.get("message_id") for e in json.load(f)}
+                ids = set()
+                for e in json.load(f):
+                    ids.add(e.get("message_id"))
+                    ids.update(fr.get("message_id")
+                               for fr in e.get("fragments") or [])
+                return ids
         except Exception:
             pass
     return set()
@@ -1151,6 +1308,35 @@ def stage_trigger(state, msg, cname, guild_id, kind, dm=False):
           f"in {cname} for coalescing.", flush=True)
 
 
+def stage_found(state, msg, cname, guild_id, kind):
+    """Stage one classified guild trigger the moment it is classified, in
+    arrival order, so a non-trigger follow-up later in the same poll
+    batch or gateway drain finds the open burst (hold_fragment) instead
+    of being classified before its trigger was staged. Talk scope: a
+    trigger in a channel the bot cannot send in is never staged; it is
+    logged once per channel and ledgered as skipped so the sweep leaves
+    it alone."""
+    info = CHANNELS.get(msg["channel_id"])
+    if info is not None and info.get("can_send") is False:
+        _note_no_send(msg, cname)
+        return
+    stage_trigger(state, msg, cname, guild_id, kind)
+
+
+def alias_fragments(state, trigger_id, fragments):
+    """Remember which trigger each burst fragment belongs to. The worker
+    replies under the LAST fragment while the ledger and the sweep track
+    the trigger, so a reply (or a silent pass) under any fragment settles
+    the whole burst, and the sweep never requeues a fragment alone."""
+    if not fragments:
+        return
+    aliases = state.setdefault("reply_aliases", {})
+    for f in fragments:
+        aliases[f["id"]] = trigger_id
+    for mid in list(aliases)[:-500]:
+        del aliases[mid]
+
+
 def flush_pending(state, queue, force=False):
     """Turn pending bursts whose coalesce window has elapsed into single
     queue items. Returns True when anything was queued."""
@@ -1184,7 +1370,9 @@ def flush_pending(state, queue, force=False):
                 flushed = True
             elif any(q["message_id"] == trigger["id"] for q in queue):
                 # Already queued by another path (e.g. the sweep): the
-                # enqueue "failure" was just its duplicate guard.
+                # enqueue "failure" was just its duplicate guard. Its
+                # fragments ride on that item.
+                alias_fragments(state, trigger["id"], entry["fragments"])
                 del pending[key]
             elif trigger["id"] in _quarantine_ids() \
                     or _ledger_terminal(trigger["id"]):
@@ -1196,8 +1384,10 @@ def flush_pending(state, queue, force=False):
                 # loss in the ledger where the sweep can see it.
                 entry["tries"] = entry.get("tries", 0) + 1
                 if entry["tries"] >= 3:
-                    ledger_record(
-                        trigger["id"], "skipped",
+                    ledger_record_many(
+                        [trigger["id"]]
+                        + [f["id"] for f in entry["fragments"]],
+                        "skipped",
                         f"enqueue failed {entry['tries']}x",
                         channel_id=entry["channel_id"],
                         author=(trigger.get('author', {}) or {})
@@ -1228,8 +1418,24 @@ def send_nonce(channel_id, reply_to, parts, index):
     return hashlib.sha256(key.encode()).hexdigest()[:25]
 
 
+# What a monitor send may ping: users (the worker addresses people with
+# <@id>) and the author of the message replied to. Never roles,
+# @everyone or @here, whatever the text says; the zero-width rewrite in
+# sanitize_reply is a second layer, not the only one.
+SEND_ALLOWED_MENTIONS = {"parse": ["users"], "replied_user": True}
+DISCORD_MAX_CHARS = 2000  # Discord's hard per-message content limit
+
+
+def _is_snowflake(value):
+    """True for a plain Discord id. Ids from the worker-written outbox are
+    interpolated into API paths, where anything else ("1/../../guilds/2")
+    could turn a send into a different API call."""
+    return isinstance(value, (str, int)) and not isinstance(value, bool) \
+        and re.fullmatch(r"[0-9]{17,20}", str(value)) is not None
+
+
 def send_reply(channel_id, text, reply_to=None, nonce=None):
-    data = {"content": text}
+    data = {"content": text, "allowed_mentions": SEND_ALLOWED_MENTIONS}
     if reply_to:
         data["message_reference"] = {"message_id": reply_to}
     if nonce:
@@ -1250,7 +1456,7 @@ def send_typing(channel_id):
 def add_reaction(channel_id, message_id, emoji):
     """Add a Unicode emoji reaction to a message (PUT .../@me). Used for
     reactions drafted by the worker via the outbox 'reactions' list."""
-    encoded = urllib.parse.quote(emoji)
+    encoded = urllib.parse.quote(emoji, safe="")  # "/" stays in the segment
     try:
         req = urllib.request.Request(
             API + f"/channels/{channel_id}/messages/{message_id}"
@@ -1338,7 +1544,7 @@ def send_reply_with_files(channel_id, text, files, reply_to=None,
     """Send a message with file attachments via multipart/form-data.
     files: list of (local_path, filename)."""
     boundary = "----MuseDiscord%d" % int(time.time() * 1000)
-    payload = {"content": text}
+    payload = {"content": text, "allowed_mentions": SEND_ALLOWED_MENTIONS}
     if reply_to:
         payload["message_reference"] = {"message_id": reply_to}
     if nonce:
@@ -1401,13 +1607,33 @@ def fit_for_discord(path):
 
 
 def sweep_generated():
-    """Delete generated files older than GENERATED_TTL_SECS (already sent)."""
+    """Delete generated files older than GENERATED_TTL_SECS (already sent),
+    including those in the per-item generated/<message_id>/ dirs, then
+    item dirs left empty for that long."""
     if os.path.isdir(GENERATED_DIR):
         now = time.time()
         for fname in os.listdir(GENERATED_DIR):
             fpath = os.path.join(GENERATED_DIR, fname)
             try:
-                if now - os.path.getmtime(fpath) > GENERATED_TTL_SECS:
+                if os.path.isdir(fpath) and not os.path.islink(fpath):
+                    removed = False
+                    for sub in os.listdir(fpath):
+                        spath = os.path.join(fpath, sub)
+                        try:
+                            if now - os.lstat(spath).st_mtime \
+                                    > GENERATED_TTL_SECS:
+                                os.remove(spath)
+                                removed = True
+                        except OSError:
+                            pass
+                    # An empty dir only goes once it held expired files
+                    # or is old itself: the worker may have just created
+                    # it and not written its file yet.
+                    if not os.listdir(fpath) and (
+                            removed or now - os.path.getmtime(fpath)
+                            > GENERATED_TTL_SECS):
+                        os.rmdir(fpath)
+                elif now - os.path.getmtime(fpath) > GENERATED_TTL_SECS:
                     os.remove(fpath)
             except OSError:
                 pass
@@ -1415,19 +1641,31 @@ def sweep_generated():
 
 def sweep_gen_state(state):
     """Drop generation approvals older than GENERATED_TTL_SECS (they are
-    single-use and short-lived by design) and bound the sent-file record."""
+    single-use and short-lived by design) and bound the sent-file record.
+    Approvals from before channel binding (a bare timestamp) go too."""
     approved = state.get("gen_approved", {})
     now = time.time()
-    for mid in [m for m, ts in approved.items()
-                if now - ts > GENERATED_TTL_SECS]:
+    for mid in [m for m, a in approved.items()
+                if not isinstance(a, dict)
+                or now - a.get("ts", 0) > GENERATED_TTL_SECS]:
         approved.pop(mid, None)
     if len(state.get("gen_sent", [])) > 50:
         state["gen_sent"] = state["gen_sent"][-50:]
 
 
-def _validate_gen_paths(paths):
-    """Keep only paths that resolve inside GENERATED_DIR and exist."""
-    gen_root = os.path.realpath(GENERATED_DIR)
+def _gen_item_dir(item_id):
+    """generated/<item_id>/, the only place a queue item's generated files
+    may come from, or None for anything but a plain message id (no path
+    tricks). Only the generated/ root is realpath'd: an item dir that is
+    a symlink to another item's dir must fail the containment check."""
+    if not isinstance(item_id, str) or not re.fullmatch(r"[0-9]+", item_id):
+        return None
+    return os.path.join(os.path.realpath(GENERATED_DIR), item_id)
+
+
+def _validate_gen_paths(paths, item_id):
+    """Keep only paths that exist and resolve inside generated/<item_id>/."""
+    item_root = _gen_item_dir(item_id)
     candidates = []
     for p in paths or []:
         if not isinstance(p, str):
@@ -1436,8 +1674,9 @@ def _validate_gen_paths(paths):
         ap = p if os.path.isabs(p) else os.path.join(
             os.path.expanduser("~"), p)
         rp = os.path.realpath(ap)
-        if not rp.startswith(gen_root + os.sep):
-            print(f"Dropping attachment outside generated dir: {p}", flush=True)
+        if item_root is None or not rp.startswith(item_root + os.sep):
+            print(f"Dropping attachment outside generated/{item_id}/: {p}",
+                  flush=True)
             continue
         if not os.path.isfile(rp):
             print(f"Dropping missing attachment: {p}", flush=True)
@@ -1446,54 +1685,63 @@ def _validate_gen_paths(paths):
     return candidates
 
 
-def _discover_fresh_generated(state, max_age_secs=GENERATED_TTL_SECS):
-    """Newest unsent generated files younger than max_age_secs. Used by the
-    owner fallback when the worker couldn't name the file it generated."""
-    gen_root = os.path.realpath(GENERATED_DIR)
-    if not os.path.isdir(gen_root):
-        return []
-    sent = set(state.get("gen_sent", []))
-    now = time.time()
-    fresh = []
-    for fname in os.listdir(gen_root):
-        if fname.endswith(".json") or ".fit." in fname:
-            continue  # sidecars and compressed copies, not originals
-        fpath = os.path.join(gen_root, fname)
-        if fpath in sent or not os.path.isfile(fpath):
-            continue
-        try:
-            mt = os.path.getmtime(fpath)
-        except OSError:
-            continue
-        if now - mt <= max_age_secs:
-            fresh.append((mt, fpath))
-    fresh.sort(reverse=True)
-    return [fp for _, fp in fresh[:1]]
-
-
-def _discover_generated(state, approved_ts):
-    """Find the newest generated media file created after the approval that
-    hasn't been sent yet. The worker often isn't told the local filename
-    (the media tool returns a remote URL/handle), so the monitor matches
-    the file itself. Returns a local path or None."""
-    gen_root = os.path.realpath(GENERATED_DIR)
-    if not os.path.isdir(gen_root):
+def _discover_generated(state, item_id):
+    """Find the newest unsent generated file in generated/<item_id>/. The
+    worker often isn't told the local filename (the media tool returns a
+    remote URL/handle), so the monitor matches the file itself, but only
+    in the item's own directory: a file made for another item (a DM, say)
+    is never a candidate. Returns a local path or None."""
+    item_root = _gen_item_dir(item_id)
+    if item_root is None or not os.path.isdir(item_root):
         return None
     sent = set(state.get("gen_sent", []))
     best = None
-    for fname in os.listdir(gen_root):
+    for fname in os.listdir(item_root):
         if fname.endswith(".json") or ".fit." in fname:
             continue  # sidecars and compressed copies, not originals
-        fpath = os.path.join(gen_root, fname)
+        fpath = os.path.realpath(os.path.join(item_root, fname))
+        if not fpath.startswith(item_root + os.sep):
+            continue  # a symlink out of the item dir
         if fpath in sent or not os.path.isfile(fpath):
             continue
         try:
             mt = os.path.getmtime(fpath)
         except OSError:
             continue
-        if mt >= approved_ts - 10 and (best is None or mt > best[1]):
+        if best is None or mt > best[1]:
             best = (fpath, mt)
     return best[0] if best else None
+
+
+def _gen_item_id(state, item):
+    """The queue item an outbox item answers, as its trigger message id:
+    reply_to, resolved through reply_aliases (the worker replies under
+    the LAST burst fragment, while approvals and generated/<id>/ use the
+    trigger). An explicit "item" field is honored only when it agrees,
+    so a reply can never claim another item's approval and files."""
+    reply_to = item.get("reply_to")
+    resolved = None
+    if reply_to is not None:
+        resolved = str(state.get("reply_aliases", {}).get(str(reply_to),
+                                                          reply_to))
+    claimed = item.get("item")
+    if claimed is None:
+        return resolved
+    if resolved is not None and str(claimed) != resolved:
+        print(f"Note: outbox item names item {claimed} but replies to "
+              f"{reply_to} (item {resolved}); no attachments", flush=True)
+        return None
+    return str(claimed)
+
+
+def _gen_approval(state, item_id):
+    """The live generation approval for a queue item ({"ts",
+    "channel_id"}), or None."""
+    a = state.get("gen_approved", {}).get(item_id) if item_id else None
+    if not isinstance(a, dict) \
+            or time.time() - a.get("ts", 0) > GENERATED_TTL_SECS:
+        return None
+    return a
 
 
 def _fetch_complete(url, max_bytes, timeout, kind):
@@ -1507,27 +1755,67 @@ def _fetch_complete(url, max_bytes, timeout, kind):
     Range requests when short.
     Never sends the bot token: attachment URLs are pre-signed, and the CDN
     drops connections carrying an Authorization header.
+    Every URL, and every redirect hop, must pass _fetch_addrs (https, an
+    allowlisted media host, public addresses only): message content
+    picks these URLs, and a fetch must not become a probe of the LAN or
+    the cloud metadata service.
     """
     ua = headers()["User-Agent"]
-    # Path 1: curl (proven reliable on this network)
+    # Path 1: curl (proven reliable on this network). No -L: redirects
+    # are followed here one hop at a time, so each hop gets the same
+    # checks as the first URL, and --resolve pins curl to the addresses
+    # just checked (no DNS swap between check and connect). -f makes an
+    # HTTP error a failure instead of content: an error page must not be
+    # extracted as the "document".
+    hop = url
     try:
-        r = subprocess.run(
-            ["curl", "-sS", "-L", "--max-time", str(timeout),
-             "--max-filesize", str(max_bytes), "-A", ua,
-             "-w", "\n%{content_type}", url],
-            capture_output=True, timeout=timeout + 10)
-        if r.returncode == 0 and r.stdout:
-            body, _, ctype = r.stdout.rpartition(b"\n")
+        for _ in range(FETCH_MAX_REDIRECTS + 1):
+            addrs = _fetch_addrs(hop)
+            if not addrs:
+                print("Refusing %s download from %s: not https, not an "
+                      "allowlisted media host, or not a public address" %
+                      (kind, hop[:120]), flush=True)
+                return None, None
+            p = urllib.parse.urlparse(hop)
+            pin = "%s:%d:%s" % (p.hostname, p.port or 443, ",".join(
+                "[%s]" % a if ":" in a else a for a in addrs))
+            r = subprocess.run(
+                ["curl", "-sS", "-f", "--proto", "=https", "--resolve", pin,
+                 "--max-time", str(timeout),
+                 "--max-filesize", str(max_bytes), "-A", ua,
+                 "-w", "\n%{http_code}\n%{content_type}\n%{redirect_url}",
+                 hop],
+                capture_output=True, timeout=timeout + 10)
+            if r.returncode != 0 or not r.stdout:
+                print("curl %s download failed: %s" %
+                      (kind, r.stderr.decode(errors="replace")[:150]),
+                      flush=True)
+                break
+            body, code, ctype, nxt = r.stdout.rsplit(b"\n", 3)
+            code = code.decode(errors="replace").strip()
+            nxt = nxt.decode(errors="replace").strip()
+            if code.startswith("3") and nxt:
+                hop = nxt
+                continue
             ctype = ctype.decode(errors="replace").split(";")[0].strip().lower()
-            if body and len(body) <= max_bytes:
+            if code.startswith("2") and body and len(body) <= max_bytes:
                 return bytes(body), ctype
-        print("curl %s download failed: %s" %
-              (kind, r.stderr.decode(errors="replace")[:150]), flush=True)
+            print("curl %s download failed: HTTP %s" % (kind, code),
+                  flush=True)
+            break
+        else:
+            print("curl %s download failed: more than %d redirects" %
+                  (kind, FETCH_MAX_REDIRECTS), flush=True)
+            return None, None
     except FileNotFoundError:
         pass  # no curl installed; fall through to urllib
     except Exception as e:
         print("curl %s download failed: %s" % (kind, e), flush=True)
-    # Path 2: urllib with length verification + Range resume
+    # Path 2: urllib with length verification + Range resume. HTTP errors
+    # raise; redirects go through _FetchRedirectHandler's checks.
+    if not _fetch_addrs(url):
+        return None, None
+    opener = urllib.request.build_opener(_FetchRedirectHandler)
     data = bytearray()
     expected = None
     ctype = ""
@@ -1537,7 +1825,7 @@ def _fetch_complete(url, max_bytes, timeout, kind):
             if data:
                 h["Range"] = "bytes=%d-" % len(data)
             req = urllib.request.Request(url, headers=h)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with opener.open(req, timeout=timeout) as resp:
                 if resp.status == 200 and data:
                     data = bytearray()  # server ignored Range; start over
                     expected = None
@@ -1674,8 +1962,9 @@ def extract_frames(video_path, out_prefix, count=VIDEO_FRAME_COUNT):
     Returns the list of frame paths (may be empty on failure)."""
     try:
         probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "csv=p=0", video_path],
+            ["ffprobe", "-v", "error", *FFMPEG_INPUT_GUARD,
+             "-show_entries", "format=duration", "-of", "csv=p=0",
+             video_path],
             capture_output=True, text=True, timeout=30)
         duration = float((probe.stdout or "").strip() or 0)
     except Exception:
@@ -1687,7 +1976,8 @@ def extract_frames(video_path, out_prefix, count=VIDEO_FRAME_COUNT):
         out = "%s_frame%d.png" % (out_prefix, i)
         try:
             subprocess.run(
-                ["ffmpeg", "-v", "error", "-ss", str(t), "-i", video_path,
+                ["ffmpeg", "-v", "error", "-ss", str(t),
+                 *FFMPEG_INPUT_GUARD, "-i", video_path,
                  "-frames:v", "1", "-y", out],
                 capture_output=True, timeout=FFMPEG_TIMEOUT)
             if os.path.exists(out) and os.path.getsize(out) > 0:
@@ -1707,8 +1997,57 @@ def tenor_gif_variant(url):
 
 
 def embed_host_allowed(url):
-    host = urllib.parse.urlparse(url).hostname or ""
-    return host.endswith(EMBED_MEDIA_HOST_SUFFIXES)
+    """True when url's host is an allowlisted media host or a subdomain
+    of one. A bare suffix match would also accept lookalikes such as
+    evil-tenor.com or attackerdiscordapp.net."""
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").rstrip(".")
+    except ValueError:
+        return False
+    return any(host == s or host.endswith("." + s)
+               for s in EMBED_MEDIA_HOST_SUFFIXES)
+
+
+def _fetch_addrs(url):
+    """The addresses a media fetch of url may connect to, or None when it
+    must not be fetched at all: not https, not an allowlisted media host,
+    unresolvable, or resolving to ANY non-public address (private,
+    loopback, link-local such as 169.254.169.254, reserved, multicast)."""
+    try:
+        p = urllib.parse.urlparse(url)
+        port = p.port or 443
+    except ValueError:
+        return None
+    if p.scheme != "https" or not embed_host_allowed(url):
+        return None
+    try:
+        infos = socket.getaddrinfo(p.hostname, port,
+                                   proto=socket.IPPROTO_TCP)
+    except (OSError, UnicodeError):
+        return None
+    addrs = []
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        except ValueError:
+            return None
+        if not ip.is_global or ip.is_multicast:
+            return None
+        if str(ip) not in addrs:
+            addrs.append(str(ip))
+    return addrs or None
+
+
+class _FetchRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """urllib's side of _fetch_complete's redirect policy: at most
+    FETCH_MAX_REDIRECTS hops, each to a URL that passes _fetch_addrs."""
+    max_redirections = FETCH_MAX_REDIRECTS
+
+    def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+        if not _fetch_addrs(newurl):
+            raise urllib.error.HTTPError(
+                newurl, code, "redirect to a disallowed URL", hdrs, fp)
+        return super().redirect_request(req, fp, code, msg, hdrs, newurl)
 
 
 def collect_media(msg):
@@ -1865,6 +2204,17 @@ def record_history(state, channel_id, messages):
     excludes it when attaching history to a queue item."""
     hist = state.setdefault("history", {}).setdefault(channel_id, [])
     seen_ids = {h["id"] for h in hist}
+    runs = state.setdefault("bot_runs", {})
+    if channel_id not in runs:
+        # Start the counter from whatever run the history already shows.
+        n = 0
+        for h in reversed(hist):
+            if not h.get("bot"):
+                break
+            n += 1
+        runs[channel_id] = {"n": n, "ids": {},
+                            "last": max((h["id"] for h in hist), key=int,
+                                        default="0")}
     for m in sorted(messages, key=lambda x: int(x["id"])):
         if m["id"] in seen_ids:
             continue
@@ -1889,19 +2239,95 @@ def record_history(state, channel_id, messages):
             entry["display"] = display
         hist.append(entry)
         seen_ids.add(m["id"])
+        # Consecutive bot messages since a human last spoke, counted here
+        # rather than from the 12-entry window so behavior.max_bot_turns
+        # above 12 can trigger. In id order only: a message older than
+        # the newest counted one (gap repair, a re-read) was counted or
+        # is history.
+        run = runs[channel_id]
+        if int(m["id"]) > int(run["last"]):
+            run["n"] = run["n"] + 1 if entry["bot"] else 0
+            run["last"] = m["id"]
+            if entry["bot"]:
+                run["ids"][m["id"]] = run["n"]
+                for mid in list(run["ids"])[:-30]:
+                    del run["ids"][mid]
+    # Sorted: the poll re-reads messages the gateway already recorded,
+    # and an old one re-added must not land after newer ones.
+    hist.sort(key=lambda h: int(h["id"]))
     state["history"][channel_id] = hist[-HISTORY_PER_CHANNEL:]
 
 
-def check_channel(channel_id, channel_name, state, guild_id=None):
-    """Check for new messages in a channel. Returns (triggers, joins):
-    triggers are (msg, kind) pairs that need the worker (kind as in
-    trigger_kind), joins are Discord system join messages (type 7) from
-    the system channel."""
-    last_seen = state["last_seen"].get(channel_id)
+# ---------------------------------------------------------------------------
+# REST watermark vs gateway dedupe. state["last_seen"][cid] is the REST
+# poll's watermark and only the poll advances it (or seeding, the first
+# time a channel is seen). The gateway used to advance it too, so after a
+# session that could not be resumed lost events, the first message past
+# the gap moved the watermark beyond the missed ones and the poll never
+# read them. Now messages the gateway handled above the watermark are
+# remembered in state["gw_seen"][cid], the poll skips those, and both
+# paths skip anything at or below the watermark: every message is
+# processed once, by whichever path sees it first.
+# ---------------------------------------------------------------------------
+GW_SEEN_PER_CHANNEL = 1000
+GW_SEEN_MAX_AGE_SECS = 24 * 3600
 
-    params = {"limit": 20}
-    if last_seen:
-        params["after"] = last_seen
+
+def gateway_seen(state, cid, mid):
+    return mid in state.get("gw_seen", {}).get(cid, ())
+
+
+def note_gateway_seen(state, cid, mid):
+    """Record a message the gateway path handled. The first message ever
+    seen in a channel seeds its REST watermark instead (history before it
+    counts as seen, as with seed_channel_seen)."""
+    if cid not in state["last_seen"]:
+        state["last_seen"][cid] = mid
+        return
+    ids = state.setdefault("gw_seen", {}).setdefault(cid, [])
+    ids.append(mid)
+    del ids[:-GW_SEEN_PER_CHANNEL]
+
+
+def advance_rest_watermark(state, cid, mid):
+    """Move a channel's REST watermark to mid; gateway ids at or below it
+    are covered by the watermark now and are dropped."""
+    state["last_seen"][cid] = mid
+    ids = state.get("gw_seen", {}).get(cid)
+    if ids is not None:
+        ids[:] = [i for i in ids if int(i) > int(mid)]
+        if not ids:
+            del state["gw_seen"][cid]
+
+
+def prune_gateway_seen(state):
+    """Drop gateway ids no poll will ever re-read (channels nobody polls,
+    such as DMs under dm_policy: open)."""
+    now = time.time()
+    for cid in list(state.get("gw_seen", {})):
+        ids = [i for i in state["gw_seen"][cid]
+               if now - _snowflake_ts(i) < GW_SEEN_MAX_AGE_SECS]
+        if ids:
+            state["gw_seen"][cid] = ids
+        else:
+            del state["gw_seen"][cid]
+
+
+def check_channel(channel_id, channel_name, state, guild_id=None):
+    """Check for new messages in a channel and stage its triggers (see
+    stage_found). Returns (triggers, joins): triggers are the (msg, kind)
+    pairs staged (kind as in trigger_kind), joins are Discord system join
+    messages (type 7) from the system channel. Messages the gateway
+    already handled are skipped."""
+    last_seen = state["last_seen"].get(channel_id)
+    if not last_seen:
+        # Never seeded (discovery normally does it): history is history.
+        seed_channel_seen(channel_id, channel_name, state)
+        return [], []
+
+    # 100 (Discord's max) so the poll keeps up with busy channels: it now
+    # re-reads every message the gateway delivered since the last poll.
+    params = {"limit": 100, "after": last_seen}
 
     query = urllib.parse.urlencode(params)
     try:
@@ -1916,15 +2342,19 @@ def check_channel(channel_id, channel_name, state, guild_id=None):
     record_history(state, channel_id, messages)
 
     newest = max(messages, key=lambda m: int(m["id"]))
-    state["last_seen"][channel_id] = newest["id"]
+    gw_done = set(state.get("gw_seen", {}).get(channel_id, ()))
+    advance_rest_watermark(state, channel_id, newest["id"])
 
     triggers = []
     joins = []
     for msg in sorted(messages, key=lambda m: int(m["id"])):
+        if msg["id"] in gw_done:
+            continue  # the gateway path already handled it
         kind = classify_message(state, msg, channel_name, guild_id)
         if kind == "join":
             joins.append(msg)
         elif kind:
+            stage_found(state, msg, channel_name, guild_id, kind)
             triggers.append((msg, kind))
 
     return triggers, joins
@@ -1997,6 +2427,11 @@ def dm_poll_user_ids():
     return []
 
 
+# The DM channels the poll has resolved, {channel_id: recipient name}:
+# the reconciliation sweep covers these as well as server channels.
+DM_CHANNELS = {}
+
+
 def list_dm_channels():
     """Return [(channel_id, recipient_username)] for known users' DM channels."""
     out = []
@@ -2010,30 +2445,45 @@ def list_dm_channels():
             recips = c.get("recipients") or []
             name = recips[0].get("username", uid) if recips else uid
             out.append((c["id"], name))
+            DM_CHANNELS[c["id"]] = name
     return out
 
 
 def check_dm_channel(dm_id, dm_name, state):
     """Return unseen non-bot messages in a DM channel. In a DM every message
-    is addressed to the bot, so no mention filtering is needed."""
+    is addressed to the bot, so no mention filtering is needed. The first
+    time a DM channel is read (first run, or state.json deleted) its
+    history counts as already seen, like a new channel's: the backlog is
+    never one big fresh trigger. Messages the gateway already handled
+    are skipped."""
     try:
         messages = api_get(f"/channels/{dm_id}/messages?limit=20")
     except Exception as e:
         print(f"DM poll error #{dm_name}: {e}", flush=True)
         return []
+    last_seen = state["last_seen"].get(dm_id)
     if not messages:
+        if not last_seen:
+            state["last_seen"][dm_id] = now_snowflake()
         return []
 
     record_history(state, dm_id, messages)
 
-    last_seen = state["last_seen"].get(dm_id)
-    new = [m for m in messages if not last_seen or int(m["id"]) > int(last_seen)]
+    if not last_seen:
+        newest = max(messages, key=lambda m: int(m["id"]))
+        state["last_seen"][dm_id] = newest["id"]
+        print(f"Tracking DM with {dm_name} from message {newest['id']}.",
+              flush=True)
+        return []
+    new = [m for m in messages if int(m["id"]) > int(last_seen)]
+    gw_done = set(state.get("gw_seen", {}).get(dm_id, ()))
     if new:
         newest = max(new, key=lambda m: int(m["id"]))
-        state["last_seen"][dm_id] = newest["id"]
+        advance_rest_watermark(state, dm_id, newest["id"])
 
     return [m for m in sorted(new, key=lambda m: int(m["id"]))
             if m.get("author", {}).get("id") != BOT_USER_ID
+            and m["id"] not in gw_done
             and not hold_fragment(state, dm_id, m)]
 
 
@@ -2049,6 +2499,18 @@ def bot_run_length(history, msg):
             break
         run += 1
     return run
+
+
+def bot_turns_for(state, msg, history):
+    """Consecutive bot messages ending at msg since a human last spoke,
+    from the per-channel counter record_history keeps (unbounded by the
+    history window). Falls back to bot_run_length for a message the
+    counter did not see in order. 0 when msg is from a human."""
+    if not (msg.get("author", {}) or {}).get("bot"):
+        return 0
+    run = state.get("bot_runs", {}).get(msg["channel_id"]) or {}
+    n = (run.get("ids") or {}).get(msg["id"])
+    return n if n is not None else bot_run_length(history, msg)
 
 
 def conversation_participants(history, msg, reply_ctx):
@@ -2102,6 +2564,29 @@ def link_mentions(text, channel_id, state):
     return pattern.sub(lambda m: f"<@{names[m.group(1).lower()]}>", text)
 
 
+def record_owner_command(ids):
+    """Mark message ids as live owner commands for bin/discord-api.py's
+    --for check: {message_id: expiry epoch}, expired entries pruned, the
+    newest OWNER_COMMANDS_MAX kept. Written atomically; never raises."""
+    try:
+        with open(OWNER_COMMANDS_FILE) as f:
+            live = json.load(f)
+    except (OSError, ValueError):
+        live = {}
+    now = time.time()
+    if not isinstance(live, dict):
+        live = {}
+    live = {k: v for k, v in live.items()
+            if isinstance(v, (int, float)) and v > now}
+    for mid in ids:
+        live[mid] = now + OWNER_COMMAND_TTL_SECS
+    keep = sorted(live.items(), key=lambda kv: kv[1])[-OWNER_COMMANDS_MAX:]
+    try:
+        atomic_write(OWNER_COMMANDS_FILE, dict(keep))
+    except OSError as e:
+        print(f"Could not record owner command(s) {ids}: {e}", flush=True)
+
+
 def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
                     guild_id=None, kind="mention"):
     """Run one message (plus any burst fragments coalesced with it) through
@@ -2113,21 +2598,27 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         return False
     author_id = msg.get("author", {}).get("id")
     author_name = msg.get("author", {}).get("username")
+    # Every outcome below is recorded for the trigger AND each fragment:
+    # a fragment can be a mention too, and one with no ledger entry would
+    # be requeued alone by the sweep.
+    burst_ids = [msg["id"]] + [f["id"] for f in fragments]
 
     # 0. Hard gates, re-checked here because every path (poll, gateway,
     #    restart flush, sweep) funnels through this function.
     if predates_join(state, msg, guild_id):
-        ledger_record(msg["id"], "skipped", "predates bot join",
-                      channel_id=msg.get("channel_id"), author=author_name)
+        ledger_record_many(burst_ids, "skipped", "predates bot join",
+                           channel_id=msg.get("channel_id"),
+                           author=author_name)
         return False
     chan_hist = state.get("history", {}).get(msg["channel_id"], [])
     from_bot = bool(msg.get("author", {}).get("bot"))
-    bot_turns = bot_run_length(chan_hist, msg)
+    bot_turns = bot_turns_for(state, msg, chan_hist)
     if from_bot and MAX_BOT_TURNS is not None \
             and bot_turns >= int(MAX_BOT_TURNS):
-        ledger_record(msg["id"], "skipped",
-                      f"bot turn cap ({MAX_BOT_TURNS})",
-                      channel_id=msg.get("channel_id"), author=author_name)
+        ledger_record_many(burst_ids, "skipped",
+                           f"bot turn cap ({MAX_BOT_TURNS})",
+                           channel_id=msg.get("channel_id"),
+                           author=author_name)
         print(f"Bot turn cap: not answering {author_name} in {cname} "
               f"({bot_turns} bot messages in a row).", flush=True)
         return False
@@ -2141,7 +2632,7 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     if INJECTION_QUARANTINE:
         matched = is_suspicious(content)
         if matched:
-            quarantine(msg, cname, matched)
+            quarantine(msg, cname, matched, fragments)
             return False
 
     # 2. Rate limits (also bound token spend). One charge per burst, not
@@ -2160,9 +2651,31 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         documents += dc
         unviewable += uv
 
+    # 3b. Reply context: when the trigger used Discord's reply feature, say
+    #     whose message it was replying to so the worker knows whether the
+    #     message was actually addressed to the bot or to someone else.
+    reply_ctx = get_reply_context(msg)
+
+    # 3c. The worker reads extracted document text and the replied-to
+    #     message as well as the message itself, so they get the same
+    #     injection pre-filter. The bot's own replied-to message is
+    #     skipped: everyday phrasing in it ("you are now set up") would
+    #     quarantine every reply to it.
+    if INJECTION_QUARANTINE:
+        extra_texts = [(f"document {d.get('name')}", d.get("text") or "")
+                       for d in documents]
+        if reply_ctx and not reply_ctx.get("is_bot"):
+            extra_texts.append(("replied-to message",
+                                reply_ctx.get("content") or ""))
+        for where, text in extra_texts:
+            matched = is_suspicious(text)
+            if matched:
+                quarantine(msg, cname, f"{matched} (in {where})",
+                           fragments)
+                return False
+
     # 4. Attach recent conversation history (excluding the trigger and its
     #    fragments) so the worker replies with context.
-    burst_ids = {msg["id"]} | {f["id"] for f in fragments}
     history = [h for h in chan_hist
                if h["id"] not in burst_ids][-HISTORY_ATTACHED:]
 
@@ -2183,7 +2696,10 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
             extra.update(res)
     may_generate = bool(extra.pop("may_generate", False))
     if may_generate:
-        state.setdefault("gen_approved", {})[msg["id"]] = time.time()
+        # Bound to the channel too: the file may only go back where the
+        # request came from (an image made in a DM never posts publicly).
+        state.setdefault("gen_approved", {})[msg["id"]] = {
+            "ts": time.time(), "channel_id": msg["channel_id"]}
 
     # 6. Owner commands: stamped for the owners' messages only, from the
     #    verified user ID in code. The worker decides with natural-language
@@ -2191,18 +2707,8 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     owner_command = author_id in OWNER_USER_IDS
     # The worker replies under the LAST fragment, but the ledger and the
     # sweep track the trigger: remember which trigger each fragment
-    # belongs to so a reply (or a silent pass) settles the trigger too.
-    if fragments:
-        aliases = state.setdefault("reply_aliases", {})
-        for f in fragments:
-            aliases[f["id"]] = msg["id"]
-        for mid in list(aliases)[:-200]:
-            del aliases[mid]
-
-    # 7. Reply context: when the trigger used Discord's reply feature, say
-    #    whose message it was replying to so the worker knows whether the
-    #    message was actually addressed to the bot or to someone else.
-    reply_ctx = get_reply_context(msg)
+    # belongs to so a reply (or a silent pass) settles the whole burst.
+    alias_fragments(state, msg["id"], fragments)
 
     item = {
         "message_id": msg["id"],
@@ -2237,6 +2743,10 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
                                                   reply_ctx),
     }
     item.update(extra)
+    if owner_command:
+        # The capability bin/discord-api.py checks (--for <message_id>);
+        # recorded before the worker can see the item.
+        record_owner_command([msg["id"]] + [f["id"] for f in fragments])
     queue.append(item)
     burst_note = f" (+{len(fragments)} fragment(s))" if fragments else ""
     print(f"Queued {item['kind']} from {msg['author'].get('username')} in "
@@ -2245,30 +2755,33 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         # A typing indicator promises a reply; a name-drop most likely
         # gets none.
         send_typing(msg["channel_id"])
-    ledger_record(msg["id"], "queued",
-                  channel_id=msg.get("channel_id"),
-                  author=msg.get("author", {}).get("username"))
+    ledger_record_many(burst_ids, "queued",
+                       channel_id=msg.get("channel_id"),
+                       author=msg.get("author", {}).get("username"))
     return True
 
 
 def _settle(state, item, status, reason="", replied=False):
-    """Record an outbox item's outcome under its reply_to AND the burst
-    trigger that reply_to belongs to (reply_aliases): the worker replies
-    under the last fragment, while the ledger and the sweep track the
-    trigger. replied=True also adds both ids to replied_to (send dedup)."""
+    """Record an outbox item's outcome under its reply_to AND every other
+    message of the burst it belongs to (reply_aliases): the worker
+    replies under the last fragment, while the ledger and the sweep track
+    the trigger, and a fragment left unsettled would be requeued alone.
+    replied=True also adds all those ids to replied_to (send dedup)."""
     reply_to = item.get("reply_to")
     if not reply_to:
         return
+    aliases = state.get("reply_aliases", {})
+    trigger = aliases.get(reply_to, reply_to)
     ids = [reply_to]
-    trigger = state.get("reply_aliases", {}).get(reply_to)
-    if trigger and trigger != reply_to:
-        ids.append(trigger)
+    ids += [m for m in [trigger] + [f for f, t in aliases.items()
+                                    if t == trigger]
+            if m not in ids]
     for mid in ids:
         if replied and mid not in state["replied_to"]:
             state["replied_to"].append(mid)
-        ledger_record(mid, status, reason,
-                      channel_id=item.get("channel_id"),
-                      author=item.get("author"))
+    ledger_record_many(ids, status, reason,
+                       channel_id=item.get("channel_id"),
+                       author=item.get("author"))
 
 
 # A failed send is retried with growing gaps, but only for this long:
@@ -2295,7 +2808,12 @@ def process_outbox(state):
             print(f"Skipping duplicate reply to message {reply_to}", flush=True)
             _settle(state, item, "replied", "duplicate suppressed")
             continue
-        parts = [link_mentions(p, item.get("channel_id"), state)
+        # Clamped to Discord's per-message limit AFTER every rewrite: the
+        # @everyone neutralization and link_mentions both lengthen text
+        # normalize_parts already trimmed, and a part over the limit
+        # would fail (400) on every retry.
+        parts = [link_mentions(p, item.get("channel_id"),
+                               state)[:DISCORD_MAX_CHARS]
                  for p in normalize_parts(item)]
         # Worker-drafted emoji reactions: applied to the reply_to
         # message. A react-only item may carry no text.
@@ -2309,73 +2827,66 @@ def process_outbox(state):
             _settle(state, item, "skipped", "no reply (worker's call)",
                     replied=True)
             continue
+        if not _is_snowflake(item.get("channel_id")) or (
+                reply_to and not _is_snowflake(reply_to)):
+            print(f"Dropping outbox item with a malformed channel_id or "
+                  f"reply_to: {item.get('channel_id')!r} "
+                  f"{reply_to!r}", flush=True)
+            continue
         retry = item.get("_retry") or {}
         if retry.get("next", 0) > time.time():
             remaining.append(item)  # waiting out the gap after a failure
             continue
-        # Attachments: only from the generated dir. The normal gate is
-        # the monitor's may_generate approval for this message (tracked
-        # in gen_approved; the worker's outbox item doesn't carry the
-        # flag). Approvals are single-use.
-        attachments = []
-        approved = state.get("gen_approved", {})
-        if reply_to in approved:
-            approved_ts = approved.pop(reply_to)
-            candidates = _validate_gen_paths(item.get("attachments"))
+        # Attachments: only generated files bound to the queue item this
+        # reply answers (generated/<its message_id>/), under the
+        # monitor's live may_generate approval for that item (tracked in
+        # gen_approved; the worker's outbox item doesn't carry the flag),
+        # and only into the channel the item came from. There is no
+        # fallback for files without an approval: generation is gated in
+        # code. Nothing is committed before the send succeeds: a retry
+        # re-attaches the same files (kept in _retry), and the approval
+        # (single-use), gen_sent and the generation_sent hook settle once.
+        gen_id = _gen_item_id(state, item)
+        approval = _gen_approval(state, gen_id)
+        if approval and approval.get("channel_id") != item.get("channel_id"):
+            print(f"Note: generation approval for item {gen_id} belongs to "
+                  f"channel {approval.get('channel_id')}, not "
+                  f"{item.get('channel_id')}; no attachments", flush=True)
+            approval = None
+        attachments = []  # (send_path, filename) for the send
+        gen_files = []    # [send_path, original] pairs, for _retry
+        if approval and "attachments" in retry:
+            # A retry: the files the first attempt resolved. Re-checked,
+            # because the outbox (and so _retry) is worker-writable.
+            for pair in retry.get("attachments") or []:
+                ok = isinstance(pair, list) and len(pair) == 2 \
+                    and len(_validate_gen_paths(pair, gen_id)) == 2
+                if ok:
+                    attachments.append((pair[0], os.path.basename(pair[0])))
+                    gen_files.append(pair)
+        elif approval:
+            candidates = _validate_gen_paths(item.get("attachments"), gen_id)
             if not candidates:
                 # The media tool usually returns a remote URL/handle, not the
                 # local filename, so the worker can't name the file. Find it.
-                found = _discover_generated(state, approved_ts)
+                found = _discover_generated(state, gen_id)
                 if found:
                     print(f"Attaching discovered generated file: {found}", flush=True)
                     candidates.append(found)
                 else:
-                    print(f"Note: approved generation for {reply_to} but no "
-                          f"generated file found", flush=True)
+                    print(f"Note: approved generation for {gen_id} but no "
+                          f"file in generated/{gen_id}/", flush=True)
             for rp in candidates:
                 send_path, fname = fit_for_discord(rp)
                 if send_path:
                     attachments.append((send_path, fname))
-                    state.setdefault("gen_sent", []).append(rp)
+                    gen_files.append([send_path, rp])
                 else:
                     print(f"Attachment too large even compressed: {rp}", flush=True)
         elif item.get("attachments"):
-            if GEN_PLUGIN_ENABLED:
-                # The approval key is the trigger message id, but a
-                # greenlight can arrive via another message, so the key
-                # can miss even though generation ran through the
-                # may_generate gate. If the worker listed attachments and
-                # a fresh unsent generated file exists, attach it rather
-                # than dropping it: generation itself is still gated, and
-                # only fresh files from the generated dir qualify.
-                candidates = _discover_fresh_generated(state)
-                if candidates:
-                    print(f"Approval-miss fallback: attaching "
-                          f"{len(candidates)} fresh generated file(s) for "
-                          f"item {item.get('message_id')}", flush=True)
-                else:
-                    print(f"Note: item {item.get('message_id')} listed "
-                          f"attachments without generation approval; "
-                          f"dropped", flush=True)
-            else:
-                candidates = []
-                print(f"Note: item {item.get('message_id')} listed "
-                      f"attachments but the media_generation plugin is "
-                      f"disabled; dropped", flush=True)
-            for rp in candidates:
-                send_path, fname = fit_for_discord(rp)
-                if send_path:
-                    attachments.append((send_path, fname))
-                    state.setdefault("gen_sent", []).append(rp)
-                else:
-                    print(f"Attachment too large even compressed: {rp}",
-                          flush=True)
-        if attachments:
-            # A generation really ran and produced a sendable file. Let
-            # plugins account for it via the generation_sent hook (the
-            # media_generation plugin counts its daily cap here, at send
-            # time, never at queue time).
-            call_hook("generation_sent", {"state": state}, item)
+            print(f"Note: reply to {reply_to} listed attachments without a "
+                  f"live generation approval for its item; dropped",
+                  flush=True)
         try:
             if parts:
                 # standalone: post as a plain message, not a Discord
@@ -2391,6 +2902,16 @@ def process_outbox(state):
                 if reply_to and add_reaction(item["channel_id"], reply_to, emoji):
                     print(f"Added reaction {emoji} for {item.get('author')} "
                           f"in #{item.get('channel_name')}", flush=True)
+            if approval:
+                state.get("gen_approved", {}).pop(gen_id, None)
+            if parts and gen_files:
+                # A generation really ran and its file went out. Let
+                # plugins account for it via the generation_sent hook
+                # (the media_generation plugin counts its daily cap
+                # here, at send time, never at queue time).
+                state.setdefault("gen_sent", []).extend(
+                    rp for _, rp in gen_files)
+                call_hook("generation_sent", {"state": state}, item)
             _settle(state, item, "replied", replied=True)
         except Exception as e:
             code = getattr(e, "code", None)
@@ -2415,7 +2936,8 @@ def process_outbox(state):
                 continue
             n = retry.get("n", 0) + 1
             item["_retry"] = {"first": first, "n": n,
-                              "next": now + min(30, 2 ** n)}
+                              "next": now + min(30, 2 ** n),
+                              "attachments": gen_files}
             print(f"Failed to send reply (attempt {n}; retrying, same "
                   f"nonce): {e}", flush=True)
             remaining.append(item)
@@ -2479,15 +3001,35 @@ def _acquire_singleton():
 # polled messages, so behavior is identical. REST polling still covers
 # every channel too: it acts as gap repair (anything the gateway missed
 # while reconnecting) and as the full fallback if the gateway is down. The
-# last_seen check in drain_gateway() prevents double-processing.
+# REST watermark plus the gateway-seen ids (see note_gateway_seen) prevent
+# double-processing without letting the gateway skip the poll past a gap.
 #
 # Requires the Message Content privileged intent (Discord dev portal -> Bot
 # -> Privileged Gateway Intents). Without the toggle, Discord closes the
 # connection with code 4014 and we fall back to polling with a loud log.
 # ---------------------------------------------------------------------------
 GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
+GATEWAY_QUERY = "/?v=10&encoding=json"
 # GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT
 GATEWAY_INTENTS = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15)
+# Close codes after which reconnecting cannot help. 4004: the token was
+# rejected (exit; the watchdog alerts). 4010-4014: shard, API version, or
+# intents problems that need a code or portal fix: realtime ingest
+# stops and REST polling carries on (the watchdog surfaces the
+# "GATEWAY DISABLED" line). 4007 / 4009: the session cannot be resumed,
+# so the next connect identifies fresh.
+GATEWAY_TOKEN_REJECTED = 4004
+GATEWAY_FATAL_CODES = (4010, 4011, 4012, 4013, 4014)
+GATEWAY_FRESH_SESSION_CODES = (4007, 4009)
+
+
+def _close_code(exc):
+    """The close code of a websockets ConnectionClosed, across versions
+    (newer ones carry it on .rcvd; .code is the deprecated spelling)."""
+    rcvd = getattr(exc, "rcvd", None)
+    if rcvd is not None:
+        return rcvd.code
+    return getattr(exc, "code", None)
 
 
 async def _gateway_heartbeat(ws, interval_secs, status):
@@ -2506,12 +3048,19 @@ async def _gateway_run(token, inbox, status):
     import websockets
     backoff = 5
     session_id = None
+    resume_url = None
     while not status.get("stop"):
+        resuming = bool(session_id and status.get("seq") is not None)
+        # A resume goes to the session's own resume_gateway_url (from
+        # READY); the default URL is for fresh identifies.
+        url = GATEWAY_URL
+        if resuming and resume_url:
+            url = resume_url.rstrip("/") + GATEWAY_QUERY
         try:
-            async with websockets.connect(GATEWAY_URL, max_size=2 ** 22) as ws:
+            async with websockets.connect(url, max_size=2 ** 22) as ws:
                 hello = json.loads(await ws.recv())
                 hb_interval = hello["d"]["heartbeat_interval"] / 1000.0
-                if session_id and status.get("seq") is not None:
+                if resuming:
                     await ws.send(json.dumps({"op": 6, "d": {
                         "token": token,
                         "session_id": session_id,
@@ -2535,17 +3084,30 @@ async def _gateway_run(token, inbox, status):
                         op = pkt.get("op")
                         if pkt.get("s") is not None:
                             status["seq"] = pkt["s"]
+                        if op == 1:      # Discord wants a heartbeat now
+                            await ws.send(json.dumps(
+                                {"op": 1, "d": status.get("seq")}))
+                            continue
                         if op == 7:      # Discord asks us to reconnect
                             break
-                        if op == 9:      # invalid session: re-identify fresh
-                            session_id = None
-                            status["seq"] = None
+                        if op == 9:      # invalid session
+                            # d is true when the session can still be
+                            # resumed; otherwise re-identify fresh.
+                            if not pkt.get("d"):
+                                session_id = None
+                                status["seq"] = None
                             break
                         if op != 0:
                             continue     # hello / heartbeat ack / etc.
                         t = pkt.get("t")
                         if t == "READY":
                             session_id = pkt["d"]["session_id"]
+                            resume_url = pkt["d"].get("resume_gateway_url")
+                            # READY carries the bot's identity: the main
+                            # loop adopts it when /users/@me failed (a
+                            # REST rate-limit storm at boot), so mentions
+                            # are recognized without waiting for REST.
+                            status["user"] = pkt["d"].get("user")
                             print("Gateway READY: realtime ingest live.",
                                   flush=True)
                         elif t == "RESUMED":
@@ -2577,16 +3139,35 @@ async def _gateway_run(token, inbox, status):
                     hb.cancel()
                     status["connected"] = False
         except websockets.ConnectionClosed as e:
-            if e.code == 4014:
-                print("GATEWAY 4014: the Message Content privileged "
-                      "intent is not enabled for this bot application "
-                      "(Discord developer portal -> Bot -> Privileged "
-                      "Gateway Intents). Realtime ingest stays off; "
-                      "REST polling continues.",
+            code = _close_code(e)
+            if code == GATEWAY_TOKEN_REJECTED:
+                # The main loop prints the TOKEN REJECTED marker and
+                # exits; reconnecting with a rejected token never heals.
+                status["token_rejected"] = True
+                wake = status.get("wake")
+                if wake is not None:
+                    wake.set()
+                return
+            if code == 4014:
+                print("GATEWAY DISABLED (code 4014): the Message Content "
+                      "privileged intent is not enabled for this bot "
+                      "application (Discord developer portal -> Bot -> "
+                      "Privileged Gateway Intents). Realtime ingest stays "
+                      "off; REST polling continues.",
                       flush=True)
                 status["intent_denied"] = True
                 return
-            print(f"Gateway closed (code {e.code}); reconnecting...",
+            if code in GATEWAY_FATAL_CODES:
+                print(f"GATEWAY DISABLED (code {code}): Discord refused "
+                      f"this connection for a reason reconnecting cannot "
+                      f"fix (shard, API version, or intents). Realtime "
+                      f"ingest stays off; REST polling continues.",
+                      flush=True)
+                return
+            if code in GATEWAY_FRESH_SESSION_CODES:
+                session_id = None
+                status["seq"] = None
+            print(f"Gateway closed (code {code}); reconnecting...",
                   flush=True)
         except Exception as e:
             print(f"Gateway error ({e}); reconnecting...", flush=True)
@@ -2599,17 +3180,20 @@ def _gateway_thread_main(token, inbox, status):
     try:
         asyncio.run(_gateway_run(token, inbox, status))
     except Exception as e:
-        print(f"Gateway thread died: {e}", flush=True)
+        print(f"GATEWAY DISABLED (thread died: {e}): realtime ingest is "
+              f"off; REST polling continues.", flush=True)
         status["dead"] = True
 
 
 def drain_gateway(state, inbox, channels):
     """Pull gateway-delivered messages (all guilds + DMs) and classify them
     exactly like polled messages. Returns (triggers, joins, dms): guild
-    triggers as (msg, cname, guild_id, kind) tuples, joins as (msg, cname,
-    guild_id), DMs as (msg, cname). Guild join/leave events are applied
-    to state on the way. Skips anything the REST poll already processed
-    (last_seen)."""
+    triggers as (msg, cname, guild_id, kind) tuples (already staged, see
+    stage_found), joins as (msg, cname, guild_id), DMs as (msg, cname).
+    Guild join/leave events are applied to state on the way. Skips
+    anything the REST poll already processed (at or below its last_seen
+    watermark), and leaves that watermark alone (see note_gateway_seen).
+    Messages from servers outside a non-empty bot.guild_ids are ignored."""
     mentions, joins, dms = [], [], []
     guild_names = {}
     for info in channels.values():
@@ -2630,7 +3214,11 @@ def drain_gateway(state, inbox, channels):
         last = state["last_seen"].get(cid)
         if last and int(m["id"]) <= int(last):
             continue  # the poll loop already handled it
+        if gateway_seen(state, cid, m["id"]):
+            continue  # delivered twice (e.g. replayed on resume)
         gid = m.get("guild_id")
+        if gid and GUILD_ALLOWLIST and gid not in GUILD_ALLOWLIST:
+            continue  # bot.guild_ids: other servers are ignored entirely
         if gid:
             info = channels.get(cid)
             if info is None:
@@ -2655,11 +3243,12 @@ def drain_gateway(state, inbox, channels):
                 channels[cid] = info
             cname = channel_display(info)
             record_history(state, cid, [m])
-            state["last_seen"][cid] = m["id"]
+            note_gateway_seen(state, cid, m["id"])
             kind = classify_message(state, m, cname, gid)
             if kind == "join":
                 joins.append((m, cname, gid))
             elif kind:
+                stage_found(state, m, cname, gid, kind)
                 mentions.append((m, cname, gid, kind))
         else:
             # DM event (no guild_id). The configured DM policy decides
@@ -2670,7 +3259,7 @@ def drain_gateway(state, inbox, channels):
             if author.get("bot"):
                 if author.get("id") == BOT_ID:
                     record_history(state, cid, [m])
-                    state["last_seen"][cid] = m["id"]
+                    note_gateway_seen(state, cid, m["id"])
                 continue  # own messages are context only; other bots, ignore
             if DM_POLICY == "off":
                 continue
@@ -2678,7 +3267,7 @@ def drain_gateway(state, inbox, channels):
                     and author.get("id") not in OWNER_USER_IDS:
                 continue
             record_history(state, cid, [m])
-            state["last_seen"][cid] = m["id"]
+            note_gateway_seen(state, cid, m["id"])
             if hold_fragment(state, cid, m):
                 continue  # folded into a burst already being coalesced
             dms.append((m, "DM with " + (author.get("username") or cid)))
@@ -2688,9 +3277,10 @@ def drain_gateway(state, inbox, channels):
 
 # ---------------------------------------------------------------------------
 # Reconciliation sweep. Every engine.sweep.every_cycles poll cycles,
-# independently re-read recent channel history and diff every mention /
-# reply-to-bot against the durable records (replied_to, queue, outbox,
-# quarantine, ledger). Anything older than the grace period with no
+# independently re-read recent channel history (and the owners' polled DM
+# channels) and diff every mention / reply-to-bot / owner DM against the
+# durable records (replied_to, queue, outbox, quarantine, ledger; a burst
+# fragment counts as its trigger). Anything older than the grace period with no
 # terminal state is requeued on the spot. This is the backstop that turns
 # every silent failure mode (storm loss, mid-cycle kill, worker drop)
 # into a delayed reply instead of a permanent miss. Aborts on the first
@@ -2718,10 +3308,20 @@ def sweep_mentions(state, queue, channels):
         pending_ids.add(entry.get("first_id"))
         for frag in entry.get("fragments", []):
             pending_ids.add(frag.get("id"))
+    # Burst fragment id -> trigger id. A fragment is answered by its
+    # trigger's queue item, so it is accounted for whenever its trigger
+    # is (and an outbox reply under a fragment accounts for the trigger).
+    aliases = state.get("reply_aliases", {})
+    outbox_targets |= {aliases[t] for t in outbox_targets if t in aliases}
+    # The owners' DM channels are swept too: a DM lost in a gateway gap
+    # is as lost as a mention.
+    dm_channels = [(dm_id, {"dm": True, "name": name})
+                   for dm_id, name in DM_CHANNELS.items()]
     now = time.time()
     changed = False
-    for cid, info in list(channels.items()):
-        cname = channel_display(info)
+    for cid, info in list(channels.items()) + dm_channels:
+        dm = bool(info.get("dm"))
+        cname = "DM with " + info["name"] if dm else channel_display(info)
         try:
             msgs = api_get(f"/channels/{cid}/messages?limit=20")
         except Exception as e:
@@ -2736,9 +3336,14 @@ def sweep_mentions(state, queue, channels):
             author = m.get("author", {}) or {}
             if author.get("id") == BOT_ID:
                 continue  # (other bots: trigger_kind applies behavior.bots)
+            if dm:
+                # Owner DM channels: every owner message is a trigger.
+                if author.get("bot") \
+                        or author.get("id") not in OWNER_USER_IDS:
+                    continue
             # Direct address only: name-drops are best-effort and most
             # get no reply, so "no reply" is not evidence of a loss.
-            if trigger_kind(m) != "mention":
+            elif trigger_kind(m) != "mention":
                 continue
             if predates_join(state, m, info.get("guild_id")):
                 continue
@@ -2750,11 +3355,13 @@ def sweep_mentions(state, queue, channels):
                     ledger_record(mid, "replied", "sweep sync", cid,
                                   author.get("username"))
                 continue
-            if mid in quar_ids or mid in q_ids or mid in outbox_targets \
-                    or mid in pending_ids:
+            ids = {mid, aliases.get(mid, mid)}
+            if any(ids & s for s in (replied, quar_ids, q_ids,
+                                     outbox_targets, pending_ids)):
                 continue  # accounted for and in flight
             ent = entries.get(mid)
-            if ent and ent.get("status") in LEDGER_TERMINAL:
+            if any(entries.get(i, {}).get("status") in LEDGER_TERMINAL
+                   for i in ids):
                 continue
             if info.get("can_send") is False:
                 ledger_record(mid, "skipped",
@@ -2771,7 +3378,8 @@ def sweep_mentions(state, queue, channels):
                           f"{cname} (recorded in mention ledger).",
                           flush=True)
                 continue
-            ok = enqueue_message(m, cname, state, queue, fragments=[],
+            ok = enqueue_message(m, cname, state, queue, dm=dm,
+                                 fragments=[],
                                  guild_id=info.get("guild_id"))
             if ok:
                 changed = True
@@ -2955,10 +3563,25 @@ def _note_no_send(msg, cname):
 def main():
     global BOT_USER_ID, BOT_ID, BOT_NAME, CHANNELS, GUILDS, _FORCE_DISCOVERY
     _acquire_singleton()
+    touch_heartbeat()
     # Identity FIRST, discovery second: the watchdog's health check waits
-    # for the "Bot user id" line, and full discovery (a probe per channel
+    # for the identity marker, and full discovery (a probe per channel
     # and thread) took ~37s by 2026-10-13, past the watchdog's old 30s
     # window, so it kept killing healthy monitors mid-startup.
+    #
+    # Marker contract with watchdog.sh:
+    #   "Bot user id: <id>"    identity confirmed (here, in-loop, or from
+    #                          the gateway's READY).
+    #   "Bot identity pending" /users/@me failed for a reason that can
+    #                          heal (429 storm, network): the monitor is
+    #                          up, keeps retrying, and the gateway still
+    #                          delivers. The watchdog counts it as a
+    #                          start; it used to print the "Bot user id"
+    #                          marker here so a 429 storm would not get a
+    #                          gateway-live monitor killed (2026-10-15),
+    #                          which also hid a revoked token.
+    #   "TOKEN REJECTED"       a 401: the monitor exits (status 3) and the
+    #                          watchdog raises the token alert.
     try:
         _me = api_get("/users/@me")
         BOT_USER_ID = _me.get("id")
@@ -2966,12 +3589,9 @@ def main():
         BOT_NAME = _me.get("username")
         print(f"Bot user id: {BOT_USER_ID}", flush=True)
     except Exception as e:
-        # The watchdog's health check greps for the "Bot user id" marker;
-        # during a rate-limit storm the identity fetch 429s and the old
-        # wording never matched, so the watchdog killed a healthy,
-        # gateway-live monitor (2026-10-15). Print the marker honestly
-        # and retry the fetch in-loop once REST recovers.
-        print(f"Bot user id: unavailable at boot ({e}); "
+        if getattr(e, "code", None) == 401:
+            token_rejected_exit("401 from /users/@me")
+        print(f"Bot identity pending: /users/@me failed at boot ({e}); "
               f"retrying in-loop.", flush=True)
     CHANNELS, GUILDS = discover_channels()
     print(f"muse-discord monitor starting. Polling {len(CHANNELS)} "
@@ -3034,30 +3654,51 @@ def main():
     last_typing = {}
     was_backing_off = False
     while True:
+        # Each phase below has its own try/except: one failing phase (a
+        # poison message, a corrupt file, a plugin) must not skip the
+        # sweep, discovery, cleanup, and state saves of every cycle.
+        if _token_rejected or _gateway_status.get("token_rejected"):
+            save_state(state)
+            token_rejected_exit(_token_rejected
+                                or "gateway closed with code 4004")
+        touch_heartbeat()
+        if BOT_USER_ID is None and _gateway_status.get("user"):
+            _me = _gateway_status["user"]
+            BOT_USER_ID = _me.get("id")
+            BOT_ID = BOT_USER_ID
+            BOT_NAME = _me.get("username")
+            print(f"Bot user id: {BOT_USER_ID} (from gateway READY)",
+                  flush=True)
+        now = time.time()
+        backing = rest_backing_off()
+        full_poll = (now - last_full_poll >= POLL_INTERVAL) \
+            and not backing
+        # First poll after a rate-limit backoff: light recovery (no
+        # discovery refresh this cycle) so recovery doesn't open with
+        # the request burst that helped trip the limit.
+        recovery_cycle = was_backing_off and not backing
+        was_backing_off = backing
+        joins_found = []
+        dm_items = []
+        queue = None  # read fresh below; None = unknown this cycle
+        if full_poll:
+            last_full_poll = now
+            cycle += 1
+
         try:
-            now = time.time()
-            backing = rest_backing_off()
-            full_poll = (now - last_full_poll >= POLL_INTERVAL) \
-                and not backing
-            # First poll after a rate-limit backoff: light recovery (no
-            # discovery refresh this cycle) so recovery doesn't open with
-            # the request burst that helped trip the limit.
-            recovery_cycle = was_backing_off and not backing
-            was_backing_off = backing
-            mentions_found = []
-            joins_found = []
-            dm_items = []
-
-            if full_poll:
-                last_full_poll = now
-                cycle += 1
-
+            # Until the bot knows its own id nothing can be classified
+            # (mentions are matched against it, its own DMs filtered by
+            # it), so polls wait and the watermarks stay put.
+            if full_poll and BOT_USER_ID is not None:
                 for cid, info in CHANNELS.items():
                     cname = channel_display(info)
                     gid = info["guild_id"]
-                    triggers, joins = check_channel(cid, cname, state, gid)
-                    mentions_found.extend(
-                        [(m, cname, gid, kind) for m, kind in triggers])
+                    try:
+                        # Triggers are staged inside, in arrival order.
+                        _, joins = check_channel(cid, cname, state, gid)
+                    except Exception as e:
+                        print(f"Poll error in {cname}: {e}", flush=True)
+                        continue
                     joins_found.extend([(m, cname, gid) for m in joins])
 
                 # --- DMs: every message not from the bot is addressed
@@ -3066,23 +3707,31 @@ def main():
                     dm_items.extend(
                         (m, "DM with " + dm_name)
                         for m in check_dm_channel(dm_id, dm_name, state))
+        except Exception as e:
+            print(f"Poll error: {e}", flush=True)
 
-            # Gateway fast path: messages pushed in realtime land here as
-            # the same tuples the poll produces. Anything the poll already
-            # processed is skipped via last_seen.
-            # Guild join/leave events ride the same inbox.
-            gw_mentions, gw_joins, gw_dms = drain_gateway(
-                state, _gateway_inbox, CHANNELS)
-            if gw_mentions or gw_joins or gw_dms:
-                print(f"Gateway delivered {len(gw_mentions)} mention(s), "
-                      f"{len(gw_joins)} join(s), {len(gw_dms)} DM(s).",
-                      flush=True)
-            mentions_found.extend(gw_mentions)
-            joins_found.extend(gw_joins)
-            dm_items.extend(gw_dms)
+        try:
+            # Gateway fast path: messages pushed in realtime are
+            # classified (and triggers staged) like polled ones. Anything
+            # the poll already processed is skipped. Guild join/leave
+            # events ride the same inbox. Waits for the bot's identity,
+            # like the poll.
+            if BOT_USER_ID is not None:
+                gw_mentions, gw_joins, gw_dms = drain_gateway(
+                    state, _gateway_inbox, CHANNELS)
+                if gw_mentions or gw_joins or gw_dms:
+                    print(f"Gateway delivered {len(gw_mentions)} "
+                          f"mention(s), {len(gw_joins)} join(s), "
+                          f"{len(gw_dms)} DM(s).", flush=True)
+                joins_found.extend(gw_joins)
+                dm_items.extend(gw_dms)
+        except Exception as e:
+            print(f"Gateway drain error: {e}", flush=True)
 
-            # Stage triggers into the coalescing buffer (bursts from the
-            # same author fold into one pending entry); welcomes queue
+        try:
+            # Stage DMs into the coalescing buffer (bursts from the same
+            # author fold into one pending entry; guild triggers were
+            # staged as they were classified); welcomes queue
             # immediately. Matured bursts flush into single queue items.
             # The queue file is re-read every cycle because flushes can
             # happen on quiet cycles and the worker removes items it drains.
@@ -3091,15 +3740,6 @@ def main():
                 with open(QUEUE_FILE) as f:
                     queue = json.load(f)
             dirty = False
-            for msg, cname, gid, kind in mentions_found:
-                info = CHANNELS.get(msg["channel_id"])
-                if info is not None and info.get("can_send") is False:
-                    # Talk scope: never queue a reply that cannot be
-                    # sent. Logged once per channel; the mention is
-                    # ledgered as skipped so the sweep leaves it alone.
-                    _note_no_send(msg, cname)
-                    continue
-                stage_trigger(state, msg, cname, gid, kind)
             for msg, cname, gid in joins_found:
                 for item in call_hook(
                         "member_join",
@@ -3116,7 +3756,11 @@ def main():
             if dirty:
                 atomic_write(QUEUE_FILE, queue)
             save_state(state)
+        except Exception as e:
+            queue = None  # not trustworthy: the sweep must not write it
+            print(f"Queue/staging error: {e}", flush=True)
 
+        try:
             # Keep the typing indicator alive while replies are pending.
             # Fire for staged bursts too, so the user sees the typing
             # indicator while the burst is being "read", not after the
@@ -3136,11 +3780,17 @@ def main():
                 if now - last_typing.get(cid, 0) >= 8:
                     send_typing(cid)
                     last_typing[cid] = now
+        except Exception as e:
+            print(f"Typing error: {e}", flush=True)
 
+        try:
             # Send any replies drafted by the worker
             process_outbox(state)
             save_state(state)
+        except Exception as e:
+            print(f"Outbox error: {e}", flush=True)
 
+        try:
             if full_poll:
                 _rl_note_clean_cycle()
                 if BOT_USER_ID is None:
@@ -3151,13 +3801,23 @@ def main():
                         BOT_NAME = _me.get("username")
                         print(f"Bot user id: {BOT_USER_ID} "
                               f"(recovered in-loop)", flush=True)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        if getattr(e, "code", None) == 401:
+                            token_rejected_exit("401 from /users/@me")
+        except Exception as e:
+            print(f"Identity retry error: {e}", flush=True)
+
+        try:
+            if full_poll and queue is not None:
                 if cycle % SWEEP_EVERY_CYCLES == 0:
                     if sweep_mentions(state, queue, CHANNELS):
                         atomic_write(QUEUE_FILE, queue)
                         save_state(state)
+        except Exception as e:
+            print(f"Sweep error: {e}", flush=True)
 
+        try:
+            if full_poll:
                 # Periodically re-discover readable channels so permission
                 # changes (grants or revocations) take effect without a
                 # restart. Counted in full-poll cycles (POLL_INTERVAL each).
@@ -3169,7 +3829,7 @@ def main():
                     # for the full channel refresh. Only threads not already
                     # monitored cost an API probe.
                     try:
-                        for gid, gname in get_guilds():
+                        for gid, gname in get_guilds() or []:
                             try:
                                 chans = api_get(f"/guilds/{gid}/channels")
                             except Exception:
@@ -3189,13 +3849,19 @@ def main():
                                 save_state(state)
                     except Exception as e:
                         print(f"Thread refresh error: {e}", flush=True)
+        except Exception as e:
+            print(f"Thread refresh error: {e}", flush=True)
+
+        try:
+            if full_poll:
                 if (cycle % CHANNEL_REFRESH_CYCLES == 0 or _FORCE_DISCOVERY) \
                         and not recovery_cycle:
                     _FORCE_DISCOVERY = False
-                    fresh, fresh_guilds = discover_channels()
+                    fresh, fresh_guilds = discover_channels(CHANNELS)
                     GUILDS = fresh_guilds
                     for cid, info in fresh.items():
                         if cid not in CHANNELS:
+                            # Seeds only a channel with no last_seen yet.
                             seed_channel_seen(cid, channel_display(info),
                                               state)
                     if set(fresh) != set(CHANNELS):
@@ -3213,14 +3879,19 @@ def main():
                         CHANNELS = fresh
                     sync_guilds(state, fresh_guilds, fresh)
                     save_state(state)
+        except Exception as e:
+            print(f"Channel refresh error: {e}", flush=True)
 
+        try:
+            if full_poll:
                 flush_join_notices(state, GUILDS, CHANNELS)
                 sweep_media()
                 sweep_generated()
                 sweep_gen_state(state)
-
+                prune_gateway_seen(state)
+                save_state(state)
         except Exception as e:
-            print(f"Poll error: {e}", flush=True)
+            print(f"Cleanup error: {e}", flush=True)
 
         # Event-driven wait: a gateway MESSAGE_CREATE wakes the loop at
         # once; otherwise it idles in ~2s ticks so coalesce flushes, the
