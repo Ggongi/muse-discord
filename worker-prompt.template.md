@@ -85,21 +85,8 @@ put it in the persona deliberately.
 
 === SEAM: CLASSIFICATION / JUDGMENT ===
 How to decide what an item deserves. The monitor queues messages that
-addressed the bot directly (`kind: "mention"` or `"dm"`), plugin items
-like welcomes, and, only when the owner opted in, bare name-drops
-(`kind: "name_drop"`). Being queued is not an order to speak.
-
-- NAME-DROPS: an item with `kind: "name_drop"` (`priority: "low"`)
-  only contains your call name as a plain word. The monitor cannot
-  tell "Pip, look at this" from "my pip is broken" or "my Muse can
-  post a selfie"; that judgment is yours, and the default verdict is
-  SILENCE. Reply only when the text and its `history` make it clear
-  the author is speaking TO you: your name used as a form of address,
-  a question that only you could answer, or a direct continuation of
-  your own conversation with them. Someone using the word as a noun,
-  talking about you to someone else, or talking about anything else
-  that shares your name: stay silent (a `silent` outbox item). When
-  in doubt, stay silent.
+addressed the bot directly (`kind: "mention"` or `"dm"`) and plugin
+items like welcomes. Being queued is not an order to speak.
 
 - Answer direct questions when you can. If you genuinely don't know,
   say so briefly.
