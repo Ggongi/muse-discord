@@ -46,13 +46,16 @@ items it has processed. Item fields:
 | `media`                    | Downloaded viewable media: `[{path, content_type, source}]`. Video attachments/GIF embeds are represented as sampled still frames (`source` starts with `video-frame:`) |
 | `documents`                | Extracted attachment text: `[{name, content_type, text}]` (text truncated)                                                                                              |
 | `unviewable`               | Names of attachments the monitor could not make viewable                                                                                                                |
-| `history`                  | Up to 8 recent channel messages before the trigger: `[{id, author, text, ts}]`                                                                                          |
+| `history`                  | Up to 8 recent channel messages before the trigger: `[{id, author, author_id, bot, display?, text, ts}]`                                                                |
 | `may_generate`             | Permission flag set by the media_generation plugin (see Plugins). Permission, not a decision                                                                            |
 | `owner_command`            | True only when stamped from an owner's verified user ID                                                                                                                 |
 | `burst`, `burst_fragments` | Burst coalescing: `burst_fragments` is `[{message_id, content, timestamp}]`                                                                                             |
 | `reply_to`                 | When the trigger used Discord's reply feature: `{author, author_id, content, is_bot}`, else null                                                                        |
 | `welcome`                  | True on welcome items                                                                                                                                                   |
 | `welcome_prompt`           | Welcome items only: the plugin's rendered prompt for this join                                                                                                          |
+| `from_bot`                 | True when the trigger's author is another bot (behavior.bots: direct)                                                                                                   |
+| `bot_turns`                | Consecutive bot messages in the channel, ending at the trigger, since a human last spoke (0 for humans)                                                                 |
+| `participants`             | People and agents in the conversation: `[{name, display?, id, bot, you?}]`. Address them as `<@id>`                                                                     |
 
 ### reply_outbox.json (worker -> monitor)
 
@@ -69,9 +72,14 @@ rewrites the file with whatever remains unsent. Item fields:
 | `reply_to`     | Message ID to thread under. Omit for welcome items (system messages cannot be replied to)                                                              |
 | `reactions`    | Optional list of emoji to add to the `reply_to` message. A react-only item may have empty text                                                         |
 | `attachments`  | Optional list of local file paths to attach. Only files inside the package's `generated/` dir are ever sent, and only under the generation rules below |
+| `silent`       | True = deliberately no reply: the monitor records it so the sweep does not requeue the message. Needs `reply_to`                                       |
+| `standalone`   | True = post as a plain message instead of a Discord reply: notifies nobody and does not address the other side                                         |
 
 Monitor-side guarantees on send:
 
+- **Mention linking**: a bare `@Name` matching someone in the
+  channel's recent history (username or display name) is rewritten to
+  a real `<@id>` mention.
 - **Dedup**: a `reply_to` already in the monitor's `replied_to` record
   is never sent twice (protects against overlapping worker runs); the
   suppression is recorded in the ledger.
@@ -107,8 +115,8 @@ updated, recoveries?}}}`. Every mention/DM that reaches a terminal
 state is recorded: `queued` (in flight), `replied`, `quarantined`, or
 `skipped` with a reason (`"no send permission in channel"`,
 `"403 missing access"`, `"recovery cap reached"`, `"enqueue failed
-3x"`, `"duplicate suppressed"`, `"predates bot join"`, `"channel quiet
-(burst breaker)"`, ...). Name-drop items are recorded as `queued` but
+3x"`, `"duplicate suppressed"`, `"predates bot join"`, `"bot turn cap
+(N)"`, ...). Name-drop items are recorded as `queued` but
 the sweep never requeues them: most get no reply by design. The reconciliation sweep diffs
 recent channel history against this ledger (plus queue, outbox,
 quarantine, and replied records) and requeues anything unaccounted
@@ -129,9 +137,9 @@ approvals and sent-file records, plugin state under `plugins`, and the
 server-safety records below: `guild_joined` (per-guild join watermark,
 epoch seconds), `guild_first_seen` (fallback watermark when Discord
 has not reported the join time), `known_guilds` and `join_notices`
-(new-server detection and owed owner DMs), `breaker` (per-channel
-recent sends and `quiet_until`), and `owner_triggers` and
-`trigger_texts` (bounded, for the breaker).
+(new-server detection and owed owner DMs), and `reply_aliases`
+(burst fragment id -> trigger id, so a reply under the last fragment
+settles the trigger in the ledger).
 Safe to delete while the monitor is stopped: the cost is re-seeding
 `last_seen` (history is treated as already seen) and losing rate-limit
 and plugin counters. Join watermarks are re-read from Discord at
@@ -142,7 +150,10 @@ startup, and the known-server set re-seeds silently.
 Enforced by the monitor before anything reaches the queue:
 
 - **Strict triggers.** Only direct address queues work by default: a
-  platform @mention, a reply to the bot, or a DM. Bare-name matching
+  platform @mention, a reply to the bot, or a DM. Other bots count as
+  direct address too (`behavior.bots: direct`), never for name-drops
+  or welcomes; `behavior.max_bot_turns` optionally caps bot-to-bot
+  runs without a human. Bare-name matching
   (`name` in `behavior.respond_to`, with `behavior.call_names`) is
   opt-in and produces low-priority `name_drop` items the worker
   decides on.
@@ -154,16 +165,12 @@ Enforced by the monitor before anything reaches the queue:
   get no ambient behavior: no name-drop items, no welcomes. Direct
   address works everywhere. On joining a new server the bot DMs the
   owners its name, ID, visible channels, mode, and how to activate it.
-- **Burst breaker.** More than `safety.burst_breaker.max_replies`
-  replies in `window_minutes` in one server channel trips a cooldown:
-  queued triggers and drafted replies for that channel are dropped
-  (ledgered as skipped) until it ends, and the owners get a DM with
-  the triggering messages. Replies to owners are exempt.
 
 ## Worker obligations (summary)
 
-1. Drain every queue item you process: draft it into the outbox, or
-   remove it silently when no reply is warranted.
+1. Drain every queue item you process: draft it into the outbox, or,
+   when no reply is warranted, write a `silent` outbox item for it
+   (so the monitor records the decision) and remove it.
 2. Write the outbox atomically; never edit the monitor's files
    (state, ledger, quarantine).
 3. Never hold or request the bot token. Your only Discord write path
@@ -179,6 +186,11 @@ Enforced by the monitor before anything reaches the queue:
    to remove them silently. Reply only when the context makes it clear
    the author is talking to the bot, not about something that shares
    its name.
+8. Address people and agents with `<@id>` from `participants` or by
+   replying to their message; a bare "@Name" notifies nobody (the
+   monitor converts names it recognizes, as a safety net). End
+   conversations that have run their course: silence, a reaction, or
+   a `standalone` closing line, never a reply that asks for more.
 
 ## Plugin hooks
 

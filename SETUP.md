@@ -96,12 +96,18 @@ Edit `config.yaml`:
   Leave it empty unless step 5 or step 6 turns on an ambient behavior.
   **[owner]** To find a server ID: with Developer Mode on, right-click
   the server icon and choose **Copy Server ID**.
-- **safety.burst_breaker**: the defaults (more than 5 replies in 10
-  minutes in one channel means 30 quiet minutes there plus a DM to
-  you) suit most servers.
-- Review **safety** caps and **engine** tuning; defaults are sane.
-- **presence**: one static status line (`status_text` /
-  `status_kind`), or `enabled: false`.
+- **safety**: reply caps are off by default. If the owner wants to
+  bound token spend, set `daily_reply_cap` (all replies per day)
+  and/or `per_user_daily_cap`; their own messages are always exempt.
+- Review **engine** tuning; defaults are sane.
+- **behavior.bots**: `direct` (default) lets other bots, such as
+  other people's Muses, talk to this one by @mention or reply. Set
+  `off` to ignore bots entirely. `behavior.max_bot_turns` (default
+  `null`, no cap) optionally stops bot-to-bot runs after that many
+  bot messages in a row with no human.
+- **presence**: keeps the bot shown as online. By default there is no
+  status line under its name; set `status_text` (and `status_kind`)
+  for one, or `enabled: false` to skip the presence process.
 
 Validate the config loads (no Discord connection is made):
 
@@ -296,16 +302,14 @@ see working before calling the install done.
     server, its ID, the visible channels, and observe mode. An
     @mention there gets a reply, and a member joining there gets no
     welcome until the server is activated.
+12. **Another bot** (if one is in the server): have it @mention this
+    bot or reply to one of its messages. Expect a reply that reaches
+    the other bot as a real mention or reply, and expect the exchange
+    to wind down on its own (silence or a reaction) instead of
+    bouncing confirmations back and forth.
 
 ## Troubleshooting
 
-- **The bot stopped replying in one channel and DMed you a
-  "Heads-up"**: the burst breaker tripped. It lifts on its own after
-  `safety.burst_breaker.cooldown_minutes`, and your own messages are
-  still answered meanwhile. Look at the quoted triggers: a trigger
-  misconfiguration or a pile-on is usually the cause. To lift it
-  early, stop the monitor, delete that channel's entry under
-  `breaker` in `state.json`, and start it again.
 - **No welcomes or name triggers in a server**: the server is in
   observe mode. Add its ID to `behavior.active_guild_ids`.
 
