@@ -11,7 +11,6 @@ reply.lock
 .*.tmp
 quarantine.json
 mention_ledger.json
-owner_commands.json
 monitor.pid
 monitor.heartbeat
 watchdog_state.json

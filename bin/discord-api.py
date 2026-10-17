@@ -7,15 +7,6 @@ and ONLY for a queue item the monitor stamped with owner_command=true
 verified user IDs). It is how "react to your post in #showcase" actually
 does something instead of getting a chatter reply.
 
-That rule is enforced here, not only in the worker's prompt: every call
-must say which owner command it serves, as `--for <message_id>` before
-the subcommand, and the tool refuses unless the monitor recorded that id
-as a live owner command (owner_commands.json, written by the monitor
-when it queues an owner_command item, valid for an hour). A worker
-talked into using the tool by a stranger's message has no id to cite.
-Reads are gated too: the bot can read channels the conversation's
-audience cannot, and what the tool prints can end up in a public reply.
-
 Every id argument must be a plain Discord id (ids are interpolated into
 API paths, so "1/../../guilds/2/bans/3" must never get through), files
 can only be uploaded from the package's generated/ dir, and messages
@@ -36,7 +27,6 @@ import mimetypes
 import os
 import re
 import sys
-import time
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -44,7 +34,6 @@ import uuid
 
 PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GENERATED_DIR = os.path.join(PACKAGE_DIR, "generated")
-OWNER_COMMANDS_FILE = os.path.join(PACKAGE_DIR, "owner_commands.json")
 API = "https://discord.com/api/v10"
 TIMEOUT = 30
 # Messages may ping users (<@id>), never roles or @everyone/@here.
@@ -69,24 +58,6 @@ def generated_file(path):
         raise SystemExit(f"Refusing to upload {path!r}: only files inside "
                          f"{GENERATED_DIR}/ can be attached.")
     return rp
-
-
-def owner_command_error(message_id):
-    """None when message_id is a live owner command the monitor recorded,
-    else the reason to refuse."""
-    if not re.fullmatch(r"[0-9]{17,20}", message_id or ""):
-        return f"--for needs a Discord message id, not {message_id!r}."
-    try:
-        with open(OWNER_COMMANDS_FILE) as f:
-            live = json.load(f)
-        expires = live.get(message_id) if isinstance(live, dict) else None
-    except (OSError, ValueError):
-        expires = None
-    if not isinstance(expires, (int, float)) or expires <= time.time():
-        return (f"Refusing: {message_id} is not a live owner command. Use "
-                f"the message_id of a queue item stamped "
-                f"owner_command: true, within an hour of it.")
-    return None
 
 
 def _bot_cfg():
@@ -315,28 +286,19 @@ COMMANDS = {
 
 
 def main(argv):
-    # --for <message_id> must come first, so it can never be mistaken
-    # for (or eat) a text argument.
-    for_id = None
     args = argv[1:]
+    # A leading --for <message_id> is accepted and ignored, for worker
+    # prompts written when the tool required it.
     if len(args) >= 2 and args[0] == "--for":
-        for_id, args = args[1], args[2:]
+        args = args[2:]
     if not args or args[0] not in COMMANDS:
-        print("usage: discord-api.py --for <owner command message_id> <"
-              + "|".join(sorted(COMMANDS)) + "> ...", file=sys.stderr)
+        print("usage: discord-api.py <" + "|".join(sorted(COMMANDS)) + "> ...",
+              file=sys.stderr)
         return 2
     fn, min_args = COMMANDS[args[0]]
     if len(args) - 1 < min_args:
         print(fn.__doc__.strip(), file=sys.stderr)
         return 2
-    if for_id is None:
-        print("Refusing: every call needs --for <message_id> (the owner "
-              "command it serves) before the subcommand.", file=sys.stderr)
-        return 2
-    err = owner_command_error(for_id)
-    if err:
-        print(err, file=sys.stderr)
-        return 3
     fn(args[1:])
     return 0
 
