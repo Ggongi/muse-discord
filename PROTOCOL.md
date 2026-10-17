@@ -75,7 +75,7 @@ fields:
 | `welcome`                  | True on welcome items                                                                                                                                                   |
 | `welcome_prompt`           | Welcome items only: the plugin's rendered prompt for this join                                                                                                          |
 | `from_bot`                 | True when the trigger's author is another bot (behavior.bots: direct)                                                                                                   |
-| `bot_turns`                | Consecutive bot messages in the channel, ending at the trigger, since a human last spoke (0 for humans)                                                                 |
+| `bot_turns`                | Consecutive bot messages in the channel's rolling history (last 12), ending at the trigger, since a human last spoke (0 for humans)                                     |
 | `participants`             | People and agents in the conversation: `[{name, display?, id, bot, you?}]`. Address them as `<@id>`                                                                     |
 | `queued_at`                | When the monitor queued the item (epoch seconds): the typing indicator stops 3 minutes after it, and the latency log measures from it                                   |
 
@@ -169,8 +169,8 @@ updated, recoveries?}}}`. Every mention/DM that reaches a terminal
 state is recorded: `queued` (in flight), `replied`, `quarantined`, or
 `skipped` with a reason (`"no send permission in channel"`,
 `"403 missing access"`, `"recovery cap reached"`, `"enqueue failed
-3x"`, `"duplicate suppressed"`, `"predates bot join"`, `"bot turn cap
-(N)"`, ...). Name-drop items are recorded as `queued` but
+3x"`, `"duplicate suppressed"`, `"predates bot join"`, ...).
+Name-drop items are recorded as `queued` but
 the sweep never requeues them: most get no reply by design. Every
 message of a burst is recorded with its trigger's status, and an
 outcome under any of them (a reply under the last fragment, a
@@ -194,8 +194,7 @@ never auto-replied.
 
 Working state: per-channel `last_seen` (the REST poll's watermark;
 only the poll advances it), `gw_seen` (ids the gateway already handled
-above that watermark, so the poll skips them), `bot_runs` (consecutive
-bot messages per channel, for `bot_turns`), `replied_to` (bounded),
+above that watermark, so the poll skips them), `replied_to` (bounded),
 rate-limit counters, rolling per-channel `history`, staged coalescing
 bursts (`pending`, including their retry bookkeeping), generation
 approvals and sent-file records, plugin state under `plugins`, and the
@@ -218,8 +217,7 @@ Enforced by the monitor before anything reaches the queue:
 - **Strict triggers.** Only direct address queues work by default: a
   platform @mention, a reply to the bot, or a DM. Other bots count as
   direct address too (`behavior.bots: direct`), never for name-drops
-  or welcomes; `behavior.max_bot_turns` optionally caps bot-to-bot
-  runs without a human. Bare-name matching
+  or welcomes. Bare-name matching
   (`name` in `behavior.respond_to`, with `behavior.call_names`) is
   opt-in and produces low-priority `name_drop` items the worker
   decides on.
