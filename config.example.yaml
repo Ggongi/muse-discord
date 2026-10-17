@@ -9,7 +9,9 @@ bot:
   token_file: "~/.config/muse-discord/bot_token"
   # Alternative to token_file: name of an environment variable holding
   # the token. Leave null to use token_file. The env var wins when both
-  # are set.
+  # are set. watchdog.sh only checks token_file and will not restart a
+  # process without it, so token_env suits running the monitor and
+  # presence under your own supervisor instead.
   token_env: null
   # Restrict the bot to these guild (server) IDs. Empty = every server
   # the bot belongs to. Reading and replying are permission-driven (the
@@ -70,24 +72,34 @@ behavior:
   #   off        = DMs are never read or answered
   dm_policy: owner_only
   # Burst coalescing: a trigger waits this many seconds so rapid
-  # follow-up messages from the same author fold into one reply.
+  # follow-up messages from the same author fold into one reply. 0 =
+  # no coalescing. (Other bots always get at least 15s: their long
+  # replies arrive as several parts.)
   coalesce_seconds: 5
   # Max total characters of one reply (across all its message parts).
+  # 1-2000 (Discord's per-message limit); out-of-range values are
+  # clamped with a warning in monitor.log.
   max_reply_chars: 1800
 
 safety:
   # Hold messages matching prompt-injection / exfiltration patterns in
   # quarantine.json for your review instead of queueing them.
   injection_quarantine: true
-  # Max replies sent per day across all servers, to bound token spend.
-  # Owners' messages are exempt. null = off (the default).
+  # Max items queued for the worker per day across all servers, to
+  # bound token spend. Counted at queue time, so name-drops the worker
+  # leaves unanswered and sweep re-queues count too. Owners' messages
+  # are exempt. null = off (the default); 0 = strangers never queue.
   daily_reply_cap: null
-  # Max replies per user per day. null = off (the default).
+  # Max items queued per user per day (counted the same way). null =
+  # off (the default).
   per_user_daily_cap: null
 
 engine:
   # The REST poll is gap repair for the realtime gateway ingest, and
-  # the cadence for discovery refreshes and the sweep. Seconds.
+  # the cadence for discovery refreshes and the sweep. Seconds. Values
+  # below a floor (10 here, 1 for the other cadences and backoff) are
+  # raised to it with a warning in monitor.log; 0 is honored where it
+  # means something (coalesce, grace, max_age, max_recoveries).
   rest_poll_seconds: 30
   # How often channel/thread discovery re-runs (permission changes and
   # new channels take effect without a restart). Minutes.
@@ -98,7 +110,7 @@ engine:
   sweep:
     every_cycles: 6        # in poll cycles (6 x 30s = ~3 min)
     grace_seconds: 240     # never touch mentions younger than this
-    max_age_hours: 6       # ...or older than this
+    max_age_hours: 6       # ...or older than this (0 = sweep off)
     max_recoveries: 2      # requeue a lost mention at most this often
   # Discord 429 (rate limit) handling: any 429 records a backoff window
   # (Discord's Retry-After is honored when present); REST work pauses
@@ -133,7 +145,9 @@ plugins:
   # New-member welcomes, in active servers only (behavior.
   # active_guild_ids). Params follow the global + per_guild pattern:
   # a param shaped {default: ..., per_guild: {...}} resolves per_guild
-  # first (keyed by guild ID or server name), then the default.
+  # first (keyed by guild ID or server name), then the default. A param
+  # left out takes its default from plugins/<name>/plugin.yaml (the
+  # values shown here); set it to null to turn a cap off.
   welcome:
     enabled: false
     channel:
@@ -155,4 +169,6 @@ plugins:
   media_generation:
     enabled: false
     allowed_user_ids: []   # empty = owners only
-    daily_cap: null        # files actually sent per day; null = no cap
+    # Replies actually sent with generated files attached, per day
+    # (a reply carrying two files counts once). null = no cap.
+    daily_cap: null

@@ -19,7 +19,8 @@ params:
   daily_cap:
     default: null
     description: >-
-      Max generated files actually SENT per day, across all users.
-      Counted at send time by the generation_sent hook, never at queue
-      time (a granted permission that produces no file costs nothing).
-      null = no cap.
+      Max replies with generated files actually SENT per day, across
+      all users (a reply carrying two files counts once). Counted at
+      send time by the generation_sent hook, never at queue time (a
+      granted permission that produces no file costs nothing). null =
+      no cap.
