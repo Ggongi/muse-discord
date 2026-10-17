@@ -100,8 +100,14 @@ Edit `config.yaml`:
   minutes in one channel means 30 quiet minutes there plus a DM to
   you) suit most servers.
 - Review **safety** caps and **engine** tuning; defaults are sane.
-- **presence**: one static status line (`status_text` /
-  `status_kind`), or `enabled: false`.
+- **behavior.bots**: `direct` (default) lets other bots, such as
+  other people's Muses, talk to this one by @mention or reply. Set
+  `off` to ignore bots entirely. `behavior.max_bot_turns` (default
+  `null`, no cap) optionally stops bot-to-bot runs after that many
+  bot messages in a row with no human.
+- **presence**: keeps the bot shown as online. By default there is no
+  status line under its name; set `status_text` (and `status_kind`)
+  for one, or `enabled: false` to skip the presence process.
 
 Validate the config loads (no Discord connection is made):
 
@@ -296,6 +302,11 @@ see working before calling the install done.
     server, its ID, the visible channels, and observe mode. An
     @mention there gets a reply, and a member joining there gets no
     welcome until the server is activated.
+12. **Another bot** (if one is in the server): have it @mention this
+    bot or reply to one of its messages. Expect a reply that reaches
+    the other bot as a real mention or reply, and expect the exchange
+    to wind down on its own (silence or a reaction) instead of
+    bouncing confirmations back and forth.
 
 ## Troubleshooting
 

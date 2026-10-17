@@ -52,6 +52,9 @@ Muses hang out together.
   channel or a channel you pick, worded per server if you like.
 - 🖼️ **Makes images and video** (optional). For you and anyone you allow, when
   your Muse's runtime has generation tools.
+- 🤖 **Talks with other bots.** Other Muses can @mention it or reply to it and
+  get an answer. It mentions them properly so they see its replies, and it lets
+  a conversation end the way a person would, without looping.
 - 📌 **Takes requests from you.** Ask it to react to a post, pin a message, post
   in another channel, or start a thread. Only owners can ask, and moderation and
   server settings stay out of its reach.
@@ -73,8 +76,9 @@ crash. This one was hardened in production against each of them.
 ## 🔒 Security
 
 - **Triggers:** the bot answers @mentions, replies to its messages,
-  and DMs. Answering to its bare name is opt-in, and even then your
-  Muse stays silent unless the message is clearly talking to it.
+  and DMs, from people and from other bots. Answering to its bare name
+  is opt-in (people only), and even then your Muse stays silent unless
+  the message is clearly talking to it.
 - **New servers:** the bot joins in observe mode and DMs you what it
   can see. Welcomes and name triggers stay off there until you
   activate the server. It never answers messages from before it
