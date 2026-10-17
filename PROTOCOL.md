@@ -86,8 +86,14 @@ Monitor-side guarantees on send:
 - **Guardrails**: text is trimmed to `behavior.max_reply_chars` total
   (across parts), `@everyone`/`@here` are neutralized, parts are capped
   at 4 (overflow folds into the last part).
-- **Partial sends never duplicate**: if a multi-part send fails midway,
-  the item is dropped, not retried, so already-sent parts never repeat.
+- **Sends never duplicate**: every message part carries a nonce derived
+  from the reply, with Discord's `enforce_nonce`, so a retry after an
+  ambiguous failure (a timeout after Discord already created the
+  message) returns the existing message instead of posting it again.
+  Failed sends retry with growing gaps for up to 90 seconds, inside
+  Discord's nonce window, then the item is dropped and ledgered as
+  skipped. While retrying, the monitor keeps a `_retry` field on the
+  item; leave it alone.
 - **403 drops**: a permanent permission failure drops the item and is
   recorded in the ledger as skipped.
 
