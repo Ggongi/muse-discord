@@ -1386,8 +1386,12 @@ def stage_trigger(state, msg, cname, guild_id, kind, dm=False):
     key = f"{msg['channel_id']}:{author_id}"
     pending = state.setdefault("pending", {})
     if key in pending:
-        pending[key]["fragments"].append(msg)
-        _upgrade_burst(pending[key], kind)
+        entry = pending[key]
+        if msg["id"] == entry["first_id"] or any(
+                f["id"] == msg["id"] for f in entry["fragments"]):
+            return  # already in this burst (staged twice): nothing to add
+        entry["fragments"].append(msg)
+        _upgrade_burst(entry, kind)
         print(f"Additional trigger from "
               f"{(msg.get('author', {}) or {}).get('username')} folded into "
               f"pending burst in {cname}.", flush=True)
