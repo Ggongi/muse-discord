@@ -22,7 +22,8 @@ Security model:
      caps bound the token budget an attacker could burn by spamming
      mentions (config: safety.*).
   3. Output validation: worker-drafted replies are length-capped and
-     mass mentions (@everyone/@here) are neutralized before sending.
+     mass mentions (@everyone/@here) are neutralized before sending;
+     sends only ever ping users (allowed_mentions), never roles.
   4. Send dedup: never send two replies to the same message (protects
      against overlapping worker runs).
   5. The bot token is read from the configured token file (or env var)
@@ -36,15 +37,18 @@ import copy
 import fcntl
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import os
 import queue as pyqueue
 import random
 import re
+import socket
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import urllib.parse
 from datetime import datetime, timezone
@@ -65,6 +69,7 @@ LEDGER_FILE = os.path.join(BASE_DIR, "mention_ledger.json")
 # Touched by the main loop; the watchdog restarts a monitor whose
 # heartbeat goes stale (a live process whose loop is stuck).
 HEARTBEAT_FILE = os.path.join(BASE_DIR, "monitor.heartbeat")
+OWNER_COMMANDS_FILE = os.path.join(BASE_DIR, "owner_commands.json")
 MEDIA_DIR = os.path.join(BASE_DIR, "media")
 GENERATED_DIR = os.path.join(BASE_DIR, "generated")
 PLUGINS_DIR = os.path.join(BASE_DIR, "plugins")
@@ -264,8 +269,12 @@ BOT_USER_ID = None
 MEDIA_TTL_SECS = 3600  # downloaded media older than this is swept each poll
 # Embeds are only downloaded from known media hosts (attachments always
 # come from the chat CDN). Keeps a malicious link unfurl from becoming a
-# download from an arbitrary server.
+# download from an arbitrary server. A host matches a suffix exactly or
+# as a subdomain ("media.tenor.com"), never as a lookalike
+# ("evil-tenor.com"); see embed_host_allowed and _fetch_addrs, which
+# _fetch_complete applies to every URL and every redirect hop.
 EMBED_MEDIA_HOST_SUFFIXES = ("discordapp.com", "discordapp.net", "tenor.com", "giphy" + ".com", "klipy.com")
+FETCH_MAX_REDIRECTS = 3
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 CTYPE_EXT = {"image/gif": ".gif", "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
 
@@ -275,6 +284,12 @@ MAX_VIDEO_BYTES = 32 * 1024 * 1024
 VIDEO_FRAME_COUNT = 5
 VIDEO_EXTS = (".mp4", ".mov", ".webm", ".avi", ".mkv")
 FFMPEG_TIMEOUT = 60
+# ffprobe/ffmpeg pick a demuxer from the downloaded bytes, not the
+# extension, so a crafted HLS or concat playlist saved as a "video" would
+# make them read other local files or fetch URLs. Only the expected
+# container demuxers may run, and only on a plain local file.
+FFMPEG_INPUT_GUARD = ["-format_whitelist", "mov,mp4,matroska,webm,avi",
+                      "-protocol_whitelist", "file"]
 
 # Documents: download text-ish attachments and extract their text so the
 # worker can read them. The extracted text is inlined on the queue item
@@ -293,10 +308,12 @@ PDFTOTEXT_TIMEOUT = 30
 
 # Generated media: when the media_generation plugin grants permission
 # on a queue item, the worker may write generated files into
-# GENERATED_DIR; the send path attaches files from this directory only
-# (validated in _validate_gen_paths). Generation approvals are
-# single-use and keyed by the triggering message id, because the
-# worker's outbox item does not carry the permission flag.
+# GENERATED_DIR/<the item's message_id>/; the send path attaches a reply's
+# files from its own item's directory only (validated in
+# _validate_gen_paths), so one item's image can never ride on another
+# item's reply. Generation approvals are single-use, keyed by the
+# triggering message id and bound to its channel, because the worker's
+# outbox item does not carry the permission flag.
 GENERATED_TTL_SECS = 3600
 DISCORD_MAX_BYTES = 8 * 1024 * 1024  # unboosted server upload cap
 
@@ -306,7 +323,13 @@ DISCORD_MAX_BYTES = 8 * 1024 * 1024  # unboosted server upload cap
 # the owner's message is actually asking the bot to DO something is the
 # worker's job (natural-language understanding), not a regex's.
 # Strangers never get the flag, so the discord-api.py tool stays locked
-# for them no matter what their message text claims.
+# for them no matter what their message text claims. The tool enforces
+# that in code too: it acts only with --for <message_id> naming a live
+# owner command, which only the monitor records (OWNER_COMMANDS_FILE,
+# written when an owner_command item is queued). A worker tricked by a
+# stranger's item has no such id to cite.
+OWNER_COMMAND_TTL_SECS = 3600
+OWNER_COMMANDS_MAX = 50
 
 # Conversation history: rolling window of recent messages kept per
 # channel/DM so the reply worker drafts with context. Stored in state.json,
@@ -1395,8 +1418,24 @@ def send_nonce(channel_id, reply_to, parts, index):
     return hashlib.sha256(key.encode()).hexdigest()[:25]
 
 
+# What a monitor send may ping: users (the worker addresses people with
+# <@id>) and the author of the message replied to. Never roles,
+# @everyone or @here, whatever the text says; the zero-width rewrite in
+# sanitize_reply is a second layer, not the only one.
+SEND_ALLOWED_MENTIONS = {"parse": ["users"], "replied_user": True}
+DISCORD_MAX_CHARS = 2000  # Discord's hard per-message content limit
+
+
+def _is_snowflake(value):
+    """True for a plain Discord id. Ids from the worker-written outbox are
+    interpolated into API paths, where anything else ("1/../../guilds/2")
+    could turn a send into a different API call."""
+    return isinstance(value, (str, int)) and not isinstance(value, bool) \
+        and re.fullmatch(r"[0-9]{17,20}", str(value)) is not None
+
+
 def send_reply(channel_id, text, reply_to=None, nonce=None):
-    data = {"content": text}
+    data = {"content": text, "allowed_mentions": SEND_ALLOWED_MENTIONS}
     if reply_to:
         data["message_reference"] = {"message_id": reply_to}
     if nonce:
@@ -1417,7 +1456,7 @@ def send_typing(channel_id):
 def add_reaction(channel_id, message_id, emoji):
     """Add a Unicode emoji reaction to a message (PUT .../@me). Used for
     reactions drafted by the worker via the outbox 'reactions' list."""
-    encoded = urllib.parse.quote(emoji)
+    encoded = urllib.parse.quote(emoji, safe="")  # "/" stays in the segment
     try:
         req = urllib.request.Request(
             API + f"/channels/{channel_id}/messages/{message_id}"
@@ -1505,7 +1544,7 @@ def send_reply_with_files(channel_id, text, files, reply_to=None,
     """Send a message with file attachments via multipart/form-data.
     files: list of (local_path, filename)."""
     boundary = "----MuseDiscord%d" % int(time.time() * 1000)
-    payload = {"content": text}
+    payload = {"content": text, "allowed_mentions": SEND_ALLOWED_MENTIONS}
     if reply_to:
         payload["message_reference"] = {"message_id": reply_to}
     if nonce:
@@ -1568,13 +1607,33 @@ def fit_for_discord(path):
 
 
 def sweep_generated():
-    """Delete generated files older than GENERATED_TTL_SECS (already sent)."""
+    """Delete generated files older than GENERATED_TTL_SECS (already sent),
+    including those in the per-item generated/<message_id>/ dirs, then
+    item dirs left empty for that long."""
     if os.path.isdir(GENERATED_DIR):
         now = time.time()
         for fname in os.listdir(GENERATED_DIR):
             fpath = os.path.join(GENERATED_DIR, fname)
             try:
-                if now - os.path.getmtime(fpath) > GENERATED_TTL_SECS:
+                if os.path.isdir(fpath) and not os.path.islink(fpath):
+                    removed = False
+                    for sub in os.listdir(fpath):
+                        spath = os.path.join(fpath, sub)
+                        try:
+                            if now - os.lstat(spath).st_mtime \
+                                    > GENERATED_TTL_SECS:
+                                os.remove(spath)
+                                removed = True
+                        except OSError:
+                            pass
+                    # An empty dir only goes once it held expired files
+                    # or is old itself: the worker may have just created
+                    # it and not written its file yet.
+                    if not os.listdir(fpath) and (
+                            removed or now - os.path.getmtime(fpath)
+                            > GENERATED_TTL_SECS):
+                        os.rmdir(fpath)
+                elif now - os.path.getmtime(fpath) > GENERATED_TTL_SECS:
                     os.remove(fpath)
             except OSError:
                 pass
@@ -1582,19 +1641,31 @@ def sweep_generated():
 
 def sweep_gen_state(state):
     """Drop generation approvals older than GENERATED_TTL_SECS (they are
-    single-use and short-lived by design) and bound the sent-file record."""
+    single-use and short-lived by design) and bound the sent-file record.
+    Approvals from before channel binding (a bare timestamp) go too."""
     approved = state.get("gen_approved", {})
     now = time.time()
-    for mid in [m for m, ts in approved.items()
-                if now - ts > GENERATED_TTL_SECS]:
+    for mid in [m for m, a in approved.items()
+                if not isinstance(a, dict)
+                or now - a.get("ts", 0) > GENERATED_TTL_SECS]:
         approved.pop(mid, None)
     if len(state.get("gen_sent", [])) > 50:
         state["gen_sent"] = state["gen_sent"][-50:]
 
 
-def _validate_gen_paths(paths):
-    """Keep only paths that resolve inside GENERATED_DIR and exist."""
-    gen_root = os.path.realpath(GENERATED_DIR)
+def _gen_item_dir(item_id):
+    """generated/<item_id>/, the only place a queue item's generated files
+    may come from, or None for anything but a plain message id (no path
+    tricks). Only the generated/ root is realpath'd: an item dir that is
+    a symlink to another item's dir must fail the containment check."""
+    if not isinstance(item_id, str) or not re.fullmatch(r"[0-9]+", item_id):
+        return None
+    return os.path.join(os.path.realpath(GENERATED_DIR), item_id)
+
+
+def _validate_gen_paths(paths, item_id):
+    """Keep only paths that exist and resolve inside generated/<item_id>/."""
+    item_root = _gen_item_dir(item_id)
     candidates = []
     for p in paths or []:
         if not isinstance(p, str):
@@ -1603,8 +1674,9 @@ def _validate_gen_paths(paths):
         ap = p if os.path.isabs(p) else os.path.join(
             os.path.expanduser("~"), p)
         rp = os.path.realpath(ap)
-        if not rp.startswith(gen_root + os.sep):
-            print(f"Dropping attachment outside generated dir: {p}", flush=True)
+        if item_root is None or not rp.startswith(item_root + os.sep):
+            print(f"Dropping attachment outside generated/{item_id}/: {p}",
+                  flush=True)
             continue
         if not os.path.isfile(rp):
             print(f"Dropping missing attachment: {p}", flush=True)
@@ -1613,54 +1685,63 @@ def _validate_gen_paths(paths):
     return candidates
 
 
-def _discover_fresh_generated(state, max_age_secs=GENERATED_TTL_SECS):
-    """Newest unsent generated files younger than max_age_secs. Used by the
-    owner fallback when the worker couldn't name the file it generated."""
-    gen_root = os.path.realpath(GENERATED_DIR)
-    if not os.path.isdir(gen_root):
-        return []
-    sent = set(state.get("gen_sent", []))
-    now = time.time()
-    fresh = []
-    for fname in os.listdir(gen_root):
-        if fname.endswith(".json") or ".fit." in fname:
-            continue  # sidecars and compressed copies, not originals
-        fpath = os.path.join(gen_root, fname)
-        if fpath in sent or not os.path.isfile(fpath):
-            continue
-        try:
-            mt = os.path.getmtime(fpath)
-        except OSError:
-            continue
-        if now - mt <= max_age_secs:
-            fresh.append((mt, fpath))
-    fresh.sort(reverse=True)
-    return [fp for _, fp in fresh[:1]]
-
-
-def _discover_generated(state, approved_ts):
-    """Find the newest generated media file created after the approval that
-    hasn't been sent yet. The worker often isn't told the local filename
-    (the media tool returns a remote URL/handle), so the monitor matches
-    the file itself. Returns a local path or None."""
-    gen_root = os.path.realpath(GENERATED_DIR)
-    if not os.path.isdir(gen_root):
+def _discover_generated(state, item_id):
+    """Find the newest unsent generated file in generated/<item_id>/. The
+    worker often isn't told the local filename (the media tool returns a
+    remote URL/handle), so the monitor matches the file itself, but only
+    in the item's own directory: a file made for another item (a DM, say)
+    is never a candidate. Returns a local path or None."""
+    item_root = _gen_item_dir(item_id)
+    if item_root is None or not os.path.isdir(item_root):
         return None
     sent = set(state.get("gen_sent", []))
     best = None
-    for fname in os.listdir(gen_root):
+    for fname in os.listdir(item_root):
         if fname.endswith(".json") or ".fit." in fname:
             continue  # sidecars and compressed copies, not originals
-        fpath = os.path.join(gen_root, fname)
+        fpath = os.path.realpath(os.path.join(item_root, fname))
+        if not fpath.startswith(item_root + os.sep):
+            continue  # a symlink out of the item dir
         if fpath in sent or not os.path.isfile(fpath):
             continue
         try:
             mt = os.path.getmtime(fpath)
         except OSError:
             continue
-        if mt >= approved_ts - 10 and (best is None or mt > best[1]):
+        if best is None or mt > best[1]:
             best = (fpath, mt)
     return best[0] if best else None
+
+
+def _gen_item_id(state, item):
+    """The queue item an outbox item answers, as its trigger message id:
+    reply_to, resolved through reply_aliases (the worker replies under
+    the LAST burst fragment, while approvals and generated/<id>/ use the
+    trigger). An explicit "item" field is honored only when it agrees,
+    so a reply can never claim another item's approval and files."""
+    reply_to = item.get("reply_to")
+    resolved = None
+    if reply_to is not None:
+        resolved = str(state.get("reply_aliases", {}).get(str(reply_to),
+                                                          reply_to))
+    claimed = item.get("item")
+    if claimed is None:
+        return resolved
+    if resolved is not None and str(claimed) != resolved:
+        print(f"Note: outbox item names item {claimed} but replies to "
+              f"{reply_to} (item {resolved}); no attachments", flush=True)
+        return None
+    return str(claimed)
+
+
+def _gen_approval(state, item_id):
+    """The live generation approval for a queue item ({"ts",
+    "channel_id"}), or None."""
+    a = state.get("gen_approved", {}).get(item_id) if item_id else None
+    if not isinstance(a, dict) \
+            or time.time() - a.get("ts", 0) > GENERATED_TTL_SECS:
+        return None
+    return a
 
 
 def _fetch_complete(url, max_bytes, timeout, kind):
@@ -1674,27 +1755,67 @@ def _fetch_complete(url, max_bytes, timeout, kind):
     Range requests when short.
     Never sends the bot token: attachment URLs are pre-signed, and the CDN
     drops connections carrying an Authorization header.
+    Every URL, and every redirect hop, must pass _fetch_addrs (https, an
+    allowlisted media host, public addresses only): message content
+    picks these URLs, and a fetch must not become a probe of the LAN or
+    the cloud metadata service.
     """
     ua = headers()["User-Agent"]
-    # Path 1: curl (proven reliable on this network)
+    # Path 1: curl (proven reliable on this network). No -L: redirects
+    # are followed here one hop at a time, so each hop gets the same
+    # checks as the first URL, and --resolve pins curl to the addresses
+    # just checked (no DNS swap between check and connect). -f makes an
+    # HTTP error a failure instead of content: an error page must not be
+    # extracted as the "document".
+    hop = url
     try:
-        r = subprocess.run(
-            ["curl", "-sS", "-L", "--max-time", str(timeout),
-             "--max-filesize", str(max_bytes), "-A", ua,
-             "-w", "\n%{content_type}", url],
-            capture_output=True, timeout=timeout + 10)
-        if r.returncode == 0 and r.stdout:
-            body, _, ctype = r.stdout.rpartition(b"\n")
+        for _ in range(FETCH_MAX_REDIRECTS + 1):
+            addrs = _fetch_addrs(hop)
+            if not addrs:
+                print("Refusing %s download from %s: not https, not an "
+                      "allowlisted media host, or not a public address" %
+                      (kind, hop[:120]), flush=True)
+                return None, None
+            p = urllib.parse.urlparse(hop)
+            pin = "%s:%d:%s" % (p.hostname, p.port or 443, ",".join(
+                "[%s]" % a if ":" in a else a for a in addrs))
+            r = subprocess.run(
+                ["curl", "-sS", "-f", "--proto", "=https", "--resolve", pin,
+                 "--max-time", str(timeout),
+                 "--max-filesize", str(max_bytes), "-A", ua,
+                 "-w", "\n%{http_code}\n%{content_type}\n%{redirect_url}",
+                 hop],
+                capture_output=True, timeout=timeout + 10)
+            if r.returncode != 0 or not r.stdout:
+                print("curl %s download failed: %s" %
+                      (kind, r.stderr.decode(errors="replace")[:150]),
+                      flush=True)
+                break
+            body, code, ctype, nxt = r.stdout.rsplit(b"\n", 3)
+            code = code.decode(errors="replace").strip()
+            nxt = nxt.decode(errors="replace").strip()
+            if code.startswith("3") and nxt:
+                hop = nxt
+                continue
             ctype = ctype.decode(errors="replace").split(";")[0].strip().lower()
-            if body and len(body) <= max_bytes:
+            if code.startswith("2") and body and len(body) <= max_bytes:
                 return bytes(body), ctype
-        print("curl %s download failed: %s" %
-              (kind, r.stderr.decode(errors="replace")[:150]), flush=True)
+            print("curl %s download failed: HTTP %s" % (kind, code),
+                  flush=True)
+            break
+        else:
+            print("curl %s download failed: more than %d redirects" %
+                  (kind, FETCH_MAX_REDIRECTS), flush=True)
+            return None, None
     except FileNotFoundError:
         pass  # no curl installed; fall through to urllib
     except Exception as e:
         print("curl %s download failed: %s" % (kind, e), flush=True)
-    # Path 2: urllib with length verification + Range resume
+    # Path 2: urllib with length verification + Range resume. HTTP errors
+    # raise; redirects go through _FetchRedirectHandler's checks.
+    if not _fetch_addrs(url):
+        return None, None
+    opener = urllib.request.build_opener(_FetchRedirectHandler)
     data = bytearray()
     expected = None
     ctype = ""
@@ -1704,7 +1825,7 @@ def _fetch_complete(url, max_bytes, timeout, kind):
             if data:
                 h["Range"] = "bytes=%d-" % len(data)
             req = urllib.request.Request(url, headers=h)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with opener.open(req, timeout=timeout) as resp:
                 if resp.status == 200 and data:
                     data = bytearray()  # server ignored Range; start over
                     expected = None
@@ -1841,8 +1962,9 @@ def extract_frames(video_path, out_prefix, count=VIDEO_FRAME_COUNT):
     Returns the list of frame paths (may be empty on failure)."""
     try:
         probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "csv=p=0", video_path],
+            ["ffprobe", "-v", "error", *FFMPEG_INPUT_GUARD,
+             "-show_entries", "format=duration", "-of", "csv=p=0",
+             video_path],
             capture_output=True, text=True, timeout=30)
         duration = float((probe.stdout or "").strip() or 0)
     except Exception:
@@ -1854,7 +1976,8 @@ def extract_frames(video_path, out_prefix, count=VIDEO_FRAME_COUNT):
         out = "%s_frame%d.png" % (out_prefix, i)
         try:
             subprocess.run(
-                ["ffmpeg", "-v", "error", "-ss", str(t), "-i", video_path,
+                ["ffmpeg", "-v", "error", "-ss", str(t),
+                 *FFMPEG_INPUT_GUARD, "-i", video_path,
                  "-frames:v", "1", "-y", out],
                 capture_output=True, timeout=FFMPEG_TIMEOUT)
             if os.path.exists(out) and os.path.getsize(out) > 0:
@@ -1874,8 +1997,57 @@ def tenor_gif_variant(url):
 
 
 def embed_host_allowed(url):
-    host = urllib.parse.urlparse(url).hostname or ""
-    return host.endswith(EMBED_MEDIA_HOST_SUFFIXES)
+    """True when url's host is an allowlisted media host or a subdomain
+    of one. A bare suffix match would also accept lookalikes such as
+    evil-tenor.com or attackerdiscordapp.net."""
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").rstrip(".")
+    except ValueError:
+        return False
+    return any(host == s or host.endswith("." + s)
+               for s in EMBED_MEDIA_HOST_SUFFIXES)
+
+
+def _fetch_addrs(url):
+    """The addresses a media fetch of url may connect to, or None when it
+    must not be fetched at all: not https, not an allowlisted media host,
+    unresolvable, or resolving to ANY non-public address (private,
+    loopback, link-local such as 169.254.169.254, reserved, multicast)."""
+    try:
+        p = urllib.parse.urlparse(url)
+        port = p.port or 443
+    except ValueError:
+        return None
+    if p.scheme != "https" or not embed_host_allowed(url):
+        return None
+    try:
+        infos = socket.getaddrinfo(p.hostname, port,
+                                   proto=socket.IPPROTO_TCP)
+    except (OSError, UnicodeError):
+        return None
+    addrs = []
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        except ValueError:
+            return None
+        if not ip.is_global or ip.is_multicast:
+            return None
+        if str(ip) not in addrs:
+            addrs.append(str(ip))
+    return addrs or None
+
+
+class _FetchRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """urllib's side of _fetch_complete's redirect policy: at most
+    FETCH_MAX_REDIRECTS hops, each to a URL that passes _fetch_addrs."""
+    max_redirections = FETCH_MAX_REDIRECTS
+
+    def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+        if not _fetch_addrs(newurl):
+            raise urllib.error.HTTPError(
+                newurl, code, "redirect to a disallowed URL", hdrs, fp)
+        return super().redirect_request(req, fp, code, msg, hdrs, newurl)
 
 
 def collect_media(msg):
@@ -2392,6 +2564,29 @@ def link_mentions(text, channel_id, state):
     return pattern.sub(lambda m: f"<@{names[m.group(1).lower()]}>", text)
 
 
+def record_owner_command(ids):
+    """Mark message ids as live owner commands for bin/discord-api.py's
+    --for check: {message_id: expiry epoch}, expired entries pruned, the
+    newest OWNER_COMMANDS_MAX kept. Written atomically; never raises."""
+    try:
+        with open(OWNER_COMMANDS_FILE) as f:
+            live = json.load(f)
+    except (OSError, ValueError):
+        live = {}
+    now = time.time()
+    if not isinstance(live, dict):
+        live = {}
+    live = {k: v for k, v in live.items()
+            if isinstance(v, (int, float)) and v > now}
+    for mid in ids:
+        live[mid] = now + OWNER_COMMAND_TTL_SECS
+    keep = sorted(live.items(), key=lambda kv: kv[1])[-OWNER_COMMANDS_MAX:]
+    try:
+        atomic_write(OWNER_COMMANDS_FILE, dict(keep))
+    except OSError as e:
+        print(f"Could not record owner command(s) {ids}: {e}", flush=True)
+
+
 def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
                     guild_id=None, kind="mention"):
     """Run one message (plus any burst fragments coalesced with it) through
@@ -2456,6 +2651,29 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         documents += dc
         unviewable += uv
 
+    # 3b. Reply context: when the trigger used Discord's reply feature, say
+    #     whose message it was replying to so the worker knows whether the
+    #     message was actually addressed to the bot or to someone else.
+    reply_ctx = get_reply_context(msg)
+
+    # 3c. The worker reads extracted document text and the replied-to
+    #     message as well as the message itself, so they get the same
+    #     injection pre-filter. The bot's own replied-to message is
+    #     skipped: everyday phrasing in it ("you are now set up") would
+    #     quarantine every reply to it.
+    if INJECTION_QUARANTINE:
+        extra_texts = [(f"document {d.get('name')}", d.get("text") or "")
+                       for d in documents]
+        if reply_ctx and not reply_ctx.get("is_bot"):
+            extra_texts.append(("replied-to message",
+                                reply_ctx.get("content") or ""))
+        for where, text in extra_texts:
+            matched = is_suspicious(text)
+            if matched:
+                quarantine(msg, cname, f"{matched} (in {where})",
+                           fragments)
+                return False
+
     # 4. Attach recent conversation history (excluding the trigger and its
     #    fragments) so the worker replies with context.
     history = [h for h in chan_hist
@@ -2478,7 +2696,10 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
             extra.update(res)
     may_generate = bool(extra.pop("may_generate", False))
     if may_generate:
-        state.setdefault("gen_approved", {})[msg["id"]] = time.time()
+        # Bound to the channel too: the file may only go back where the
+        # request came from (an image made in a DM never posts publicly).
+        state.setdefault("gen_approved", {})[msg["id"]] = {
+            "ts": time.time(), "channel_id": msg["channel_id"]}
 
     # 6. Owner commands: stamped for the owners' messages only, from the
     #    verified user ID in code. The worker decides with natural-language
@@ -2488,11 +2709,6 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     # sweep track the trigger: remember which trigger each fragment
     # belongs to so a reply (or a silent pass) settles the whole burst.
     alias_fragments(state, msg["id"], fragments)
-
-    # 7. Reply context: when the trigger used Discord's reply feature, say
-    #    whose message it was replying to so the worker knows whether the
-    #    message was actually addressed to the bot or to someone else.
-    reply_ctx = get_reply_context(msg)
 
     item = {
         "message_id": msg["id"],
@@ -2527,6 +2743,10 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
                                                   reply_ctx),
     }
     item.update(extra)
+    if owner_command:
+        # The capability bin/discord-api.py checks (--for <message_id>);
+        # recorded before the worker can see the item.
+        record_owner_command([msg["id"]] + [f["id"] for f in fragments])
     queue.append(item)
     burst_note = f" (+{len(fragments)} fragment(s))" if fragments else ""
     print(f"Queued {item['kind']} from {msg['author'].get('username')} in "
@@ -2588,7 +2808,12 @@ def process_outbox(state):
             print(f"Skipping duplicate reply to message {reply_to}", flush=True)
             _settle(state, item, "replied", "duplicate suppressed")
             continue
-        parts = [link_mentions(p, item.get("channel_id"), state)
+        # Clamped to Discord's per-message limit AFTER every rewrite: the
+        # @everyone neutralization and link_mentions both lengthen text
+        # normalize_parts already trimmed, and a part over the limit
+        # would fail (400) on every retry.
+        parts = [link_mentions(p, item.get("channel_id"),
+                               state)[:DISCORD_MAX_CHARS]
                  for p in normalize_parts(item)]
         # Worker-drafted emoji reactions: applied to the reply_to
         # message. A react-only item may carry no text.
@@ -2602,73 +2827,66 @@ def process_outbox(state):
             _settle(state, item, "skipped", "no reply (worker's call)",
                     replied=True)
             continue
+        if not _is_snowflake(item.get("channel_id")) or (
+                reply_to and not _is_snowflake(reply_to)):
+            print(f"Dropping outbox item with a malformed channel_id or "
+                  f"reply_to: {item.get('channel_id')!r} "
+                  f"{reply_to!r}", flush=True)
+            continue
         retry = item.get("_retry") or {}
         if retry.get("next", 0) > time.time():
             remaining.append(item)  # waiting out the gap after a failure
             continue
-        # Attachments: only from the generated dir. The normal gate is
-        # the monitor's may_generate approval for this message (tracked
-        # in gen_approved; the worker's outbox item doesn't carry the
-        # flag). Approvals are single-use.
-        attachments = []
-        approved = state.get("gen_approved", {})
-        if reply_to in approved:
-            approved_ts = approved.pop(reply_to)
-            candidates = _validate_gen_paths(item.get("attachments"))
+        # Attachments: only generated files bound to the queue item this
+        # reply answers (generated/<its message_id>/), under the
+        # monitor's live may_generate approval for that item (tracked in
+        # gen_approved; the worker's outbox item doesn't carry the flag),
+        # and only into the channel the item came from. There is no
+        # fallback for files without an approval: generation is gated in
+        # code. Nothing is committed before the send succeeds: a retry
+        # re-attaches the same files (kept in _retry), and the approval
+        # (single-use), gen_sent and the generation_sent hook settle once.
+        gen_id = _gen_item_id(state, item)
+        approval = _gen_approval(state, gen_id)
+        if approval and approval.get("channel_id") != item.get("channel_id"):
+            print(f"Note: generation approval for item {gen_id} belongs to "
+                  f"channel {approval.get('channel_id')}, not "
+                  f"{item.get('channel_id')}; no attachments", flush=True)
+            approval = None
+        attachments = []  # (send_path, filename) for the send
+        gen_files = []    # [send_path, original] pairs, for _retry
+        if approval and "attachments" in retry:
+            # A retry: the files the first attempt resolved. Re-checked,
+            # because the outbox (and so _retry) is worker-writable.
+            for pair in retry.get("attachments") or []:
+                ok = isinstance(pair, list) and len(pair) == 2 \
+                    and len(_validate_gen_paths(pair, gen_id)) == 2
+                if ok:
+                    attachments.append((pair[0], os.path.basename(pair[0])))
+                    gen_files.append(pair)
+        elif approval:
+            candidates = _validate_gen_paths(item.get("attachments"), gen_id)
             if not candidates:
                 # The media tool usually returns a remote URL/handle, not the
                 # local filename, so the worker can't name the file. Find it.
-                found = _discover_generated(state, approved_ts)
+                found = _discover_generated(state, gen_id)
                 if found:
                     print(f"Attaching discovered generated file: {found}", flush=True)
                     candidates.append(found)
                 else:
-                    print(f"Note: approved generation for {reply_to} but no "
-                          f"generated file found", flush=True)
+                    print(f"Note: approved generation for {gen_id} but no "
+                          f"file in generated/{gen_id}/", flush=True)
             for rp in candidates:
                 send_path, fname = fit_for_discord(rp)
                 if send_path:
                     attachments.append((send_path, fname))
-                    state.setdefault("gen_sent", []).append(rp)
+                    gen_files.append([send_path, rp])
                 else:
                     print(f"Attachment too large even compressed: {rp}", flush=True)
         elif item.get("attachments"):
-            if GEN_PLUGIN_ENABLED:
-                # The approval key is the trigger message id, but a
-                # greenlight can arrive via another message, so the key
-                # can miss even though generation ran through the
-                # may_generate gate. If the worker listed attachments and
-                # a fresh unsent generated file exists, attach it rather
-                # than dropping it: generation itself is still gated, and
-                # only fresh files from the generated dir qualify.
-                candidates = _discover_fresh_generated(state)
-                if candidates:
-                    print(f"Approval-miss fallback: attaching "
-                          f"{len(candidates)} fresh generated file(s) for "
-                          f"item {item.get('message_id')}", flush=True)
-                else:
-                    print(f"Note: item {item.get('message_id')} listed "
-                          f"attachments without generation approval; "
-                          f"dropped", flush=True)
-            else:
-                candidates = []
-                print(f"Note: item {item.get('message_id')} listed "
-                      f"attachments but the media_generation plugin is "
-                      f"disabled; dropped", flush=True)
-            for rp in candidates:
-                send_path, fname = fit_for_discord(rp)
-                if send_path:
-                    attachments.append((send_path, fname))
-                    state.setdefault("gen_sent", []).append(rp)
-                else:
-                    print(f"Attachment too large even compressed: {rp}",
-                          flush=True)
-        if attachments:
-            # A generation really ran and produced a sendable file. Let
-            # plugins account for it via the generation_sent hook (the
-            # media_generation plugin counts its daily cap here, at send
-            # time, never at queue time).
-            call_hook("generation_sent", {"state": state}, item)
+            print(f"Note: reply to {reply_to} listed attachments without a "
+                  f"live generation approval for its item; dropped",
+                  flush=True)
         try:
             if parts:
                 # standalone: post as a plain message, not a Discord
@@ -2684,6 +2902,16 @@ def process_outbox(state):
                 if reply_to and add_reaction(item["channel_id"], reply_to, emoji):
                     print(f"Added reaction {emoji} for {item.get('author')} "
                           f"in #{item.get('channel_name')}", flush=True)
+            if approval:
+                state.get("gen_approved", {}).pop(gen_id, None)
+            if parts and gen_files:
+                # A generation really ran and its file went out. Let
+                # plugins account for it via the generation_sent hook
+                # (the media_generation plugin counts its daily cap
+                # here, at send time, never at queue time).
+                state.setdefault("gen_sent", []).extend(
+                    rp for _, rp in gen_files)
+                call_hook("generation_sent", {"state": state}, item)
             _settle(state, item, "replied", replied=True)
         except Exception as e:
             code = getattr(e, "code", None)
@@ -2708,7 +2936,8 @@ def process_outbox(state):
                 continue
             n = retry.get("n", 0) + 1
             item["_retry"] = {"first": first, "n": n,
-                              "next": now + min(30, 2 ** n)}
+                              "next": now + min(30, 2 ** n),
+                              "attachments": gen_files}
             print(f"Failed to send reply (attempt {n}; retrying, same "
                   f"nonce): {e}", flush=True)
             remaining.append(item)

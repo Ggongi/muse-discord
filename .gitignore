@@ -7,6 +7,7 @@ reply_queue.json
 reply_outbox.json
 quarantine.json
 mention_ledger.json
+owner_commands.json
 monitor.pid
 monitor.heartbeat
 watchdog_state.json

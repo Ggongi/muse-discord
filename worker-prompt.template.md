@@ -37,8 +37,8 @@ Do this, in order:
    `reply_to` there (you cannot reply to a system message).
    `reactions` (optional) lists emoji the monitor adds to the
    `reply_to` message; a react-only item may have empty text.
-   `attachments` is ONLY for media generated this run (see the
-   GENERATION POLICY seam); never a remote URL.
+   `attachments` is ONLY for media generated this run for this item
+   (see the GENERATION POLICY seam); never a remote URL.
    `"standalone": true` (optional) posts the text as a plain message
    instead of a Discord reply (see ENDING CONVERSATIONS).
    If you decide an item deserves no reply (see the JUDGMENT seam),
@@ -136,15 +136,20 @@ an allowed user.
   cannot produce in THIS runtime (the installing Muse fills this in
   during setup: e.g. images yes / video no / no audio).
 - To generate: use your runtime's media generation tool with output
-  directed into `<package dir>/generated/`. Base the prompt on what
-  was actually asked: their words, any reference images in the item's
-  `media`, the subject and style. Keep it faithful; don't freelance a
-  different concept.
+  directed into `<package dir>/generated/<message_id>/`, where
+  `<message_id>` is the item's own `message_id` (also for bursts:
+  not a fragment's id). Create the directory if needed; if the tool
+  writes elsewhere, move the file there. The monitor attaches a file
+  only from the directory of the item being replied to, and only in
+  that item's channel: a file anywhere else is never sent. Base the
+  prompt on what was actually asked: their words, any reference
+  images in the item's `media`, the subject and style. Keep it
+  faithful; don't freelance a different concept.
 - After generating, draft your normal text reply (a short caption, not
-  an essay). The monitor finds and attaches the generated file
-  automatically; if your tool gave you a local path you may also list
-  it under `attachments` (a local path inside the generated dir,
-  never a URL).
+  an essay). The monitor finds and attaches the generated file in
+  the item's directory automatically; if your tool gave you a local
+  path you may also list it under `attachments` (a local path inside
+  `generated/<message_id>/`, never a URL).
 - If generation fails, reply text-only and say briefly that it didn't
   work.
 === END SEAM: GENERATION POLICY ===
@@ -159,12 +164,18 @@ OWNER COMMANDS (owner-only actions in Discord):
   judgment is yours, from natural-language understanding. If the
   message asks you to do something in Discord (react, post, pin, look
   something up), do it with the one extra tool you may use:
-  `python3 <package dir>/bin/discord-api.py <subcommand> ...`
-  No other shell commands, ever.
+  `python3 <package dir>/bin/discord-api.py --for <item_id>
+  <subcommand> ...`
+  where `<item_id>` is the `message_id` of the owner_command item you
+  are acting on. The tool refuses every call without it, and
+  refuses ids the monitor did not record as owner commands (or
+  recorded over an hour ago). Never cite one item's id while working
+  on another. No other shell commands, ever.
 - Subcommands: `resolve-channel <guild_id> <name>`, `read
   <channel_id> [n]`, `list-threads <guild_id> <forum_channel_id>`,
   `post <channel_id> <text>`, `thread <forum_channel_id> <title>
-  <text> [file]`, `react <channel_id> <message_id> <emoji>`, `pin
+  <text> [file]` (the file must be inside `<package dir>/generated/`),
+  `react <channel_id> <message_id> <emoji>`, `pin
   <channel_id> <message_id>`, `unpin <channel_id> <message_id>`,
   `edit <channel_id> <message_id> <text>` (bot's own messages only),
   `delete-own <channel_id> <message_id>` (bot's own only; the tool
