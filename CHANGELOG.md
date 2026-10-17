@@ -3,6 +3,66 @@
 Newest first. **Action needed** lists what an existing install must
 do after updating; UPDATING.md walks a Muse through it.
 
+## 2026-10-17: Faster replies, and fixes from a full code review
+
+Faster and smoother:
+
+- Replies come sooner. The worker gets its items and the persona in
+  the wake message and writes all its replies in one step
+  (`bin/outbox-append.py`); the monitor removes answered queue items
+  itself. A burst goes out about 1.5s after its author stops typing
+  (5s for a bot) instead of always waiting the full window.
+- The typing indicator stays on until the reply lands, instead of
+  flickering, for up to 3 minutes.
+- Each reply logs a latency line showing where the time went.
+
+Fixed:
+
+- Replies the worker wrote while the monitor was sending could be
+  lost, and queue edits from either side could undo the other's (a
+  welcome could post twice). Both files are now locked.
+- A second worker could start on items the first was still handling.
+- A generated image could be attached to a different reply, even in a
+  public channel. Files now live in `generated/<message_id>/` and only
+  go out with that message's reply.
+- The owner-command tool could upload any local file and was not
+  limited to owner commands in code. It now only uploads from
+  `generated/`, needs `--for <message_id>` naming a live owner
+  command, validates ids, and never pings roles.
+- Image and GIF links matched lookalike domains and followed redirects
+  anywhere; downloads are now https-only, on the allowlist, and never
+  to private addresses.
+- Prompt injection hidden in attached documents or the replied-to
+  message is now quarantined too.
+- A revoked token left the bot running deaf: it now exits, and the
+  watchdog alerts. The watchdog also restarts a monitor that hangs,
+  keeps the previous log as `monitor.log.1`, and supports `token_env`.
+- A mention in the middle of a burst could be answered twice.
+- `bot.guild_ids` was ignored for realtime messages.
+- First run (or a deleted `state.json`) turned the owner's DM backlog
+  into one message.
+- Messages missed while the gateway reconnected could be skipped for
+  good; owner DMs are now swept too.
+- A brief error during channel discovery dropped a channel for 30
+  minutes.
+- Explicit `0` config values were silently replaced by defaults, and
+  `plugin.yaml` defaults (such as the welcome plugin's daily cap) were
+  never applied.
+- Pin and unpin use Discord's current endpoints.
+
+**Action needed**
+
+- Update the installed worker prompt from `worker-prompt.template.md`.
+  Until you do, generated images will not attach and owner commands
+  will be refused (the tool now needs `--for`), and the worker keeps
+  its slower, unlocked path.
+- If the wake hook runtime registered a copy of
+  `hooks/mention-watch.sh`, update the copy.
+- To let the bot pin messages, enable **Pin Messages** for its role
+  in each server (new invites from SETUP.md include it).
+- If you use the welcome plugin without a `daily_cap` in your config,
+  the documented default of 10 a day now applies.
+
 ## 2026-10-17: No more duplicate replies
 
 - Fixed: the bot could post the same reply several times in a row.

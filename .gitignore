@@ -5,6 +5,10 @@ config.yaml
 state.json
 reply_queue.json
 reply_outbox.json
+reply_outbox.processing.json
+reply_outbox.rejected.json
+reply.lock
+.*.tmp
 quarantine.json
 mention_ledger.json
 owner_commands.json

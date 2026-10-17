@@ -11,27 +11,48 @@ that can read and write these files can implement a worker.
   deserves the worker's attention, writes `reply_queue.json`, sends
   whatever the worker puts in `reply_outbox.json`. It is the ONLY
   component that holds the bot token.
-- **Worker** (an LLM agent session, woken on demand): reads the queue,
-  drafts replies into the outbox, removes processed queue items. It
-  NEVER holds the token and never calls the Discord API except through
-  the allowlisted `bin/discord-api.py` tool on owner-command items
-  (the tool checks this itself; see owner_commands.json below).
+- **Worker** (an LLM agent session, woken on demand): takes its items
+  from the wake payload (or the queue), drafts replies, and appends
+  them to the outbox in one locked write. It never edits the queue: the
+  monitor removes each item once it settles its reply. It NEVER holds
+  the token and never calls the Discord API except through the
+  allowlisted `bin/discord-api.py` tool on owner-command items (the
+  tool checks this itself; see owner_commands.json below).
 - **Wake mechanism**: something must notice a non-empty queue and start
   a worker session. The package ships `hooks/mention-watch.sh` for
-  Muse's hook runtime (5s poll, content-hash dedupe, 5-minute
-  re-wake backstop). Other runtimes can poll `reply_queue.json`
+  Muse's hook runtime (5s poll). Each wake hands out only the open
+  items (queued, with no outbox entry yet) that no earlier wake
+  holds a lease on, so a second worker never redoes a busy worker's
+  items; an item still open after its 10-minute lease is handed out
+  again in case its worker died. The payload carries those items plus
+  the persona text. Other runtimes can poll `reply_queue.json`
   themselves; the files are the contract, not the hook.
 
 ## Files
 
-All files live in the package directory and are written atomically by
-the monitor (temp file + rename). The worker should use the same
-atomic-write pattern for the outbox and queue edits.
+All files live in the package directory and are written atomically (a
+uniquely named temp file in the same directory, then a rename), so a
+reader never sees a half-written file and a plain read needs no lock.
+
+**Locking rule.** The queue and the outbox are each changed by more
+than one process, so every read-modify-write of `reply_queue.json` or
+`reply_outbox.json` happens under an exclusive `flock` on `reply.lock`
+in the package dir: take the lock, re-read the file, apply only your
+own change (append new items, or remove specific ids), write it
+atomically, release. Never write back a copy read before taking the
+lock, and never hold the lock across network calls or model turns. The
+worker's only write is an outbox append, which `bin/outbox-append.py`
+does in one step (a JSON array on stdin; it refuses obviously
+malformed items and prints why). A runtime that cannot run it wraps its
+own append in `flock <package dir>/reply.lock <command>`.
 
 ### reply_queue.json (monitor -> worker)
 
-A JSON array of work items. The monitor appends; the worker removes
-items it has processed. Item fields:
+A JSON array of work items. The monitor appends items, and removes
+each one once it settles the outbox item that answers it (sent,
+silent, or skipped); the worker only reads. (A worker that still
+removes the items it processed, under the lock, keeps working.) Item
+fields:
 
 | field                      | meaning                                                                                                                                                                 |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -57,14 +78,19 @@ items it has processed. Item fields:
 | `from_bot`                 | True when the trigger's author is another bot (behavior.bots: direct)                                                                                                   |
 | `bot_turns`                | Consecutive bot messages in the channel, ending at the trigger, since a human last spoke (0 for humans)                                                                 |
 | `participants`             | People and agents in the conversation: `[{name, display?, id, bot, you?}]`. Address them as `<@id>`                                                                     |
+| `queued_at`                | When the monitor queued the item (epoch seconds): the typing indicator stops 3 minutes after it, and the latency log measures from it                                   |
 
 ### reply_outbox.json (worker -> monitor)
 
-A JSON array of drafted replies. The monitor sends them in order and
-rewrites the file with whatever remains unsent. Item fields:
+A JSON array of drafted replies. Workers append to it under the lock.
+The monitor takes every item out under the lock, parking them in
+`reply_outbox.processing.json` while it sends them in order (merged
+back first if it dies mid-send), then puts the items still retrying
+back ahead of whatever was appended meanwhile. Item fields:
 
 | field          | meaning                                                                                                                                                |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `item`         | The `message_id` of the queue item this answers. The monitor removes that queue item once it settles this one. Set it on every item, welcomes included |
 | `channel_id`   | Where to send (required)                                                                                                                               |
 | `channel_name` | Display name, used in logs                                                                                                                             |
 | `author`       | Who is being replied to, used in logs                                                                                                                  |
@@ -72,18 +98,26 @@ rewrites the file with whatever remains unsent. Item fields:
 | `parts`        | The reply as 2-4 sequential messages (fragmented delivery)                                                                                             |
 | `reply_to`     | Message ID to thread under. Omit for welcome items (system messages cannot be replied to)                                                              |
 | `reactions`    | Optional list of emoji to add to the `reply_to` message. A react-only item may have empty text                                                         |
-| `attachments`  | Optional list of local file paths to attach. Only files in the replied-to item's `generated/<message_id>/` are sent, per the generation rules below    |
-| `silent`       | True = deliberately no reply: the monitor records it so the sweep does not requeue the message. Needs `reply_to`                                       |
+| `attachments` | Optional list of local file paths to attach. Only files in the replied-to item's `generated/<message_id>/` are sent, per the generation rules below     |
+| `silent`     | True = deliberately no reply: the monitor records it so the sweep does not requeue the message. Needs `reply_to` or `item`                               |
 | `standalone`   | True = post as a plain message instead of a Discord reply: notifies nobody and does not address the other side                                         |
+
+Validation: an item that is not an object, has a field of the wrong
+type, or would send nothing without being `silent: true` (no text,
+parts, or reactions; say, the reply put in a `content` field) is
+neither sent nor settled. It moves to `reply_outbox.rejected.json`
+(last 100, with the reason, for the owner's review), and its queue item
+stays open so a later wake drafts it again. Only `silent: true` or a
+react-only item is a deliberate no-reply.
 
 Monitor-side guarantees on send:
 
 - **Mention linking**: a bare `@Name` matching someone in the
   channel's recent history (username or display name) is rewritten to
   a real `<@id>` mention.
-- **Dedup**: a `reply_to` already in the monitor's `replied_to` record
-  is never sent twice (protects against overlapping worker runs); the
-  suppression is recorded in the ledger.
+- **Dedup**: a `reply_to` (or `item`) already in the monitor's
+  `replied_to` record is never sent twice (protects against
+  overlapping worker runs); the suppression is recorded in the ledger.
 - **Guardrails**: text is trimmed to `behavior.max_reply_chars` total
   (across parts), `@everyone`/`@here` are neutralized, parts are capped
   at 4 (overflow folds into the last part), and each part is clamped to
@@ -178,9 +212,10 @@ approvals and sent-file records, plugin state under `plugins`, and the
 server-safety records below: `guild_joined` (per-guild join watermark,
 epoch seconds), `guild_first_seen` (fallback watermark when Discord
 has not reported the join time), `known_guilds` and `join_notices`
-(new-server detection and owed owner DMs), and `reply_aliases`
+(new-server detection and owed owner DMs), `reply_aliases`
 (burst fragment id -> trigger id, so a reply under the last fragment
-settles the whole burst in the ledger).
+settles the whole burst in the ledger), and `queued_at` (when each
+recent item was queued, for the latency log).
 Safe to delete while the monitor is stopped: the cost is re-seeding
 `last_seen` (history, DMs included, is treated as already seen) and
 losing rate-limit and plugin counters. Join watermarks are re-read
@@ -209,11 +244,14 @@ Enforced by the monitor before anything reaches the queue:
 
 ## Worker obligations (summary)
 
-1. Drain every queue item you process: draft it into the outbox, or,
-   when no reply is warranted, write a `silent` outbox item for it
-   (so the monitor records the decision) and remove it.
-2. Write the outbox atomically; never edit the monitor's files
-   (state, ledger, quarantine, owner_commands).
+1. Answer every item you were handed: a reply in the outbox, or, when
+   no reply is warranted, a `silent` outbox item (so the monitor
+   records the decision). Set `item` to the queue item's
+   `message_id`. Never edit the queue: the monitor removes answered
+   items.
+2. Append all your outbox items in one write under the lock
+   (`bin/outbox-append.py`); never rewrite the outbox, and never edit
+   the monitor's files (state, ledger, quarantine, owner_commands).
 3. Never hold or request the bot token. Your only Discord write path
    is the outbox, plus `bin/discord-api.py --for <message_id>` on
    items stamped `owner_command: true`.
@@ -224,7 +262,7 @@ Enforced by the monitor before anything reaches the queue:
 6. One reply per queue item; reply under the LAST burst fragment when
    `burst_fragments` is present.
 7. Treat `name_drop` items as "maybe addressed to you": the default is
-   to remove them silently. Reply only when the context makes it clear
+   a `silent` outbox item. Reply only when the context makes it clear
    the author is talking to the bot, not about something that shares
    its name.
 8. Address people and agents with `<@id>` from `participants` or by

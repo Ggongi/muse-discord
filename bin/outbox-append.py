@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""outbox-append.py -- the reply worker's one write to the outbox.
+
+Reads a JSON array of outbox items (or a single item) from stdin, or from
+the file named as the only argument, and appends them to the package's
+reply_outbox.json under the shared lock (reply.lock), re-reading the
+file inside the lock. The monitor takes items out of the outbox while it
+sends them, so a worker that rewrites the whole file from a copy it read
+earlier can delete replies or resurrect sent ones; appending through this
+tool cannot.
+
+    python3 bin/outbox-append.py <<'EOF'
+    [{"item": "123", "channel_id": "456", "reply_to": "123", "text": "hi"}]
+    EOF
+
+Nothing is appended if any item has an obvious mistake (the monitor
+would set it aside unsent); the errors are printed so the worker can fix
+them and run it again. The monitor re-validates every item on its side.
+Never needs the bot token and never touches the network.
+"""
+import fcntl
+import json
+import os
+import sys
+import tempfile
+
+PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUTBOX = os.path.join(PACKAGE_DIR, "reply_outbox.json")
+LOCK = os.path.join(PACKAGE_DIR, "reply.lock")
+
+
+def _is_id(value):
+    return (isinstance(value, str) and value.isdigit()) \
+        or (isinstance(value, int) and not isinstance(value, bool))
+
+
+def problems(item):
+    """Mistakes the monitor would reject the item for (a subset of its
+    checks, so nothing valid is ever refused here)."""
+    if not isinstance(item, dict):
+        return ["not a JSON object"]
+    out = []
+    if not _is_id(item.get("channel_id")):
+        out.append("channel_id is missing or not a Discord id")
+    for field in ("reply_to", "item"):
+        if item.get(field) not in (None, "") \
+                and not _is_id(item.get(field)):
+            out.append(f"{field} is not a Discord id")
+    if item.get("text") is not None and not isinstance(item["text"], str):
+        out.append("text is not a string")
+    for field in ("parts", "reactions", "attachments"):
+        value = item.get(field)
+        if value is not None and not (
+                isinstance(value, list)
+                and all(isinstance(v, str) for v in value)):
+            out.append(f"{field} is not a list of strings")
+    if out:
+        return out
+    if item.get("silent"):
+        if not (item.get("reply_to") or item.get("item")):
+            out.append("a silent item needs reply_to or item")
+        return out
+    has_text = (item.get("text") or "").strip() \
+        or any(p.strip() for p in item.get("parts") or [])
+    has_reactions = any(e.strip() for e in item.get("reactions") or [])
+    if not has_text and not has_reactions:
+        hint = ""
+        for wrong in ("content", "message", "reply", "body"):
+            if wrong in item:
+                hint = f' (the reply goes in "text", not "{wrong}")'
+        out.append("nothing to send: no text, parts, or reactions, and "
+                   "not silent: true" + hint)
+    elif has_reactions and not has_text and not item.get("reply_to"):
+        out.append("a reactions-only item needs reply_to")
+    return out
+
+
+def main():
+    if len(sys.argv) > 2:
+        print("usage: outbox-append.py [FILE]  (JSON on stdin by default)",
+              file=sys.stderr)
+        return 2
+    try:
+        if len(sys.argv) == 2:
+            with open(sys.argv[1]) as f:
+                raw = f.read()
+        else:
+            raw = sys.stdin.read()
+        data = json.loads(raw)
+    except (OSError, ValueError) as e:
+        print(f"error: could not read a JSON item list ({e}); nothing "
+              f"appended", file=sys.stderr)
+        return 1
+    items = data if isinstance(data, list) else [data]
+    errors = [f"item {i + 1}: {p}"
+              for i, item in enumerate(items) for p in problems(item)]
+    if errors:
+        print("error: nothing appended; fix these and run it again:",
+              file=sys.stderr)
+        for e in errors:
+            print(f"  {e}", file=sys.stderr)
+        return 1
+    if not items:
+        print("nothing to append")
+        return 0
+    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        outbox = []
+        if os.path.exists(OUTBOX):
+            try:
+                with open(OUTBOX) as f:
+                    outbox = json.load(f)
+            except ValueError:
+                outbox = None
+            if not isinstance(outbox, list):
+                print("error: reply_outbox.json is not a JSON array; the "
+                      "monitor sets a bad file aside within seconds. "
+                      "Run this again in a moment.", file=sys.stderr)
+                return 1
+        outbox += items
+        tmp_fd, tmp = tempfile.mkstemp(dir=PACKAGE_DIR,
+                                       prefix=".reply_outbox.json.",
+                                       suffix=".tmp")
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                os.fchmod(f.fileno(), 0o644)
+                json.dump(outbox, f)
+            os.replace(tmp, OUTBOX)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(fd)
+    missing = sum(1 for item in items if not item.get("item"))
+    print(f"appended {len(items)} item(s) to the outbox")
+    if missing:
+        print(f'note: {missing} item(s) without "item" (the queue item\'s '
+              f'message_id); the monitor can only match those by '
+              f'reply_to', file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

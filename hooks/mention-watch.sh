@@ -6,10 +6,18 @@
 # recently been woken for.
 #
 # Overlap protection uses hook state (not a lock file the worker must
-# remember to delete): we record the queue's content hash at each wake
-# and stay silent while a recent wake covers the identical queue. A
-# 5-minute backstop re-wakes in case a worker died without draining
-# the queue.
+# remember to delete): each queue item gets a lease when a wake hands it
+# to a worker, and a wake carries ONLY the items no live lease covers.
+# A message arriving while a worker is busy (say, generating a video)
+# wakes a second worker for just that message, never for the first
+# worker's items, so nothing is drafted, generated, or welcomed twice.
+# An item still open when its lease runs out (LEASE_SECS, long enough
+# for a slow generation) is handed out again, in case its worker died.
+# Items the worker already answered (they have an outbox entry, waiting
+# for the monitor to send them) are never handed out.
+#
+# The payload carries the items plus the persona text, so the worker's
+# happy path is one write: no reading the queue or persona files.
 #
 # This script targets Muse's hook runtime (it sources
 # $HATCH_HOOK_RUNTIME for the silent/wake/log/hook_state helpers and is
@@ -25,36 +33,89 @@ source "$HATCH_HOOK_RUNTIME"
 # overridden. The queue lives at the package root.
 PKG_DIR="${MUSE_DISCORD_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 QUEUE="$PKG_DIR/reply_queue.json"
-REWAKE_AFTER_SECS=300
+OUTBOX="$PKG_DIR/reply_outbox.json"
+SENDING="$PKG_DIR/reply_outbox.processing.json"
+LEASE_SECS=600
 
 # No queue file yet -> nothing to do
 if [ ! -f "$QUEUE" ]; then
     silent "no queue file" '{}'
 fi
 
-count=$(jq 'length' "$QUEUE" 2>/dev/null || echo 0)
+# Message ids the worker already answered, read BEFORE the queue: the
+# monitor removes an answered item from the queue before it drops the
+# item's outbox entry, so this order never sees one without the other.
+answered='[]'
+for f in "$OUTBOX" "$SENDING"; do
+    [ -f "$f" ] || continue
+    ids=$(jq -c '[.[]? | objects | (.item, .reply_to) | strings]' "$f" \
+        2>/dev/null) || ids='[]'
+    answered=$(jq -cn --argjson a "$answered" --argjson b "$ids" '$a + $b')
+done
+
+# Open items: queued and not answered (a burst may be answered under any
+# of its fragments).
+open=$(jq -c --argjson answered "$answered" '[.[]? | objects
+    | select(.message_id != null)
+    | select(([.message_id] + [(.burst_fragments // [])[]? | .message_id])
+        as $ids | ($ids - $answered | length) == ($ids | length))]' \
+    "$QUEUE" 2>/dev/null) || open='[]'
+count=$(printf '%s' "$open" | jq 'length')
 if [ "$count" -eq 0 ]; then
     silent "queue empty" '{}'
 fi
 
-# Stable hash of the queued message IDs
-qhash=$(jq -c '[.[].message_id] | sort | join(",")' "$QUEUE" | md5sum | cut -d' ' -f1)
 now=$(date +%s)
+woken=$(hook_state_get | jq -c '.woken // {}' 2>/dev/null) || woken='{}'
 
-state=$(hook_state_get)
-last_hash=$(printf '%s' "$state" | jq -r '.last_wake_hash // empty')
-last_wake=$(printf '%s' "$state" | jq -r '.last_wake_at // 0')
-
-if [ -n "$last_hash" ] && [ "$qhash" = "$last_hash" ]; then
-    age=$(( now - last_wake ))
-    if [ "$age" -lt "$REWAKE_AFTER_SECS" ]; then
-        silent "worker already woken for this queue" '{"age_secs":"'"$age"'"}'
-    fi
-    log "re-waking: queue unchanged since last wake" '{"age_secs":"'"$age"'"}'
+# Due: open items with no live lease.
+due=$(printf '%s' "$open" | jq -c --argjson w "$woken" --argjson now "$now" \
+    --argjson lease "$LEASE_SECS" \
+    '[.[] | select((($w[.message_id] // 0) + $lease) <= $now)]')
+ndue=$(printf '%s' "$due" | jq 'length')
+if [ "$ndue" -eq 0 ]; then
+    silent "a worker already holds every open item" \
+        '{"open":"'"$count"'"}'
+fi
+expired=$(printf '%s' "$due" | jq --argjson w "$woken" \
+    '[.[] | select($w[.message_id] != null)] | length')
+if [ "$expired" -gt 0 ]; then
+    log "re-waking: item lease expired" '{"items":"'"$expired"'"}'
 fi
 
+# Leases: keep the ones of items still queued (answered ones too, in case
+# their outbox entry is briefly unreadable), stamp the items this wake
+# hands out.
 # hook_state_set is a no-op on dry runs, so testing never consumes a detection.
-hook_state_set '{"last_wake_hash":"'"$qhash"'","last_wake_at":'"$now"'}'
+queued=$(jq -c '[.[]? | objects | .message_id | strings]' "$QUEUE" \
+    2>/dev/null) || queued='[]'
+leases=$(jq -cn --argjson ids "$queued" --argjson due "$due" \
+    --argjson w "$woken" --argjson now "$now" '
+    {woken: (($w | with_entries(select(.key as $k | $ids | index($k))))
+        + ($due | map({key: .message_id, value: $now}) | from_entries))}')
+hook_state_set "$leases"
 
-payload=$(jq -c '{count: length, items: [.[] | {message_id, channel_id, channel_name, kind, priority, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, welcome, welcome_prompt, reply_to, burst, burst_fragments, from_bot, bot_turns, participants}]}' "$QUEUE")
+# The persona text (persona.file in config.yaml, relative to the package
+# dir; default persona.md), so the worker need not read it. null when
+# unreadable: the worker then reads the file itself.
+CONFIG="${MUSE_DISCORD_CONFIG:-$PKG_DIR/config.yaml}"
+persona_file=$(python3 - "$CONFIG" "$PKG_DIR" 2>/dev/null <<'PY'
+import os
+import sys
+try:
+    import yaml
+    with open(sys.argv[1]) as f:
+        name = ((yaml.safe_load(f) or {}).get("persona") or {}).get("file")
+except Exception:
+    name = None
+print(os.path.join(sys.argv[2], os.path.expanduser(name or "persona.md")))
+PY
+) || persona_file="$PKG_DIR/persona.md"
+if [ -r "$persona_file" ]; then
+    persona_args=(--rawfile persona "$persona_file")
+else
+    persona_args=(--argjson persona null)
+fi
+
+payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, priority, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, welcome, welcome_prompt, reply_to, burst, burst_fragments, from_bot, bot_turns, participants}]}')
 wake "muse-discord mentions pending" "$payload"
