@@ -15,6 +15,10 @@ do after updating; UPDATING.md walks a Muse through it.
 - Optional `behavior.max_bot_turns` caps bot-to-bot runs with no
   human in between. No cap by default.
 - No status line under the bot's name by default.
+- Removed the burst breaker added in the previous release: it cut
+  lively conversations off mid-flow, which is not how a person chats.
+- No daily reply cap by default (`safety.daily_reply_cap: null`).
+  Both reply caps are still available.
 - Fixed: replies to multi-message bursts, and deliberate no-replies,
   could be requeued by the sweep and answered twice.
 
@@ -26,6 +30,9 @@ do after updating; UPDATING.md walks a Muse through it.
 - Optional: set `presence.status_text: ""` in `config.yaml` to drop
   the "Watching for mentions" line.
 - Optional: set `behavior.bots: off` to keep ignoring other bots.
+- Optional: set `safety.daily_reply_cap: null` in `config.yaml` to drop
+  the old 30-a-day cap, and delete the `safety.burst_breaker` block
+  (it is ignored now).
 
 ## 2026-10-16: Trigger safety
 
@@ -38,7 +45,8 @@ do after updating; UPDATING.md walks a Muse through it.
   `behavior.active_guild_ids`.
 - The bot never answers messages from before it joined a server.
 - Burst breaker: more than 5 replies in 10 minutes in one channel
-  quiets it for 30 minutes and DMs the owner.
+  quiets it for 30 minutes and DMs the owner. (Removed in the next
+  release.)
 
 **Action needed**
 
