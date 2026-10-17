@@ -2,8 +2,11 @@
 # muse-discord watchdog: keeps the monitor and presence processes alive.
 #
 # Fully automatic: both processes read the bot token themselves from the
-# configured token file (bot.token_file in config.yaml, mode 600). This
-# script never sees the token value; it only checks that the file exists.
+# configured token file (bot.token_file in config.yaml, mode 600), or
+# from the environment variable named by bot.token_env, which must then
+# be set in this script's own environment (the processes inherit it).
+# This script never uses the token value; it only checks that one of the
+# two is present.
 #
 # Output contract (for whatever scheduler runs this, e.g. cron):
 #   - "OK ..." lines for healthy or recovered state.
@@ -17,11 +20,23 @@
 #     watchdog.log.
 #
 # Health contract with the processes (do not change casually):
-#   - monitor.py prints a line containing "Bot user id" at startup,
-#     BEFORE its (slow) channel discovery, success or failure.
+#   - monitor.py prints "Bot user id: <id>" once its identity is
+#     confirmed, or "Bot identity pending" when /users/@me failed for a
+#     reason that can heal (a 429 storm, the network) and it keeps
+#     retrying in-loop. Either counts as a healthy start; both print
+#     BEFORE its (slow) channel discovery.
+#   - Either process prints "TOKEN REJECTED" and exits when Discord
+#     refuses the token (REST 401 or gateway close 4004): the token alert.
+#   - monitor.py prints "GATEWAY DISABLED" when realtime ingest stops for
+#     good (e.g. the Message Content intent is off) while REST polling
+#     carries on: alerted as degraded.
+#   - monitor.py touches monitor.heartbeat from its main loop; a live
+#     monitor whose heartbeat is older than HEARTBEAT_STALE_SECS is stuck
+#     and gets restarted.
 #   - presence.py prints a line containing "READY" once connected.
 #   - Both are started fully detached (double-fork) so a scheduler
 #     timeout killing this script's process tree cannot take them down.
+#     The previous run's log is kept as <name>.log.1 on each restart.
 
 set -u
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,17 +76,59 @@ PYEOF
 
 TOKEN_FILE="$(cfg_get bot.token_file "$HOME/.config/muse-discord/bot_token")"
 TOKEN_FILE="${TOKEN_FILE/#\~/$HOME}"
+TOKEN_ENV="$(cfg_get bot.token_env "")"
 PRESENCE_ENABLED="$(cfg_get presence.enabled true)"
+HEARTBEAT="$DIR/monitor.heartbeat"
+HEARTBEAT_STALE_SECS=600
+
+# True when the processes will find a token: the bot.token_env variable
+# set in this environment (they inherit it), or a non-empty token file.
+token_available() {
+  if [[ "$TOKEN_ENV" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
+      && [ -n "${!TOKEN_ENV:-}" ]; then
+    return 0
+  fi
+  [ -s "$TOKEN_FILE" ]
+}
+if [ -n "$TOKEN_ENV" ]; then
+  TOKEN_WHERE="env var \$$TOKEN_ENV unset and no token file at $TOKEN_FILE"
+else
+  TOKEN_WHERE="no token file at $TOKEN_FILE"
+fi
+
+# Seconds since the monitor last touched its heartbeat, or -1 when there
+# is no heartbeat file (a monitor from before heartbeats existed).
+heartbeat_age() {
+  python3 - "$HEARTBEAT" <<'PYEOF' 2>/dev/null || echo -1
+import os, sys, time
+print(int(time.time() - os.path.getmtime(sys.argv[1])))
+PYEOF
+}
+
+# Stop a process: SIGTERM, up to 10s to exit, then SIGKILL.
+# $1 = alive() pattern.
+stop_proc() {
+  pkill -f "^python3 $1" 2>/dev/null
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    alive "$1" || return 0
+    sleep 1
+  done
+  pkill -9 -f "^python3 $1" 2>/dev/null
+  sleep 1
+}
 
 # Start a fully detached daemon via double-fork: the final process is
 # reparented to PID 1 immediately, so it is NOT part of this script's
 # process tree. (Plain `setsid ... &` leaves the child under this shell;
 # when a scheduler's exec session times out, the runtime may kill the
 # whole tree and the bot dies with it.)
-# $1 = script (monitor.py/presence.py), $2 = log file (truncated first,
-# then appended).
+# $1 = script (monitor.py/presence.py), $2 = log file. The previous log
+# moves to $2.1 rather than being truncated: it holds the crash or token
+# error that made this restart necessary.
 daemonize() {
-  : > "$2"
+  if [ -f "$2" ]; then
+    mv -f "$2" "$2.1"
+  fi
   python3 - "$DIR" "$1" "$2" <<'EOF'
 import os, sys
 d, script, logf = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -93,13 +150,17 @@ EOF
 }
 
 # Poll for a healthy start, breaking early instead of sleeping a fixed time.
-# $1 = alive() pattern, $2 = log marker, $3 = log file, $4 = max seconds.
+# $1 = alive() pattern, $2 = log marker (extended regex), $3 = log file,
+# $4 = max seconds. A rejected token ends the wait at once.
 wait_healthy() {
   local n=$(( ($4 + 4) / 5 ))
   for _ in $(seq 1 "$n"); do
     sleep 5
-    if alive "$1" && grep -q "$2" "$3" 2>/dev/null; then
+    if alive "$1" && grep -Eq "$2" "$3" 2>/dev/null; then
       return 0
+    fi
+    if grep -q "TOKEN REJECTED" "$3" 2>/dev/null; then
+      return 1
     fi
   done
   return 1
@@ -128,25 +189,49 @@ if ! python3 -c "import yaml" 2>/dev/null; then
 fi
 
 # ---------------- monitor ----------------
+MONITOR_HUNG=""
+DEGRADED_SIG=""
 if alive "[m]onitor.py"; then
-  echo "OK monitor alive"
-else
-  log "monitor not running; attempting restart"
-  if [ ! -s "$TOKEN_FILE" ]; then
-    ALERT_SIG="monitor DOWN and no token file at $TOKEN_FILE; cannot restart"
+  HB_AGE="$(heartbeat_age)"
+  if [ "$HB_AGE" -ge "$HEARTBEAT_STALE_SECS" ]; then
+    # The process lives but its main loop has not moved in 10+ minutes:
+    # it answers nobody, and only a restart helps.
+    log "monitor alive but its heartbeat is ${HB_AGE}s old (stuck); restarting"
+    stop_proc "[m]onitor.py"
+    MONITOR_HUNG="$HB_AGE"
+  else
+    echo "OK monitor alive"
+    GW_OFF="$(grep -o -m1 'GATEWAY DISABLED ([^)]*)' "$DIR/monitor.log" 2>/dev/null)"
+    if [ -n "$GW_OFF" ]; then
+      DEGRADED_SIG="monitor degraded: $GW_OFF in monitor.log; realtime ingest is off, so replies wait for the REST poll. See SETUP.md Troubleshooting, then restart the monitor."
+    fi
+  fi
+fi
+if ! alive "[m]onitor.py"; then
+  [ -z "$MONITOR_HUNG" ] && log "monitor not running; attempting restart"
+  if ! token_available; then
+    ALERT_SIG="monitor DOWN and $TOKEN_WHERE; cannot restart"
     log "ALERT: $ALERT_SIG"
   else
     daemonize monitor.py "$DIR/monitor.log"
     # The health window must comfortably exceed monitor startup:
     # the identity marker prints immediately, but give slow systems room.
-    if wait_healthy "[m]onitor.py" "Bot user id" "$DIR/monitor.log" 120; then
-      log "monitor restarted OK"
-      echo "OK monitor restarted"
+    if wait_healthy "[m]onitor.py" "Bot user id|Bot identity pending" \
+        "$DIR/monitor.log" 120; then
+      NOTE=""
+      if [ -n "$MONITOR_HUNG" ]; then
+        NOTE=" (it was stuck: heartbeat ${MONITOR_HUNG}s old; its log is monitor.log.1)"
+      fi
+      if ! grep -q "Bot user id" "$DIR/monitor.log" 2>/dev/null; then
+        NOTE="$NOTE (identity pending: Discord is rate limiting or unreachable; it keeps retrying)"
+      fi
+      log "monitor restarted OK$NOTE"
+      echo "OK monitor restarted$NOTE"
     else
-      pkill -f "^python3 [m]onitor.py" 2>/dev/null
-      if grep -q "401" "$DIR/monitor.log" 2>/dev/null; then
+      stop_proc "[m]onitor.py"
+      if grep -q "TOKEN REJECTED" "$DIR/monitor.log" 2>/dev/null; then
         TOKEN_BAD=1
-        ALERT_SIG="monitor DOWN: Discord rejected the token (401); it was probably reset. Paste a fresh bot token into the token file and the watchdog will recover on its next run."
+        ALERT_SIG="monitor DOWN: Discord rejected the token; it was probably reset. Paste a fresh bot token into the token file and the watchdog will recover on its next run."
       else
         ALERT_SIG="monitor DOWN: restart attempted but the process is not healthy; check $DIR/monitor.log"
       fi
@@ -172,8 +257,8 @@ else
       log "ALERT: $ALERT_SIG"
     fi
     if [ -z "$ALERT_SIG" ]; then
-      if [ ! -s "$TOKEN_FILE" ]; then
-        ALERT_SIG="presence DOWN and no token file at $TOKEN_FILE; cannot restart"
+      if ! token_available; then
+        ALERT_SIG="presence DOWN and $TOKEN_WHERE; cannot restart"
         log "ALERT: $ALERT_SIG"
       else
         daemonize presence.py "$DIR/presence.log"
@@ -181,8 +266,12 @@ else
           log "presence restarted OK"
           echo "OK presence restarted"
         else
-          pkill -f "^python3 [p]resence.py" 2>/dev/null
-          ALERT_SIG="presence DOWN: restart attempted but no READY in presence.log; check $DIR/presence.log"
+          stop_proc "[p]resence.py"
+          if grep -q "TOKEN REJECTED" "$DIR/presence.log" 2>/dev/null; then
+            ALERT_SIG="presence DOWN: Discord rejected the token; it was probably reset. Paste a fresh bot token into the token file and the watchdog will recover on its next run."
+          else
+            ALERT_SIG="presence DOWN: restart attempted but no READY in presence.log; check $DIR/presence.log"
+          fi
           log "ALERT: $ALERT_SIG"
         fi
       fi
@@ -191,6 +280,11 @@ else
 fi
 
 # ---------------- transition-based alerting ----------------
+# A degraded-but-running monitor alerts only when nothing is down.
+if [ -z "$ALERT_SIG" ] && [ -n "$DEGRADED_SIG" ]; then
+  ALERT_SIG="$DEGRADED_SIG"
+  log "ALERT: $ALERT_SIG"
+fi
 if [ -n "$ALERT_SIG" ]; then
   if [ "$(get_state)" != "$ALERT_SIG" ]; then
     set_state "$ALERT_SIG"

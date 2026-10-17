@@ -12,7 +12,9 @@ only an active gateway session does.
   or profile/banner management: the status is set once at identify and
   left alone.
 - Sends heartbeats on Discord's interval; auto-reconnects with backoff
-  and resumes the session when Discord allows it.
+  and resumes the session when Discord allows it. Exits instead when
+  Discord rejects the token (printing "TOKEN REJECTED" for the
+  watchdog) or closes with a code reconnecting cannot fix.
 - If presence.enabled is false in config, exits immediately (the
   watchdog checks the same flag and won't try to restart it).
 
@@ -31,6 +33,17 @@ import websockets
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 GATEWAY = "wss://gateway.discord.gg/?v=10&encoding=json"
+GATEWAY_QUERY = "/?v=10&encoding=json"
+# Close codes reconnecting cannot fix (same contract as monitor.py):
+# 4004 = the token was rejected: print the "TOKEN REJECTED" marker the
+# watchdog alerts on, and exit. 4010-4014 = shard / API version / intents
+# problems: exit too, so the watchdog's restart attempt reports them
+# instead of this process reconnecting forever. 4007 / 4009 = the
+# session cannot be resumed: identify fresh.
+EXIT_TOKEN_REJECTED = 3
+TOKEN_REJECTED_CODE = 4004
+FATAL_CODES = (4010, 4011, 4012, 4013, 4014)
+FRESH_SESSION_CODES = (4007, 4009)
 ACTIVITY_TYPES = {"playing": 0, "streaming": 1, "listening": 2,
                   "watching": 3, "custom": 4, "competing": 5}
 
@@ -97,22 +110,39 @@ def presence_payload():
             "since": None}
 
 
+def _close_code(exc):
+    """The close code of a websockets ConnectionClosed, across versions
+    (newer ones carry it on .rcvd; .code is the deprecated spelling)."""
+    rcvd = getattr(exc, "rcvd", None)
+    if rcvd is not None:
+        return rcvd.code
+    return getattr(exc, "code", None)
+
+
 async def run():
     backoff = 5
     session_id = None
     seq = None
+    resume_url = None
     while True:
         hb_task = None
+        resuming = bool(session_id and seq is not None)
+        # A resume goes to the session's own resume_gateway_url (from
+        # READY); the default URL is for fresh identifies.
+        url = GATEWAY
+        if resuming and resume_url:
+            url = resume_url.rstrip("/") + GATEWAY_QUERY
         try:
             async with websockets.connect(
-                    GATEWAY, max_size=10 * 1024 * 1024) as ws:
+                    url, max_size=10 * 1024 * 1024) as ws:
                 hello = json.loads(await ws.recv())
                 if hello.get("op") != 10:
-                    print(f"Unexpected first payload: {hello}", flush=True)
-                    continue
+                    # Raise rather than loop straight back: the backoff
+                    # below must apply.
+                    raise RuntimeError(f"unexpected first payload: {hello}")
                 hb_interval = hello["d"]["heartbeat_interval"] / 1000.0
 
-                if session_id and seq is not None:
+                if resuming:
                     await ws.send(json.dumps({"op": 6, "d": {
                         "token": TOKEN, "session_id": session_id,
                         "seq": seq}}))
@@ -140,6 +170,7 @@ async def run():
                         seq = msg.get("s", seq)
                         if msg.get("t") == "READY":
                             session_id = msg["d"].get("session_id")
+                            resume_url = msg["d"].get("resume_gateway_url")
                             user = msg["d"]["user"]
                             # The watchdog's health check greps
                             # presence.log for "READY".
@@ -153,14 +184,33 @@ async def run():
                     elif op == 7:  # server asks us to reconnect
                         print("Discord requested reconnect", flush=True)
                         break
-                    elif op == 9:  # invalid session: re-identify fresh
-                        print("Invalid session, will re-identify",
-                              flush=True)
-                        session_id = None
-                        seq = None
+                    elif op == 9:  # invalid session
+                        # d is true when the session can still be
+                        # resumed; otherwise re-identify fresh.
+                        if not msg.get("d"):
+                            print("Invalid session, will re-identify",
+                                  flush=True)
+                            session_id = None
+                            seq = None
                         await asyncio.sleep(5)
                         break
                     # op 11 = heartbeat ACK, nothing to do
+        except websockets.ConnectionClosed as e:
+            code = _close_code(e)
+            if code == TOKEN_REJECTED_CODE:
+                print("TOKEN REJECTED: Discord refused the bot token "
+                      "(gateway close code 4004); it was probably reset in "
+                      "the developer portal. Exiting.", flush=True)
+                sys.exit(EXIT_TOKEN_REJECTED)
+            if code in FATAL_CODES:
+                print(f"GATEWAY DISABLED (code {code}): Discord refused "
+                      f"this connection for a reason reconnecting cannot "
+                      f"fix. Exiting.", flush=True)
+                sys.exit(1)
+            if code in FRESH_SESSION_CODES:
+                session_id = None
+                seq = None
+            print(f"Gateway closed (code {code})", flush=True)
         except Exception as e:
             print(f"Gateway error: {e}", flush=True)
         finally:

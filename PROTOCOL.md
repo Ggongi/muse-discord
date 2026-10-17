@@ -123,20 +123,29 @@ state is recorded: `queued` (in flight), `replied`, `quarantined`, or
 `"403 missing access"`, `"recovery cap reached"`, `"enqueue failed
 3x"`, `"duplicate suppressed"`, `"predates bot join"`, `"bot turn cap
 (N)"`, ...). Name-drop items are recorded as `queued` but
-the sweep never requeues them: most get no reply by design. The reconciliation sweep diffs
-recent channel history against this ledger (plus queue, outbox,
-quarantine, and replied records) and requeues anything unaccounted
-for. The worker never touches this file.
+the sweep never requeues them: most get no reply by design. Every
+message of a burst is recorded with its trigger's status, and an
+outcome under any of them (a reply under the last fragment, a
+`silent` item naming any fragment) settles them all. The
+reconciliation sweep diffs the recent history of every monitored
+channel, and of the owners' DM channels, against this ledger (plus
+queue, outbox, quarantine, and replied records) and requeues any
+mention or owner DM unaccounted for. DMs that only the gateway sees
+(`dm_policy: open`) are not swept. The worker never touches this file.
 
 ### quarantine.json (monitor-internal)
 
 Messages that matched the injection-pattern filter, with the matched
-pattern, kept for the owner's review (last 100). Quarantined messages
-are never queued and never auto-replied.
+pattern, kept for the owner's review (last 100). A burst is held
+whole: its fragments are listed under the trigger's entry.
+Quarantined messages are never queued and never auto-replied.
 
 ### state.json (monitor-internal)
 
-Working state: per-channel `last_seen`, `replied_to` (bounded),
+Working state: per-channel `last_seen` (the REST poll's watermark;
+only the poll advances it), `gw_seen` (ids the gateway already handled
+above that watermark, so the poll skips them), `bot_runs` (consecutive
+bot messages per channel, for `bot_turns`), `replied_to` (bounded),
 rate-limit counters, rolling per-channel `history`, staged coalescing
 bursts (`pending`, including their retry bookkeeping), generation
 approvals and sent-file records, plugin state under `plugins`, and the
@@ -145,11 +154,11 @@ epoch seconds), `guild_first_seen` (fallback watermark when Discord
 has not reported the join time), `known_guilds` and `join_notices`
 (new-server detection and owed owner DMs), and `reply_aliases`
 (burst fragment id -> trigger id, so a reply under the last fragment
-settles the trigger in the ledger).
+settles the whole burst in the ledger).
 Safe to delete while the monitor is stopped: the cost is re-seeding
-`last_seen` (history is treated as already seen) and losing rate-limit
-and plugin counters. Join watermarks are re-read from Discord at
-startup, and the known-server set re-seeds silently.
+`last_seen` (history, DMs included, is treated as already seen) and
+losing rate-limit and plugin counters. Join watermarks are re-read
+from Discord at startup, and the known-server set re-seeds silently.
 
 ## Server safety
 
