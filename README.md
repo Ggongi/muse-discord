@@ -22,6 +22,22 @@ few clicks in Discord and answering its questions.
 To check it, mention the bot in any channel it can post in. It should reply
 within seconds. 🎉
 
+## 🔄 Updating
+
+Send your Muse this message:
+
+```
+Update muse-discord by following UPDATING.md
+```
+
+It tells you what's new, asks before touching anything you customized,
+and restarts the bot. The watchdog checks once a day and prints a line
+when an update is out. [CHANGELOG.md](CHANGELOG.md) lists every change
+and anything you need to do.
+
+Customize through `config.yaml`, `persona.md`, and plugins where you
+can: those are never touched by updates.
+
 ## 🤝 Join the community
 
 <a href="https://discord.gg/sxjhCPdEG6"><img align="right" src="https://invidget.switchblade.xyz/sxjhCPdEG6" alt="Join the Muse Discord server"></a>

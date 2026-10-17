@@ -9,6 +9,7 @@ quarantine.json
 mention_ledger.json
 monitor.pid
 watchdog_state.json
+update_check.json
 
 # Logs
 *.log
