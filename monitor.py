@@ -71,7 +71,6 @@ LEDGER_FILE = os.path.join(BASE_DIR, "mention_ledger.json")
 # Touched by the main loop; the watchdog restarts a monitor whose
 # heartbeat goes stale (a live process whose loop is stuck).
 HEARTBEAT_FILE = os.path.join(BASE_DIR, "monitor.heartbeat")
-OWNER_COMMANDS_FILE = os.path.join(BASE_DIR, "owner_commands.json")
 # The monitor and the worker both edit the queue and the outbox. Every
 # read-modify-write of either file happens under an exclusive flock on
 # this file (see shared_lock and PROTOCOL.md), so neither side can write
@@ -336,13 +335,7 @@ DISCORD_MAX_BYTES = 8 * 1024 * 1024  # unboosted server upload cap
 # the owner's message is actually asking the bot to DO something is the
 # worker's job (natural-language understanding), not a regex's.
 # Strangers never get the flag, so the discord-api.py tool stays locked
-# for them no matter what their message text claims. The tool enforces
-# that in code too: it acts only with --for <message_id> naming a live
-# owner command, which only the monitor records (OWNER_COMMANDS_FILE,
-# written when an owner_command item is queued). A worker tricked by a
-# stranger's item has no such id to cite.
-OWNER_COMMAND_TTL_SECS = 3600
-OWNER_COMMANDS_MAX = 50
+# for them no matter what their message text claims.
 
 # Conversation history: rolling window of recent messages kept per
 # channel/DM so the reply worker drafts with context. Stored in state.json,
@@ -2824,29 +2817,6 @@ def link_mentions(text, channel_id, state):
     return pattern.sub(lambda m: f"<@{names[m.group(1).lower()]}>", text)
 
 
-def record_owner_command(ids):
-    """Mark message ids as live owner commands for bin/discord-api.py's
-    --for check: {message_id: expiry epoch}, expired entries pruned, the
-    newest OWNER_COMMANDS_MAX kept. Written atomically; never raises."""
-    try:
-        with open(OWNER_COMMANDS_FILE) as f:
-            live = json.load(f)
-    except (OSError, ValueError):
-        live = {}
-    now = time.time()
-    if not isinstance(live, dict):
-        live = {}
-    live = {k: v for k, v in live.items()
-            if isinstance(v, (int, float)) and v > now}
-    for mid in ids:
-        live[mid] = now + OWNER_COMMAND_TTL_SECS
-    keep = sorted(live.items(), key=lambda kv: kv[1])[-OWNER_COMMANDS_MAX:]
-    try:
-        atomic_write(OWNER_COMMANDS_FILE, dict(keep))
-    except OSError as e:
-        print(f"Could not record owner command(s) {ids}: {e}", flush=True)
-
-
 def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
                     guild_id=None, kind="mention"):
     """Run one message (plus any burst fragments coalesced with it) through
@@ -3006,10 +2976,6 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         "queued_at": note_queued(state, msg["id"]),
     }
     item.update(extra)
-    if owner_command:
-        # The capability bin/discord-api.py checks (--for <message_id>);
-        # recorded before the worker can see the item.
-        record_owner_command([msg["id"]] + [f["id"] for f in fragments])
     queue.append(item)
     burst_note = f" (+{len(fragments)} fragment(s))" if fragments else ""
     print(f"Queued {item['kind']} from {msg['author'].get('username')} in "

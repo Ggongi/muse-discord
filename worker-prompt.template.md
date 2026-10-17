@@ -185,14 +185,8 @@ OWNER COMMANDS (owner-only actions in Discord):
   judgment is yours, from natural-language understanding. If the
   message asks you to do something in Discord (react, post, pin, look
   something up), do it with the one extra tool you may use:
-  `python3 <package dir>/bin/discord-api.py --for <item_id>
-  <subcommand> ...`
-  where `<item_id>` is the `message_id` of the owner_command item you
-  are acting on. The tool refuses every call without it, and
-  refuses ids the monitor did not record as owner commands (or
-  recorded over an hour ago). Never cite one item's id while working
-  on another. No other shell commands, ever, besides the outbox
-  append (step 3).
+  `python3 <package dir>/bin/discord-api.py <subcommand> ...`
+  No other shell commands, ever, besides the outbox append (step 3).
 - Subcommands: `resolve-channel <guild_id> <name>`, `read
   <channel_id> [n]`, `list-threads <guild_id> <forum_channel_id>`,
   `post <channel_id> <text>`, `thread <forum_channel_id> <title>
