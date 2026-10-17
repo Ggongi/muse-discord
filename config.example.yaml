@@ -71,10 +71,13 @@ behavior:
   #                gives bots no way to enumerate DM channels)
   #   off        = DMs are never read or answered
   dm_policy: owner_only
-  # Burst coalescing: a trigger waits this many seconds so rapid
-  # follow-up messages from the same author fold into one reply. 0 =
-  # no coalescing. (Other bots always get at least 15s: their long
-  # replies arrive as several parts.)
+  # Burst coalescing: rapid follow-up messages from the same author
+  # fold into one reply. This is the MAXIMUM wait, in seconds, from the
+  # first message (bots get at least 15). With the realtime gateway up,
+  # a burst goes out as soon as its author has stopped: about 1.5s (5s
+  # for a bot) after their last message with no typing from them since.
+  # Without the gateway, every burst waits the full window. 0 = no
+  # coalescing.
   coalesce_seconds: 5
   # Max total characters of one reply (across all its message parts).
   # 1-2000 (Discord's per-message limit); out-of-range values are

@@ -33,6 +33,7 @@ Security model:
 Configuration: config.yaml next to this file (or --config PATH, or the
 MUSE_DISCORD_CONFIG env var). See config.example.yaml for the schema.
 """
+import contextlib
 import copy
 import fcntl
 import hashlib
@@ -46,6 +47,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -70,6 +72,17 @@ LEDGER_FILE = os.path.join(BASE_DIR, "mention_ledger.json")
 # heartbeat goes stale (a live process whose loop is stuck).
 HEARTBEAT_FILE = os.path.join(BASE_DIR, "monitor.heartbeat")
 OWNER_COMMANDS_FILE = os.path.join(BASE_DIR, "owner_commands.json")
+# The monitor and the worker both edit the queue and the outbox. Every
+# read-modify-write of either file happens under an exclusive flock on
+# this file (see shared_lock and PROTOCOL.md), so neither side can write
+# back a stale copy over the other's changes.
+LOCK_FILE = os.path.join(BASE_DIR, "reply.lock")
+# Outbox items the monitor has taken and is sending. If it dies mid-send
+# they are merged back on the next pass (part nonces keep resends safe).
+OUTBOX_PROCESSING_FILE = os.path.join(BASE_DIR,
+                                      "reply_outbox.processing.json")
+# Malformed outbox items, set aside for the owner's review (last 100).
+OUTBOX_REJECTED_FILE = os.path.join(BASE_DIR, "reply_outbox.rejected.json")
 MEDIA_DIR = os.path.join(BASE_DIR, "media")
 GENERATED_DIR = os.path.join(BASE_DIR, "generated")
 PLUGINS_DIR = os.path.join(BASE_DIR, "plugins")
@@ -791,10 +804,99 @@ def api_post(path, data):
 
 
 def atomic_write(path, obj):
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(obj, f)
-    os.replace(tmp, path)
+    # A unique temp file per write: with one fixed "<path>.tmp", two
+    # writers (the monitor and the worker) could interleave on the same
+    # temp file and rename each other's half-written JSON into place.
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except OSError:
+        mode = 0o644
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                               prefix="." + os.path.basename(path) + ".",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            os.fchmod(f.fileno(), mode)
+            json.dump(obj, f)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# How long to wait for the shared lock before going ahead without it. The
+# lock is only ever held for a quick re-read and write, so a holder past
+# this is a hung process, and a hung worker tool must not stop the
+# monitor from ingesting and sending.
+LOCK_WAIT_SECS = 20
+
+
+@contextlib.contextmanager
+def shared_lock():
+    """Hold the exclusive flock on LOCK_FILE: the lock both the monitor
+    and the worker take around every read-modify-write of the queue and
+    the outbox. Inside it, re-read the file, apply only your own change,
+    and write it back atomically; never write a copy read earlier. Not
+    reentrant: never nest it. Never hold it across network calls."""
+    fd = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        deadline = time.time() + LOCK_WAIT_SECS
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.time() >= deadline:
+                    print(f"WARNING: {os.path.basename(LOCK_FILE)} held "
+                          f"for over {LOCK_WAIT_SECS}s; going ahead "
+                          f"without it.", flush=True)
+                    break
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)  # closing the descriptor releases the flock
+
+
+def load_queue():
+    """The queue as it is on disk now (a snapshot: writes are atomic
+    renames, so reading needs no lock)."""
+    if not os.path.exists(QUEUE_FILE):
+        return []
+    with open(QUEUE_FILE) as f:
+        queue = json.load(f)
+    return queue if isinstance(queue, list) else []
+
+
+def _queue_apply(add=(), drop=None):
+    """queue_edit's body, for callers already holding shared_lock."""
+    queue = load_queue()
+    kept = [q for q in queue
+            if not (drop and isinstance(q, dict) and drop(q))]
+    have = {q.get("message_id") for q in kept if isinstance(q, dict)}
+    added = 0
+    for item in add:
+        if item.get("message_id") in have:
+            continue
+        kept.append(item)
+        have.add(item.get("message_id"))
+        added += 1
+    if added or len(kept) != len(queue):
+        atomic_write(QUEUE_FILE, kept)
+    return added
+
+
+def queue_edit(add=(), drop=None):
+    """Apply a delta to reply_queue.json under the shared lock: re-read
+    it, remove the items drop(item) is true for, append the items in add
+    whose message_id is not queued yet. The main loop used to write back
+    a copy loaded before slow work (media downloads, the sweep), which
+    resurrected items the worker had removed and deleted items appended
+    meanwhile. Returns the number of items appended."""
+    with shared_lock():
+        return _queue_apply(add, drop)
 
 
 def load_state():
@@ -1335,11 +1437,68 @@ def alias_fragments(state, trigger_id, fragments):
         aliases[f["id"]] = trigger_id
     for mid in list(aliases)[:-500]:
         del aliases[mid]
+# ---------------------------------------------------------------------------
+# Early burst flush. The coalesce window (behavior.coalesce_seconds, or
+# BOT_COALESCE_SECS for bot authors) is the MAXIMUM wait. With the
+# gateway's typing events, a burst flushes as soon as its author has
+# visibly stopped: their newest message arrived over the gateway at least
+# BURST_QUIET_SECS ago and no TYPING_START from them in that channel has
+# arrived since. Gateway events are drained in order, so a sequence
+# number orders typing against messages exactly. When the gateway is
+# down (or missed the newest message) the burst waits the full window as
+# before. Bots get a longer quiet gap: a Muse sends multi-part replies
+# with 2-4s beats, and a bot may not send typing between parts.
+# ---------------------------------------------------------------------------
+BURST_QUIET_SECS = 1.5
+BOT_BURST_QUIET_SECS = 5.0
+_activity = {}  # "<channel>:<author>" -> {msg_id, msg_at, msg_seq, typing_seq}
+_activity_seq = 0
+
+
+def note_activity(channel_id, user_id, msg_id=None):
+    """Record a gateway MESSAGE_CREATE (msg_id set) or TYPING_START from
+    user_id in channel_id, in drain order."""
+    global _activity_seq
+    if not channel_id or not user_id:
+        return
+    _activity_seq += 1
+    key = f"{channel_id}:{user_id}"
+    act = dict(_activity.get(key) or {})
+    if msg_id:
+        if act.get("msg_id") and int(act["msg_id"]) >= int(msg_id):
+            return  # an older message arriving late changes nothing
+        act.update(msg_id=msg_id, msg_at=time.time(), msg_seq=_activity_seq)
+    else:
+        act["typing_seq"] = _activity_seq
+    _activity[key] = act
+    if len(_activity) > 1000:
+        cutoff = time.time() - 600
+        for k in [k for k, a in _activity.items()
+                  if a.get("msg_at", 0) < cutoff]:
+            del _activity[k]
+
+
+def burst_quiet(entry, now):
+    """True once a pending burst's author has stopped (see above)."""
+    act = _activity.get(f"{entry['channel_id']}:{entry['author_id']}")
+    if not act or not act.get("msg_id"):
+        return False
+    newest = max([entry["trigger"]] + entry["fragments"],
+                 key=lambda m: int(m["id"]))
+    if act["msg_id"] != newest["id"]:
+        return False  # the gateway did not see the newest message
+    if act.get("typing_seq", 0) > act["msg_seq"]:
+        return False  # typing again since their newest message
+    quiet = BOT_BURST_QUIET_SECS \
+        if (entry["trigger"].get("author", {}) or {}).get("bot") \
+        else BURST_QUIET_SECS
+    return now - act["msg_at"] >= quiet
 
 
 def flush_pending(state, queue, force=False):
-    """Turn pending bursts whose coalesce window has elapsed into single
-    queue items. Returns True when anything was queued."""
+    """Turn pending bursts whose author has stopped (burst_quiet) or whose
+    coalesce window has elapsed into single queue items. Returns True when
+    anything was queued."""
     now = time.time()
     pending = state.get("pending", {})
     flushed = False
@@ -1347,8 +1506,9 @@ def flush_pending(state, queue, force=False):
         entry = pending[key]
         if not force and entry.get("next_try", 0) > now:
             continue  # enqueue failed recently; backing off before retry
-        if force or now - entry["first_seen"] >= entry.get("window",
-                                                           COALESCE_SECS):
+        early = burst_quiet(entry, now)
+        if force or early or now - entry["first_seen"] >= entry.get(
+                "window", COALESCE_SECS):
             trigger = entry["trigger"]
             if entry["kind"] == "dm":
                 ok = enqueue_message(trigger, entry["channel_name"], state,
@@ -1361,10 +1521,11 @@ def flush_pending(state, queue, force=False):
                                      guild_id=entry["guild_id"],
                                      kind=entry["kind"])
             n_frag = len(entry["fragments"])
+            why = " (author stopped typing)" if early and not force else ""
             print(f"Flushed {entry['kind']} burst "
                   f"({1 + n_frag} message(s)) from "
                   f"{(trigger.get('author', {}) or {}).get('username')} in "
-                  f"{entry['channel_name']}: queued={ok}", flush=True)
+                  f"{entry['channel_name']}: queued={ok}{why}", flush=True)
             if ok:
                 del pending[key]
                 flushed = True
@@ -1446,11 +1607,106 @@ def send_reply(channel_id, text, reply_to=None, nonce=None):
 
 def send_typing(channel_id):
     """Show the typing indicator for ~10s. Signals responsiveness while
-    the reply worker drafts the real reply."""
+    the reply worker drafts the real reply. Best-effort, and skipped
+    during REST back-off: an indicator is never worth rate-limit
+    pressure."""
+    if rest_backing_off():
+        return
+    with _typing_lock:
+        _typing_last[channel_id] = time.time()
     try:
         api_post(f"/channels/{channel_id}/typing", {})
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Typing indicator. Discord shows one typing ping for ~10s. The main loop
+# used to re-send it every 8s itself, but one iteration can take much
+# longer (a full REST poll, the sweep, discovery, media downloads, a
+# multi-part send), so the indicator kept lapsing and users saw it
+# flicker until the reply arrived. A daemon thread now pings every
+# active channel on its own clock. The main loop only says which
+# channels are active (typing_refresh): a channel types while it has a
+# pending burst (not in enqueue back-off) or a queue item that is not
+# low priority, for at most TYPING_MAX_SECS per burst or item so a dead
+# worker does not type forever. process_outbox stops an item's typing
+# right before its reply goes out (sending a message ends the indicator;
+# the beats in send_fragmented cover multi-part replies).
+# ---------------------------------------------------------------------------
+TYPING_EVERY_SECS = 8
+TYPING_MAX_SECS = 180
+_typing_lock = threading.Lock()
+_typing_sources = {}  # "burst:<key>" / "item:<id>" -> (channel_id, start)
+_typing_last = {}     # channel_id -> time of the last typing ping
+
+
+def typing_sync(prefix, current):
+    """Make current ({key: (channel_id, start_ts)}) the full set of typing
+    sources whose keys start with prefix."""
+    with _typing_lock:
+        for key in [k for k in _typing_sources
+                    if k.startswith(prefix) and k not in current]:
+            del _typing_sources[key]
+        _typing_sources.update(current)
+
+
+def typing_clear(keys, sent_in=None):
+    """Drop typing sources (their reply is going out or was settled).
+    sent_in: a channel a message was just posted in, which ended its
+    indicator, so any other source there is re-pinged promptly."""
+    with _typing_lock:
+        for key in keys:
+            _typing_sources.pop(key, None)
+        if sent_in:
+            _typing_last.pop(sent_in, None)
+
+
+def typing_refresh(state):
+    """Publish the channels that are waiting on a reply (see above)."""
+    now = time.time()
+    bursts = {}
+    for key, entry in state.get("pending", {}).items():
+        # Name-drop bursts never type (most get no reply), and neither
+        # does a burst backing off after a failed enqueue (a rate cap
+        # would otherwise keep it typing for the ~15 min of retries).
+        if entry.get("kind") in ("mention", "dm") \
+                and entry.get("next_try", 0) <= now:
+            bursts["burst:" + key] = (entry["channel_id"],
+                                      entry.get("first_seen", now))
+    typing_sync("burst:", bursts)
+    items = {}
+    for item in load_queue():
+        if not isinstance(item, dict) or item.get("priority") == "low" \
+                or not item.get("channel_id") \
+                or not item.get("message_id"):
+            continue
+        start = item.get("queued_at") or _snowflake_ts(item["message_id"])
+        items["item:" + str(item["message_id"])] = (item["channel_id"],
+                                                    start)
+    typing_sync("item:", items)
+
+
+def _typing_thread_main():
+    while True:
+        try:
+            time.sleep(1.0)
+            if rest_backing_off():
+                continue
+            now = time.time()
+            with _typing_lock:
+                active = {cid for cid, start in _typing_sources.values()
+                          if now - start < TYPING_MAX_SECS}
+                due = [cid for cid in active
+                       if now - _typing_last.get(cid, 0)
+                       >= TYPING_EVERY_SECS]
+                for cid in [c for c, t in _typing_last.items()
+                            if now - t > 60]:
+                    del _typing_last[cid]
+            for cid in due:
+                send_typing(cid)
+        except Exception as e:
+            print(f"Typing thread error: {e}", flush=True)
 
 
 def add_reaction(channel_id, message_id, emoji):
@@ -2741,6 +2997,9 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         "bot_turns": bot_turns,
         "participants": conversation_participants(chan_hist, msg,
                                                   reply_ctx),
+        # When the monitor queued it: the typing cap and the latency log
+        # measure from here.
+        "queued_at": note_queued(state, msg["id"]),
     }
     item.update(extra)
     if owner_command:
@@ -2751,14 +3010,23 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     burst_note = f" (+{len(fragments)} fragment(s))" if fragments else ""
     print(f"Queued {item['kind']} from {msg['author'].get('username')} in "
           f"{cname}{burst_note}: {content[:80]}", flush=True)
-    if item["priority"] != "low":
-        # A typing indicator promises a reply; a name-drop most likely
-        # gets none.
-        send_typing(msg["channel_id"])
+    # (Typing comes from the typing thread, via typing_refresh: never for
+    # a low-priority name-drop, which most likely gets no reply.)
     ledger_record_many(burst_ids, "queued",
                        channel_id=msg.get("channel_id"),
                        author=msg.get("author", {}).get("username"))
     return True
+
+
+def note_queued(state, mid):
+    """Remember when mid was queued (bounded), for the latency log even
+    when a worker removes the queue item itself. Returns the time."""
+    now = time.time()
+    queued = state.setdefault("queued_at", {})
+    queued[mid] = now
+    for old in list(queued)[:-200]:
+        del queued[old]
+    return now
 
 
 def _settle(state, item, status, reason="", replied=False):
@@ -2768,20 +3036,148 @@ def _settle(state, item, status, reason="", replied=False):
     the trigger, and a fragment left unsettled would be requeued alone.
     replied=True also adds all those ids to replied_to (send dedup)."""
     reply_to = item.get("reply_to")
-    if not reply_to:
+    ids = []
+    if reply_to:
+        aliases = state.get("reply_aliases", {})
+        trigger = aliases.get(reply_to, reply_to)
+        ids = [reply_to]
+        ids += [m for m in [trigger] + [f for f, t in aliases.items()
+                                        if t == trigger]
+                if m not in ids]
+    # The queue item it answers (the only id a welcome reply has), so a
+    # second worker's draft for the same item is suppressed too.
+    if item.get("item") and item["item"] not in ids:
+        ids.append(item["item"])
+    if not ids:
         return
-    aliases = state.get("reply_aliases", {})
-    trigger = aliases.get(reply_to, reply_to)
-    ids = [reply_to]
-    ids += [m for m in [trigger] + [f for f, t in aliases.items()
-                                    if t == trigger]
-            if m not in ids]
     for mid in ids:
         if replied and mid not in state["replied_to"]:
             state["replied_to"].append(mid)
     ledger_record_many(ids, status, reason,
                        channel_id=item.get("channel_id"),
                        author=item.get("author"))
+
+
+def _answered_id(state, item):
+    """The queue item (its message_id) an outbox item answers: its "item"
+    field, else the burst trigger its reply_to belongs to, else reply_to.
+    None when it names neither (an older worker's welcome reply)."""
+    if item.get("item"):
+        return item["item"]
+    reply_to = item.get("reply_to")
+    return state.get("reply_aliases", {}).get(reply_to) or reply_to
+
+
+def _is_snowflake(value):
+    return (isinstance(value, str) and value.isdigit()) \
+        or (isinstance(value, int) and not isinstance(value, bool)
+            and value > 0)
+
+
+def _outbox_problem(item):
+    """Why an outbox item cannot be processed, or None. Ids given as
+    numbers are normalized to strings in place. A wrong type used to
+    raise out of process_outbox before its final write, which blocked the
+    outbox and re-sent the earlier items with no reply_to every cycle."""
+    if not isinstance(item, dict):
+        return "not a JSON object"
+    for field in ("channel_id", "reply_to", "item"):
+        value = item.get(field)
+        if value in (None, "") and field != "channel_id":
+            item.pop(field, None)
+            continue
+        if not _is_snowflake(value):
+            return f"{field} is not a Discord id"
+        item[field] = str(value)
+    if item.get("text") is not None and not isinstance(item["text"], str):
+        return "text is not a string"
+    for field in ("parts", "reactions", "attachments"):
+        value = item.get(field)
+        if value is not None and not (
+                isinstance(value, list)
+                and all(isinstance(v, str) for v in value)):
+            return f"{field} is not a list of strings"
+    if item.get("_retry") is not None \
+            and not isinstance(item["_retry"], dict):
+        return "_retry was edited (leave it alone)"
+    if item.get("silent"):
+        if not (item.get("reply_to") or item.get("item")):
+            return "silent item names no message (reply_to or item)"
+        return None
+    # Only silent: true (or a reactions-only item) is a deliberate
+    # no-reply. Anything else that would send nothing (say, the reply in
+    # a "content" field) was a mistake: settling it as silence would
+    # leave the mention unanswered for good.
+    reactions = [e for e in item.get("reactions") or [] if e.strip()]
+    if not normalize_parts(item):
+        if not reactions:
+            return ("nothing to send: no text, parts, or reactions, and "
+                    "not silent: true")
+        if not item.get("reply_to"):
+            return "reactions without reply_to"
+    return None
+
+
+# An outbox file that does not parse but changed this recently is most
+# likely a worker writing it in place (not via a rename): wait for it.
+OUTBOX_SETTLE_SECS = 10
+
+
+def _outbox_load(path):
+    """The items in an outbox file, or None while it is mid-write (see
+    OUTBOX_SETTLE_SECS). A file that is not a JSON array (a bad write) is
+    set aside in the rejected file instead of blocking every later
+    reply."""
+    if not os.path.exists(path):
+        return []
+    with open(path, errors="replace") as f:
+        raw = f.read()
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return data
+        reason = "outbox file is not a JSON array"
+    except ValueError as e:
+        try:
+            if time.time() - os.path.getmtime(path) < OUTBOX_SETTLE_SECS:
+                return None
+        except OSError:
+            return None
+        data, reason = raw[:20000], f"outbox file is not valid JSON ({e})"
+    print(f"Rejected {os.path.basename(path)}: {reason}", flush=True)
+    _reject_outbox([(data, reason)])
+    return []
+
+
+def _reject_outbox(rejects):
+    """Set malformed outbox items aside for the owner's review."""
+    try:
+        with open(OUTBOX_REJECTED_FILE) as f:
+            kept = json.load(f)
+        kept = kept if isinstance(kept, list) else []
+    except (OSError, ValueError):
+        kept = []
+    now = datetime.now(timezone.utc).isoformat()
+    kept += [{"rejected_at": now, "reason": reason, "item": item}
+             for item, reason in rejects]
+    atomic_write(OUTBOX_REJECTED_FILE, kept[-100:])
+
+
+def _log_latency(state, qid, picked, sent):
+    """One line per answered item: where the time went, from the trigger
+    message (its snowflake time) to queued, to the outbox pickup, to
+    sent."""
+    t0 = _snowflake_ts(qid)
+    queued = state.get("queued_at", {}).pop(qid, None)
+    if not t0:
+        return
+    if queued:
+        print(f"Latency {qid}: coalesce {queued - t0:.1f}s, worker "
+              f"{picked - queued:.1f}s, send {sent - picked:.1f}s, total "
+              f"{sent - t0:.1f}s", flush=True)
+    else:
+        print(f"Latency {qid}: send {sent - picked:.1f}s, total "
+              f"{sent - t0:.1f}s", flush=True)
 
 
 # A failed send is retried with growing gaps, but only for this long:
@@ -2792,21 +3188,57 @@ SEND_RETRY_SECS = 90
 
 
 def process_outbox(state):
-    """Send replies drafted by the worker, with output guardrails + dedup."""
-    if not os.path.exists(OUTBOX_FILE):
+    """Send replies drafted by the worker, with output guardrails + dedup.
+
+    Under the shared lock, the items are taken out of reply_outbox.json
+    into OUTBOX_PROCESSING_FILE (merged back on the next pass if the
+    monitor dies mid-send). They are sent with no lock held, since a
+    multi-part send takes several seconds. Then, under the lock again,
+    only the items still retrying go back, ahead of whatever the worker
+    appended meanwhile: writing back the copy read before the sends
+    deleted those appends. Settled items (sent, silent, or skipped) also
+    leave the queue here, so the worker never has to rewrite it."""
+    try:
+        with open(OUTBOX_FILE) as f:
+            idle = json.load(f) == []
+    except FileNotFoundError:
+        idle = True
+    except (OSError, ValueError):
+        idle = False  # unreadable: _outbox_load sets it aside
+    if idle and not os.path.exists(OUTBOX_PROCESSING_FILE):
         return
-    with open(OUTBOX_FILE) as f:
-        outbox = json.load(f)
-    if not outbox:
-        return
+    picked = time.time()
+    with shared_lock():
+        fresh = _outbox_load(OUTBOX_FILE)
+        if fresh is None:
+            return  # mid-write; the next pass gets it
+        outbox = (_outbox_load(OUTBOX_PROCESSING_FILE) or []) + fresh
+        atomic_write(OUTBOX_PROCESSING_FILE, outbox)
+        atomic_write(OUTBOX_FILE, [])
 
     remaining = []
+    rejects = []
+    settled = []
     for item in outbox:
+        problem = _outbox_problem(item)
+        if problem:
+            where = item.get("channel_name") if isinstance(item, dict) \
+                else None
+            print(f"Rejected outbox item for {where or '?'}: {problem} "
+                  f"(set aside in "
+                  f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
+            rejects.append((item, problem))
+            continue
         reply_to = item.get("reply_to")
+        qid = _answered_id(state, item)
+        typing_keys = ["item:" + qid] if qid else []
         # Dedup: never touch the same message twice (overlapping workers)
-        if reply_to and reply_to in state["replied_to"]:
-            print(f"Skipping duplicate reply to message {reply_to}", flush=True)
+        if (reply_to and reply_to in state["replied_to"]) \
+                or (item.get("item") and item["item"] in state["replied_to"]):
+            print(f"Skipping duplicate reply to message "
+                  f"{reply_to or item.get('item')}", flush=True)
             _settle(state, item, "replied", "duplicate suppressed")
+            settled.append(item)
             continue
         # Clamped to Discord's per-message limit AFTER every rewrite: the
         # @everyone neutralization and link_mentions both lengthen text
@@ -2819,13 +3251,15 @@ def process_outbox(state):
         # message. A react-only item may carry no text.
         reactions = [e for e in (item.get("reactions") or [])
                      if isinstance(e, str) and e.strip()][:5]
-        if item.get("silent") or (not parts and not reactions):
+        if item.get("silent"):
             # The worker decided no reply is warranted (a conversation
             # that has run its course, a name-drop that wasn't an
             # address). Recording it keeps the sweep from waking the
             # worker again for the same message.
             _settle(state, item, "skipped", "no reply (worker's call)",
                     replied=True)
+            typing_clear(typing_keys)
+            settled.append(item)
             continue
         if not _is_snowflake(item.get("channel_id")) or (
                 reply_to and not _is_snowflake(reply_to)):
@@ -2887,6 +3321,10 @@ def process_outbox(state):
             print(f"Note: reply to {reply_to} listed attachments without a "
                   f"live generation approval for its item; dropped",
                   flush=True)
+        # The reply is about to land, which ends the indicator: stop
+        # typing for this item now, or a ping right after the send would
+        # show typing again for ~10s.
+        typing_clear(typing_keys)
         try:
             if parts:
                 # standalone: post as a plain message, not a Discord
@@ -2913,6 +3351,11 @@ def process_outbox(state):
                     rp for _, rp in gen_files)
                 call_hook("generation_sent", {"state": state}, item)
             _settle(state, item, "replied", replied=True)
+            settled.append(item)
+            typing_clear([], sent_in=item["channel_id"] if parts else None)
+            if qid:
+                _log_latency(state, qid, retry.get("picked", picked),
+                             time.time())
         except Exception as e:
             code = getattr(e, "code", None)
             if code == 403:
@@ -2921,6 +3364,7 @@ def process_outbox(state):
                 print(f"Dropping outbox item for #{item.get('channel_name')}: "
                       f"403 Missing Access ({e})", flush=True)
                 _settle(state, item, "skipped", "403 missing access")
+                settled.append(item)
                 continue
             now = time.time()
             first = retry.get("first", now)
@@ -2933,15 +3377,52 @@ def process_outbox(state):
                       f"{item.get('channel_name')} after "
                       f"{SEND_RETRY_SECS}s of send errors: {e}", flush=True)
                 _settle(state, item, "skipped", f"send failed: {e}"[:200])
+                settled.append(item)
                 continue
             n = retry.get("n", 0) + 1
             item["_retry"] = {"first": first, "n": n,
                               "next": now + min(30, 2 ** n),
-                              "attachments": gen_files}
+                              "attachments": gen_files,
+                              "picked": retry.get("picked", picked)}
             print(f"Failed to send reply (attempt {n}; retrying, same "
                   f"nonce): {e}", flush=True)
             remaining.append(item)
-    atomic_write(OUTBOX_FILE, remaining)
+
+    # The queue items the settled replies answer. Matched on the outbox
+    # item's "item" first; an older worker's item without it matches on
+    # reply_to, its burst trigger, or a burst fragment it replied under.
+    done_ids, done_frags = set(), set()
+    for item in settled:
+        qid = _answered_id(state, item)
+        if qid:
+            done_ids.add(qid)
+        if not item.get("item") and item.get("reply_to"):
+            done_ids.add(item["reply_to"])
+            done_frags.add(item["reply_to"])
+
+    def answered(q):
+        return q.get("message_id") in done_ids or any(
+            isinstance(f, dict) and f.get("message_id") in done_frags
+            for f in q.get("burst_fragments") or [])
+
+    if rejects:
+        _reject_outbox(rejects)
+    with shared_lock():
+        # Queue first, outbox second: the wake hook reads the outbox
+        # before the queue, so it never sees an answered item in the
+        # queue without its outbox entry.
+        if done_ids:
+            _queue_apply(drop=answered)
+        fresh = _outbox_load(OUTBOX_FILE)
+        if fresh is not None:
+            atomic_write(OUTBOX_FILE, remaining + fresh)
+            os.remove(OUTBOX_PROCESSING_FILE)
+        elif remaining:
+            # Mid-write: the retries wait in the processing file, which
+            # the next pass merges back in first.
+            atomic_write(OUTBOX_PROCESSING_FILE, remaining)
+        else:
+            os.remove(OUTBOX_PROCESSING_FILE)
 
 
 PIDFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor.pid")
@@ -3010,8 +3491,11 @@ def _acquire_singleton():
 # ---------------------------------------------------------------------------
 GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
 GATEWAY_QUERY = "/?v=10&encoding=json"
-# GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT
-GATEWAY_INTENTS = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15)
+# GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT, plus
+# GUILD_MESSAGE_TYPING | DIRECT_MESSAGE_TYPING for the early burst flush
+# (burst_quiet). The typing intents are not privileged.
+GATEWAY_INTENTS = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15) \
+    | (1 << 11) | (1 << 14)
 # Close codes after which reconnecting cannot help. 4004: the token was
 # rejected (exit; the watchdog alerts). 4010-4014: shard, API version, or
 # intents problems that need a code or portal fix: realtime ingest
@@ -3124,6 +3608,15 @@ async def _gateway_run(token, inbox, status):
                                 else "delete",
                                 "id": d.get("id"),
                                 "joined_at": d.get("joined_at")}})
+                        elif t == "TYPING_START":
+                            # Someone is typing: lets a pending burst
+                            # flush as soon as its author stops. Rides
+                            # the inbox so it is ordered against the
+                            # messages; no wake, the loop is ticking.
+                            d = pkt["d"]
+                            inbox.put({"_typing": {
+                                "channel_id": d.get("channel_id"),
+                                "user_id": d.get("user_id")}})
                         elif t == "MESSAGE_CREATE":
                             # Realtime ingest for every guild the bot is in
                             # plus DMs (no guild_id). drain_gateway() in the
@@ -3190,10 +3683,12 @@ def drain_gateway(state, inbox, channels):
     exactly like polled messages. Returns (triggers, joins, dms): guild
     triggers as (msg, cname, guild_id, kind) tuples (already staged, see
     stage_found), joins as (msg, cname, guild_id), DMs as (msg, cname).
-    Guild join/leave events are applied to state on the way. Skips
-    anything the REST poll already processed (at or below its last_seen
-    watermark), and leaves that watermark alone (see note_gateway_seen).
-    Messages from servers outside a non-empty bot.guild_ids are ignored."""
+    Guild join/leave events are applied to state on the way, and typing
+    events and message arrivals are recorded for the early burst flush
+    (note_activity). Skips anything the REST poll already processed (at
+    or below its last_seen watermark), and leaves that watermark alone
+    (see note_gateway_seen). Messages from servers outside a non-empty
+    bot.guild_ids are ignored."""
     mentions, joins, dms = [], [], []
     guild_names = {}
     for info in channels.values():
@@ -3208,9 +3703,16 @@ def drain_gateway(state, inbox, channels):
         if "_guild_event" in m:
             on_guild_event(state, m["_guild_event"])
             continue
+        if "_typing" in m:
+            note_activity(m["_typing"].get("channel_id"),
+                          m["_typing"].get("user_id"))
+            continue
         cid = m.get("channel_id")
         if not cid:
             continue
+        # Recorded even when the poll got here first: the burst holding
+        # this message needs to know when its author last spoke.
+        note_activity(cid, (m.get("author", {}) or {}).get("id"), m["id"])
         last = state["last_seen"].get(cid)
         if last and int(m["id"]) <= int(last):
             continue  # the poll loop already handled it
@@ -3295,10 +3797,13 @@ def sweep_mentions(state, queue, channels):
     entries = _ledger_load()["entries"]
     q_ids = {q.get("message_id") for q in queue}
     outbox_targets = set()
-    if os.path.exists(OUTBOX_FILE):
+    for path in (OUTBOX_FILE, OUTBOX_PROCESSING_FILE):
         try:
-            with open(OUTBOX_FILE) as f:
-                outbox_targets = {i.get("reply_to") for i in json.load(f)}
+            with open(path) as f:
+                for i in json.load(f):
+                    if isinstance(i, dict):
+                        outbox_targets.update((i.get("reply_to"),
+                                               i.get("item")))
         except Exception:
             pass
     quar_ids = _quarantine_ids()
@@ -3636,22 +4141,22 @@ def main():
         daemon=True, name="discord-gateway")
     gw_thread.start()
     print("Gateway thread started (realtime ingest).", flush=True)
+    # Typing indicator on its own clock (see typing_refresh).
+    threading.Thread(target=_typing_thread_main, daemon=True,
+                     name="typing").start()
 
     # A restart must not drop bursts staged before it: their messages are
     # already marked seen, so flush them immediately instead of waiting out
     # a coalesce window that mostly elapsed while the monitor was down.
     if state.get("pending"):
-        queue = []
-        if os.path.exists(QUEUE_FILE):
-            with open(QUEUE_FILE) as f:
-                queue = json.load(f)
+        queue = load_queue()
+        n_before = len(queue)
         if flush_pending(state, queue, force=True):
-            atomic_write(QUEUE_FILE, queue)
+            queue_edit(add=queue[n_before:])
     save_state(state)
 
     cycle = 0
     last_full_poll = 0.0
-    last_typing = {}
     was_backing_off = False
     while True:
         # Each phase below has its own try/except: one failing phase (a
@@ -3733,12 +4238,13 @@ def main():
             # author fold into one pending entry; guild triggers were
             # staged as they were classified); welcomes queue
             # immediately. Matured bursts flush into single queue items.
-            # The queue file is re-read every cycle because flushes can
-            # happen on quiet cycles and the worker removes items it drains.
-            queue = []
-            if os.path.exists(QUEUE_FILE):
-                with open(QUEUE_FILE) as f:
-                    queue = json.load(f)
+            # The queue snapshot only serves the duplicate checks: what
+            # gets written is just the items appended to it, applied to a
+            # fresh read under the lock (queue_edit), because the flush
+            # can take tens of seconds (media downloads, ffmpeg) while the
+            # monitor's own sends remove answered items.
+            queue = load_queue()
+            n_before = len(queue)
             dirty = False
             for msg, cname, gid in joins_found:
                 for item in call_hook(
@@ -3747,6 +4253,8 @@ def main():
                          "guilds": GUILDS},
                         msg, gid):
                     if item:
+                        item.setdefault("queued_at", note_queued(
+                            state, item.get("message_id")))
                         queue.append(item)
                         dirty = True
             for msg, cname in dm_items:
@@ -3754,32 +4262,18 @@ def main():
 
             dirty |= flush_pending(state, queue)
             if dirty:
-                atomic_write(QUEUE_FILE, queue)
+                queue_edit(add=queue[n_before:])
             save_state(state)
         except Exception as e:
             queue = None  # not trustworthy: the sweep must not write it
             print(f"Queue/staging error: {e}", flush=True)
 
         try:
-            # Keep the typing indicator alive while replies are pending.
-            # Fire for staged bursts too, so the user sees the typing
-            # indicator while the burst is being "read", not after the
-            # hold. Throttled per channel: the fast loop ticks every ~2s
-            # but one typing ping lasts ~10s.
-            typing_targets = set()
-            if os.path.exists(QUEUE_FILE):
-                with open(QUEUE_FILE) as f:
-                    pending = json.load(f)
-                for item in pending:
-                    if item.get("priority") != "low":
-                        typing_targets.add(item["channel_id"])
-            for entry in state.get("pending", {}).values():
-                if entry.get("kind") in ("mention", "dm"):
-                    typing_targets.add(entry["channel_id"])
-            for cid in typing_targets:
-                if now - last_typing.get(cid, 0) >= 8:
-                    send_typing(cid)
-                    last_typing[cid] = now
+            # Keep the typing indicator alive while replies are pending:
+            # staged bursts too, so the user sees it while the burst is
+            # being "read", not after the hold. The typing thread pings;
+            # this only tells it which channels are waiting.
+            typing_refresh(state)
         except Exception as e:
             print(f"Typing error: {e}", flush=True)
 
@@ -3810,8 +4304,10 @@ def main():
         try:
             if full_poll and queue is not None:
                 if cycle % SWEEP_EVERY_CYCLES == 0:
+                    queue = load_queue()  # after the sends' removals
+                    n_before = len(queue)
                     if sweep_mentions(state, queue, CHANNELS):
-                        atomic_write(QUEUE_FILE, queue)
+                        queue_edit(add=queue[n_before:])
                         save_state(state)
         except Exception as e:
             print(f"Sweep error: {e}", flush=True)
@@ -3902,6 +4398,11 @@ def main():
         else:
             wait_for = min(2.0, max(
                 0.0, POLL_INTERVAL - (time.time() - last_full_poll)))
+        if any(e.get("next_try", 0) <= time.time()
+               for e in state.get("pending", {}).values()):
+            # A burst can flush early (burst_quiet): tick faster so it
+            # goes out soon after its author stops, not up to 2s later.
+            wait_for = min(wait_for, 0.5)
         _gateway_status["wake"].wait(timeout=wait_for)
         _gateway_status["wake"].clear()
 

@@ -219,7 +219,7 @@ behavior comes from `worker-prompt.template.md`.
 
 1. Fill the template's seams:
    - **PERSONA seam**: point it at `persona.md` (step 1 of the prompt
-     already reads it) or inline the persona.
+     already takes it from the wake payload) or inline the persona.
    - **GENERATION POLICY seam**: state what media tools THIS runtime
      actually has (images? video? neither?) in the "know your limits"
      bullet.
@@ -232,16 +232,17 @@ behavior comes from `worker-prompt.template.md`.
      owner's main chat, so routine replies don't spam it). The script
      resolves the package dir from its own location; set
      `MUSE_DISCORD_DIR` if the package lives elsewhere. It needs
-     `jq` on PATH.
+     `jq` and `python3` on PATH.
    - **Any other runtime**: schedule a poller that checks
-     `reply_queue.json` every few seconds and, when it is non-empty
-     (and its content hash changed since the last wake, with a
-     5-minute re-wake backstop), starts a worker session with the
-     filled template as its prompt. PROTOCOL.md specifies the file
-     contract the worker implements.
+     `reply_queue.json` every few seconds and, when it holds items no
+     running worker was handed (re-handing an item out after ~10
+     minutes in case its worker died), starts a worker session with
+     the filled template as its prompt and those items. PROTOCOL.md
+     specifies the file contract the worker implements.
 3. Make sure the worker's working directory or paths point at
    `<package dir>` for `reply_queue.json`, `reply_outbox.json`,
-   `persona.md`, `generated/`, and `bin/discord-api.py`.
+   `persona.md`, `generated/`, `bin/outbox-append.py`, and
+   `bin/discord-api.py`.
 
 ## Step 8: Start it, and keep it alive
 
@@ -345,8 +346,9 @@ see working before calling the install done.
   overrides.
 - **Queue fills but no replies**: the worker isn't waking. Check the
   hook/poller registration (step 7) and that paths point at THIS
-  package dir's `reply_queue.json`. The 5-minute backstop in the wake
-  script re-wakes an unchanged queue in case a worker died mid-drain.
+  package dir's `reply_queue.json`. The wake script hands an item out
+  again 10 minutes after its last wake in case a worker died
+  mid-drain.
 - **Replies sent twice**: two workers or two monitors are running.
   The monitor's pidfile singleton prevents the latter; check for a
   second worker poller.
