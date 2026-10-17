@@ -33,6 +33,8 @@ Configuration: config.yaml next to this file (or --config PATH, or the
 MUSE_DISCORD_CONFIG env var). See config.example.yaml for the schema.
 """
 import copy
+import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -1162,10 +1164,25 @@ def flush_pending(state, queue, force=False):
     return flushed
 
 
-def send_reply(channel_id, text, reply_to=None):
+def send_nonce(channel_id, reply_to, parts, index):
+    """Idempotency key for one message part. A POST can fail on our side
+    (timeout, dropped connection, 5xx) after Discord already created the
+    message; with enforce_nonce, Discord answers a repeat of the same
+    nonce from the same bot within a few minutes with the message it
+    already made instead of posting it again. Derived from the reply
+    itself, so retries and even a second monitor process agree on it.
+    Discord caps nonces at 25 characters."""
+    key = json.dumps([channel_id, reply_to, parts, index])
+    return hashlib.sha256(key.encode()).hexdigest()[:25]
+
+
+def send_reply(channel_id, text, reply_to=None, nonce=None):
     data = {"content": text}
     if reply_to:
         data["message_reference"] = {"message_id": reply_to}
+    if nonce:
+        data["nonce"] = nonce
+        data["enforce_nonce"] = True
     return api_post(f"/channels/{channel_id}/messages", data)
 
 
@@ -1239,21 +1256,23 @@ def send_fragmented(channel_id, parts, reply_to=None, attachments=()):
 
     The first part is threaded under reply_to; follow-ups go out as plain
     messages with a typing beat between them. Attachments ride on the last
-    part. Raises on the first failure: the caller drops (never requeues) a
-    partially-sent fragmented reply, so sent parts are never duplicated.
+    part. Raises on the first failure; the caller retries the whole
+    reply, and each part's nonce makes Discord return the parts that
+    already landed instead of posting them again.
     """
     last_idx = len(parts) - 1
     for i, part in enumerate(parts):
         if i > 0:
             send_typing(channel_id)
             time.sleep(random.uniform(2.0, 4.0))
+        nonce = send_nonce(channel_id, reply_to, parts, i)
         if i == last_idx and attachments:
             send_reply_with_files(channel_id, part, attachments,
-                                  reply_to if i == 0 else None)
+                                  reply_to if i == 0 else None, nonce)
         elif i == 0:
-            send_reply(channel_id, part, reply_to)
+            send_reply(channel_id, part, reply_to, nonce)
         else:
-            send_reply(channel_id, part)
+            send_reply(channel_id, part, nonce=nonce)
 
 
 ATTACH_CTYPES = {
@@ -1262,13 +1281,17 @@ ATTACH_CTYPES = {
 }
 
 
-def send_reply_with_files(channel_id, text, files, reply_to=None):
+def send_reply_with_files(channel_id, text, files, reply_to=None,
+                          nonce=None):
     """Send a message with file attachments via multipart/form-data.
     files: list of (local_path, filename)."""
     boundary = "----MuseDiscord%d" % int(time.time() * 1000)
     payload = {"content": text}
     if reply_to:
         payload["message_reference"] = {"message_id": reply_to}
+    if nonce:
+        payload["nonce"] = nonce
+        payload["enforce_nonce"] = True
     body = b""
     body += (f'--{boundary}\r\nContent-Disposition: form-data; name="payload_json"\r\n'
              f'Content-Type: application/json\r\n\r\n').encode()
@@ -2196,6 +2219,13 @@ def _settle(state, item, status, reason="", replied=False):
                       author=item.get("author"))
 
 
+# A failed send is retried with growing gaps, but only for this long:
+# Discord's nonce check (send_nonce) only remembers a nonce for a few
+# minutes, and past that a retry of a send that actually landed would
+# post it twice.
+SEND_RETRY_SECS = 90
+
+
 def process_outbox(state):
     """Send replies drafted by the worker, with output guardrails + dedup."""
     if not os.path.exists(OUTBOX_FILE):
@@ -2226,6 +2256,10 @@ def process_outbox(state):
             # worker again for the same message.
             _settle(state, item, "skipped", "no reply (worker's call)",
                     replied=True)
+            continue
+        retry = item.get("_retry") or {}
+        if retry.get("next", 0) > time.time():
+            remaining.append(item)  # waiting out the gap after a failure
             continue
         # Attachments: only from the generated dir. The normal gate is
         # the monitor's may_generate approval for this message (tracked
@@ -2315,13 +2349,23 @@ def process_outbox(state):
                       f"403 Missing Access ({e})", flush=True)
                 _settle(state, item, "skipped", "403 missing access")
                 continue
-            if len(parts) > 1:
-                # Never requeue a partially-sent fragmented reply: retrying
-                # would duplicate the parts that already landed.
-                print(f"Dropping fragmented reply after send error: {e}",
-                      flush=True)
+            now = time.time()
+            first = retry.get("first", now)
+            if now - first >= SEND_RETRY_SECS:
+                # The send may well have landed (a timeout after Discord
+                # created the message looks exactly like a failure), so
+                # stop before the nonce window closes rather than risk a
+                # duplicate.
+                print(f"Giving up on reply to {item.get('author')} in "
+                      f"{item.get('channel_name')} after "
+                      f"{SEND_RETRY_SECS}s of send errors: {e}", flush=True)
+                _settle(state, item, "skipped", f"send failed: {e}"[:200])
                 continue
-            print(f"Failed to send reply: {e}", flush=True)
+            n = retry.get("n", 0) + 1
+            item["_retry"] = {"first": first, "n": n,
+                              "next": now + min(30, 2 ** n)}
+            print(f"Failed to send reply (attempt {n}; retrying, same "
+                  f"nonce): {e}", flush=True)
             remaining.append(item)
     atomic_write(OUTBOX_FILE, remaining)
 
@@ -2329,30 +2373,46 @@ def process_outbox(state):
 PIDFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor.pid")
 
 
+_PIDFILE_LOCK = None  # fd holding the pidfile lock for the process lifetime
+
+
 def _acquire_singleton():
-    """Ensure only one monitor runs. Uses a pidfile with stale detection:
-    if the recorded PID is gone (or isn't this script), the lock is stale
-    and gets replaced. Exits the process if a live peer holds the lock."""
+    """Ensure only one monitor runs. The pidfile is locked with flock for
+    as long as this process lives, so two monitors started at the same
+    moment (say, overlapping watchdog runs) cannot both pass the check;
+    the lock disappears with the process, so there is no stale state.
+    Two monitors would each send everything in the outbox, posting every
+    reply twice. Exits the process if a live peer holds the lock."""
+    global _PIDFILE_LOCK
     mypid = os.getpid()
+    fd = os.open(PIDFILE, os.O_RDWR | os.O_CREAT, 0o644)
     try:
-        with open(PIDFILE) as f:
-            oldpid = int(f.read().strip())
-    except (OSError, ValueError):
-        oldpid = None
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("Another monitor holds the pidfile lock; exiting.", flush=True)
+        sys.exit(0)
+    # A monitor from before this lock existed holds no flock, so also
+    # check whether the recorded pid is still a live monitor.
+    try:
+        oldpid = int(os.read(fd, 32).decode().strip() or 0)
+    except ValueError:
+        oldpid = 0
     if oldpid and oldpid != mypid:
         try:
             with open(f"/proc/{oldpid}/cmdline", "rb") as f:
-                cmdline = f.read().decode(errors="replace")
-            alive = "monitor.py" in cmdline
+                alive = "monitor.py" in f.read().decode(errors="replace")
         except OSError:
             alive = False
         if alive:
-            print(f"Another monitor (pid {oldpid}) is already running; exiting.",
-                  flush=True)
+            print(f"Another monitor (pid {oldpid}) is already running; "
+                  f"exiting.", flush=True)
             sys.exit(0)
-        print(f"Replacing stale monitor pidfile (pid {oldpid} gone).", flush=True)
-    with open(PIDFILE, "w") as f:
-        f.write(str(mypid))
+        print(f"Replacing stale monitor pidfile (pid {oldpid} gone).",
+              flush=True)
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, str(mypid).encode())
+    _PIDFILE_LOCK = fd  # never closed: the lock lives as long as we do
 
 
 # ---------------------------------------------------------------------------

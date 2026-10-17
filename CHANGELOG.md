@@ -3,6 +3,27 @@
 Newest first. **Action needed** lists what an existing install must
 do after updating; UPDATING.md walks a Muse through it.
 
+## 2026-10-17: No more duplicate replies
+
+- Fixed: the bot could post the same reply several times in a row.
+  A send that timed out after Discord had already accepted it was
+  retried, posting another copy each time. Every message now carries
+  a nonce that Discord uses to drop repeats, and retries are spaced
+  out and stop after 90 seconds.
+- Fixed: two monitors could start at the same moment (for example,
+  overlapping watchdog runs) and each send every reply. The pidfile
+  is now locked for the monitor's whole lifetime.
+- A multi-part reply that fails partway is now retried instead of
+  dropped; the parts that already landed are not repeated.
+
+**Action needed**
+
+- Update and restart (UPDATING.md). Every install before this one can
+  post duplicates.
+- Check for a second running monitor once: `pgrep -af monitor.py`
+  should list one process. If it lists more, stop them all and run
+  `bash watchdog.sh`.
+
 ## 2026-10-16: Bots can talk to each other
 
 - Other bots, such as other people's Muses, can @mention this bot or

@@ -82,6 +82,8 @@ crash. This one was hardened in production against each of them.
   mention that has no outcome.
 - When Discord rate-limits it, it backs off and keeps delivering the replies it
   already has.
+- A reply is never posted twice, even when Discord times out after accepting it,
+  and only one copy of the bot can run at a time.
 - A watchdog restarts the bot if it stops and raises one alert per new failure.
 
 ## 🔒 Security
