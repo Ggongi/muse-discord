@@ -1,0 +1,35 @@
+# Tier 2: two humans chat without addressing the bot; the bot must stay
+# out of it (no message before q1, deterministic). Then A mentions it
+# about the earlier chat: the item's history carries those messages,
+# so the answer should use them (B said the line was ~40 minutes).
+id: not_addressed_stays_quiet
+tier: 2
+title: "The bot stays out of a chat it is not part of, then answers from context"
+steps:
+  - send: { as: a, text: "anyone tried the new ramen place on 5th street?", label: c1 }
+  - send: { as: b, text: "yeah, the spicy miso is great but the line was like 40 minutes", label: c2, reply_to: c1 }
+  - send: { as: a, text: "worth the wait though?", label: c3 }
+  - send: { as: b, text: "honestly yes, just go before noon", label: c4 }
+  - wait: 30
+  - send: { as: a, text: "<@SUT> how long did they say the line at the ramen place was?", label: q1 }
+  - wait_for: { sut_messages: 1, timeout: 240 }
+expect:
+  settle: 30
+  checks:
+    - no_sut_before: q1
+    - no_sut_reply_to: c1
+    - no_sut_reply_to: c2
+    - no_sut_reply_to: c3
+    - no_sut_reply_to: c4
+    - sut_reply_count: { min: 1, max: 4 }
+    - latency: { from: q1, max: 240 }
+judge:
+  rubric: |
+    Two people chatted about a ramen place without addressing the bot;
+    one of them said the line was about 40 minutes and suggested going
+    before noon. Then the bot was asked how long the line was. PASS
+    when the bot did not chime in during the chat and its answer uses
+    that earlier conversation: it says about 40 minutes (mentioning
+    the before-noon tip is a bonus, not required). FAIL if it says it
+    doesn't know, invents a different number, or posted anything
+    before it was asked.

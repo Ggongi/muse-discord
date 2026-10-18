@@ -1,0 +1,19 @@
+# Addressing a third person: the fake worker writes <@A id> in its
+# reply to B. Sends allow user mentions, so A must actually be
+# mentioned (in the message's mentions, not just as text). Catches
+# allowed_mentions or link_mentions changes that strip user pings.
+# Driver B triggers it so the reply ping to B cannot be mistaken for
+# the mention of A.
+id: mention_other_user
+tier: 1
+title: "A reply that mentions another user actually pings them"
+steps:
+  - send: { as: b, text: "<@SUT> [[mention_a]] please loop in A", label: q1 }
+  - wait_for: { sut_messages: 1, timeout: 60 }
+expect:
+  settle: 10
+  checks:
+    - sut_reply_count: { eq: 1 }
+    - replies_to: q1
+    - mentions: { label: q1, user: a }
+    - no_mass_mentions: true

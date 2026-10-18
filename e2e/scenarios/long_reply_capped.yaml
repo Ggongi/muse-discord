@@ -1,0 +1,21 @@
+# The fake worker drafts a 3500-character reply. What the monitor
+# guarantees (normalize_parts / sanitize_reply, PROTOCOL.md
+# "Guardrails"): the TOTAL across all parts is trimmed to
+# behavior.max_reply_chars (default 1800, used here) and each message
+# is clamped to Discord's 2000. It trims, it does not split, so the
+# total should be just under 1800 (rstrip may eat a few characters).
+# Catches: the over-long send failing (400 on every retry -> no reply),
+# the cap not applied, or the text cut to nothing.
+id: long_reply_capped
+tier: 1
+title: "An over-long draft is trimmed to max_reply_chars and still sent"
+steps:
+  - send: { as: a, text: "<@SUT> [[long]] tell me everything", label: q1 }
+  - wait_for: { sut_messages: 1, timeout: 60 }
+expect:
+  settle: 15
+  checks:
+    - sut_reply_count: { min: 1, max: 4 }
+    - max_chars: 2000
+    - total_chars: { min: 1700, max: 1800 }
+    - latency: { from: q1, max: 30 }

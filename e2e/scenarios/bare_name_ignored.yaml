@@ -1,0 +1,19 @@
+# Strict triggers: saying the bot's name in passing is not addressing
+# it (the bare-name trigger was removed). q1 must get nothing. The
+# trailing mention q2 is a liveness control: without it this scenario
+# would also "pass" with a dead monitor. 20 s covers both the gateway
+# path (~3 s) and the REST-poll fallback (<= ~17 s) for q1.
+id: bare_name_ignored
+tier: 1
+title: "Saying the bot's name without a mention gets no reply"
+steps:
+  - send: { as: a, text: "I bet {SUT_NAME} would love this playlist", label: q1 }
+  - wait: 20
+  - send: { as: a, text: "<@SUT> are you there?", label: q2 }
+  - wait_for: { sut_messages: 1, timeout: 60 }
+expect:
+  settle: 10
+  checks:
+    - no_sut_reply_to: q1
+    - sut_reply_count: { eq: 1 }
+    - replies_to: q2

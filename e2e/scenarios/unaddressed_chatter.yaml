@@ -1,0 +1,25 @@
+# Two people talking to each other, never to the bot: no reply, no
+# reaction to any of it. The final mention is a liveness control (a
+# dead monitor would otherwise pass) and checks that the chatter did
+# not wedge or pre-empt the next real trigger.
+id: unaddressed_chatter
+tier: 1
+title: "Chatter between two users that never addresses the bot gets no reply"
+steps:
+  - send: { as: a, text: "did you watch the match last night?", label: c1 }
+  - send: { as: b, text: "yes! that last-minute goal was unreal", label: c2, reply_to: c1 }
+  - send: { as: a, text: "the keeper had no chance", label: c3 }
+  - send: { as: b, text: "rematch is next week I think", label: c4 }
+  - wait: 20
+  - send: { as: a, text: "<@SUT> ping", label: q1 }
+  - wait_for: { sut_messages: 1, timeout: 60 }
+expect:
+  settle: 10
+  checks:
+    - no_sut_before: q1
+    - no_sut_reply_to: c1
+    - no_sut_reply_to: c2
+    - no_sut_reply_to: c3
+    - no_sut_reply_to: c4
+    - sut_reply_count: { eq: 1 }
+    - replies_to: q1
