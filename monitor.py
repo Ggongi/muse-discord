@@ -1635,10 +1635,17 @@ def _is_snowflake(value):
         and re.fullmatch(r"[0-9]{17,20}", str(value)) is not None
 
 
+def reply_reference(message_id):
+    """The message_reference for a reply. fail_if_not_exists: false makes
+    Discord post it as a plain message when the message replied to was
+    deleted meanwhile, instead of answering 400 on every retry."""
+    return {"message_id": message_id, "fail_if_not_exists": False}
+
+
 def send_reply(channel_id, text, reply_to=None, nonce=None):
     data = {"content": text, "allowed_mentions": SEND_ALLOWED_MENTIONS}
     if reply_to:
-        data["message_reference"] = {"message_id": reply_to}
+        data["message_reference"] = reply_reference(reply_to)
     if nonce:
         data["nonce"] = nonce
         data["enforce_nonce"] = True
@@ -1840,7 +1847,7 @@ def send_reply_with_files(channel_id, text, files, reply_to=None,
     boundary = "----MuseDiscord%d" % int(time.time() * 1000)
     payload = {"content": text, "allowed_mentions": SEND_ALLOWED_MENTIONS}
     if reply_to:
-        payload["message_reference"] = {"message_id": reply_to}
+        payload["message_reference"] = reply_reference(reply_to)
     if nonce:
         payload["nonce"] = nonce
         payload["enforce_nonce"] = True
@@ -3128,7 +3135,10 @@ def _log_latency(state, qid, picked, sent):
     (ingest: the gateway or the poll delivering it, and the main loop
     getting to it), to queued (hold: the burst coalescing), to the
     outbox pickup (worker), to sent. An item that was never staged (a
-    welcome, a sweep recovery) has no hold."""
+    welcome, a sweep recovery) has no hold. Our clock can trail Discord's
+    snowflake time by a fraction of a second, so t0 is clamped to the
+    first local timestamp: ingest shows 0, never negative, and total
+    stays the sum of the parts."""
     t0 = _snowflake_ts(qid)
     queued = state.get("queued_at", {}).pop(qid, None)
     ingested = state.get("ingested_at", {}).pop(qid, None)
@@ -3136,11 +3146,13 @@ def _log_latency(state, qid, picked, sent):
         return
     if queued:
         ingested = min(ingested or queued, queued)
+        t0 = min(t0, ingested)
         print(f"Latency {qid}: ingest {ingested - t0:.1f}s, hold "
               f"{queued - ingested:.1f}s, worker {picked - queued:.1f}s, "
               f"send {sent - picked:.1f}s, total {sent - t0:.1f}s",
               flush=True)
     else:
+        t0 = min(t0, picked)
         print(f"Latency {qid}: send {sent - picked:.1f}s, total "
               f"{sent - t0:.1f}s", flush=True)
 
