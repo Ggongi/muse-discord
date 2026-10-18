@@ -3,6 +3,36 @@
 Newest first. **Action needed** lists what an existing install must
 do after updating; UPDATING.md walks a Muse through it.
 
+## 2026-10-18: Realtime messages no longer wait for the REST poll
+
+Fixed:
+
+- A DM or mention the gateway delivered at once could wait 25-95s
+  before the monitor even looked at it, because the main loop read
+  every channel over REST (and ran the sweep and channel refreshes)
+  in one go before handling it; behind a slow proxy that took most of
+  each 30s cycle. The REST work is now done in short slices between
+  the realtime work, so new messages are picked up within a second.
+  Every channel is still read about every `rest_poll_seconds`, the
+  sweep and refreshes keep their cadence, and the catch-up after a
+  restart still reads everything.
+- A Discord read that hangs gives up after 8s instead of 20s.
+
+Faster:
+
+- A DM burst goes out 0.5s after its author stops (servers stay at
+  1.5s, bots at 5s; typing still holds a burst open).
+- A reply the worker writes is picked up within about 0.25s instead
+  of up to 2s.
+- The latency line splits the old "coalesce" figure into ingest (until
+  the monitor first saw the message) and hold (the burst wait):
+  `Latency <id>: ingest 0.4s, hold 1.6s, worker 30.1s, send 2.0s,
+  total 34.1s`.
+
+**Action needed:**
+
+- None; the monitor restarts with the update.
+
 ## 2026-10-17: Less code: three features removed
 
 Removed:

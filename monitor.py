@@ -463,6 +463,16 @@ def _no_access(e):
     return getattr(e, "code", None) in (403, 404)
 
 
+def run_to_end(gen):
+    """Run a sliceable REST generator (one that yields after each
+    request, see "Sliced REST work") to completion; its return value."""
+    while True:
+        try:
+            next(gen)
+        except StopIteration as e:
+            return e.value
+
+
 def discover_channels(previous=None):
     """Return ({channel_id: info}, {guild_id: guild_info}).
 
@@ -480,10 +490,17 @@ def discover_channels(previous=None):
     off from a 429), the previous entries are kept as they were instead
     of unmonitoring those channels (no poll, no sweep) until the next
     refresh."""
+    return run_to_end(discover_channels_iter(previous))
+
+
+def discover_channels_iter(previous=None):
+    """discover_channels as a generator that yields after each request,
+    so the main loop can spread a refresh over many ticks."""
     previous = previous or {}
     found = {}
     guilds_out = {}
     guild_list = get_guilds()
+    yield
     if guild_list is None:
         return dict(previous), dict(GUILDS)
     for gid, gname in guild_list:
@@ -492,7 +509,9 @@ def discover_channels(previous=None):
         except Exception as e:
             print(f"Guild fetch failed for {gname}: {e}", flush=True)
             gobj = {}
+        yield
         base_perms, member_roles, joined_at = _guild_base_perms(gid, gobj)
+        yield
         guilds_out[gid] = {
             "name": gname,
             "system_channel_id": gobj.get("system_channel_id"),
@@ -505,6 +524,8 @@ def discover_channels(previous=None):
             found.update({c: i for c, i in previous.items()
                           if i.get("guild_id") == gid})
             continue
+        finally:
+            yield
         names_by_id = {ch["id"]: ch.get("name", "?") for ch in channels}
         perms_by_id = {}
         for ch in channels:
@@ -530,6 +551,8 @@ def discover_channels(previous=None):
                 if not _no_access(e) and cid in previous:
                     found[cid] = previous[cid]  # transient: keep it
                 continue  # no read access; skip quietly
+            finally:
+                yield
             can_send = None
             if perms is not None:
                 can_send = bool(perms & PERM_SEND_MESSAGES)
@@ -538,9 +561,8 @@ def discover_channels(previous=None):
         # Threads (forum posts, text-channel threads) never appear in the
         # guild channel list, so they need their own discovery or the bot
         # is blind inside every post.
-        found.update(discover_threads_for_guild(gid, gname, names_by_id,
-                                                found, perms_by_id,
-                                                previous))
+        found.update((yield from discover_threads_iter(
+            gid, gname, names_by_id, found, perms_by_id, previous)))
     return found, guilds_out
 
 
@@ -562,6 +584,15 @@ def discover_threads_for_guild(gid, gname, names_by_id, known_ids,
     perms_by_id maps parent channel id -> effective permissions; when it
     is None (light thread-only refresh), can_send is left unknown.
     previous: as in discover_channels, kept on transient failures."""
+    return run_to_end(discover_threads_iter(gid, gname, names_by_id,
+                                            known_ids, perms_by_id,
+                                            previous))
+
+
+def discover_threads_iter(gid, gname, names_by_id, known_ids,
+                          perms_by_id=None, previous=None):
+    """discover_threads_for_guild as a generator that yields after each
+    request (see discover_channels_iter)."""
     out = {}
     previous = previous or {}
     try:
@@ -571,6 +602,8 @@ def discover_threads_for_guild(gid, gname, names_by_id, known_ids,
         return {t: i for t, i in previous.items()
                 if i.get("guild_id") == gid and i.get("thread")
                 and t not in known_ids}
+    finally:
+        yield
     for t in resp.get("threads", []):
         tid = t["id"]
         if tid in known_ids or tid in out:
@@ -585,6 +618,8 @@ def discover_threads_for_guild(gid, gname, names_by_id, known_ids,
             if not _no_access(e) and tid in previous:
                 out[tid] = previous[tid]  # transient: keep it
             continue  # no read access; skip quietly
+        finally:
+            yield
         can_send = None
         if perms_by_id is not None:
             parent_perms = perms_by_id.get(t.get("parent_id"))
@@ -772,11 +807,18 @@ def touch_heartbeat():
         pass
 
 
+# Every GET is a read on the main loop (poll, sweep, discovery, reply
+# context), so it gets a shorter timeout than sends: a request a proxy
+# leaves hanging must not stall the gateway drain, the burst flushes,
+# and the outbox for 20s. Sends (api_post, uploads) keep their 20s+.
+READ_TIMEOUT_SECS = 8
+
+
 def api_get(path):
     req = urllib.request.Request(API + path, headers=headers())
 
     def _do():
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with urllib.request.urlopen(req, timeout=READ_TIMEOUT_SECS) as r:
             return json.load(r)
     return _api_call(_do)
 
@@ -1380,6 +1422,7 @@ def stage_trigger(state, msg, cname, guild_id, kind, dm=False):
         "trigger": msg,
         "fragments": [],
     }
+    note_ingested(state, msg["id"])
     print(f"Staged {kind} from {(msg.get('author', {}) or {}).get('username')} "
           f"in {cname} for coalescing.", flush=True)
 
@@ -1421,9 +1464,13 @@ def alias_fragments(state, trigger_id, fragments):
 # number orders typing against messages exactly. When the gateway is
 # down (or missed the newest message) the burst waits the full window as
 # before. Bots get a longer quiet gap: a Muse sends multi-part replies
-# with 2-4s beats, and a bot may not send typing between parts.
+# with 2-4s beats, and a bot may not send typing between parts. A
+# human's DM gets a shorter one: a DM is all addressed to the bot, and
+# the typing hold still keeps a burst open while they write the next
+# line.
 # ---------------------------------------------------------------------------
 BURST_QUIET_SECS = 1.5
+DM_BURST_QUIET_SECS = 0.5
 BOT_BURST_QUIET_SECS = 5.0
 _activity = {}  # "<channel>:<author>" -> {msg_id, msg_at, msg_seq, typing_seq}
 _activity_seq = 0
@@ -1465,8 +1512,31 @@ def burst_quiet(entry, now):
         return False  # typing again since their newest message
     quiet = BOT_BURST_QUIET_SECS \
         if (entry["trigger"].get("author", {}) or {}).get("bot") \
-        else BURST_QUIET_SECS
+        else DM_BURST_QUIET_SECS if entry.get("dm") else BURST_QUIET_SECS
     return now - act["msg_at"] >= quiet
+
+
+def pending_wait(state, now):
+    """How long the main loop may sleep before a staged burst could
+    flush: until its window ends or its author's quiet gap (as in
+    burst_quiet) passes, at most 0.5s (typing events do not wake the
+    loop). None when no burst is staged."""
+    due = []
+    for entry in state.get("pending", {}).values():
+        if entry.get("next_try", 0) > now:
+            continue  # enqueue back-off: its retry is minutes away
+        due.append(entry.get("first_seen", now)
+                   + entry.get("window", COALESCE_SECS))
+        act = _activity.get(f"{entry.get('channel_id')}:"
+                            f"{entry.get('author_id')}") or {}
+        if act.get("msg_at"):
+            due.append(act["msg_at"] + (DM_BURST_QUIET_SECS
+                                        if entry.get("dm")
+                                        else BURST_QUIET_SECS))
+    if not due:
+        return None
+    ahead = [d - now for d in due if d > now]
+    return max(0.02, min(ahead + [0.5]))
 
 
 def flush_pending(state, queue, force=False):
@@ -2895,6 +2965,16 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     return True
 
 
+def note_ingested(state, mid):
+    """Remember when the monitor first processed trigger mid (staged
+    it), bounded like queued_at, for the latency log's ingest/hold
+    split."""
+    seen = state.setdefault("ingested_at", {})
+    seen.setdefault(mid, time.time())
+    for old in list(seen)[:-200]:
+        del seen[old]
+
+
 def note_queued(state, mid):
     """Remember when mid was queued (bounded), for the latency log even
     when a worker removes the queue item itself. Returns the time."""
@@ -3042,16 +3122,22 @@ def _reject_outbox(rejects):
 
 def _log_latency(state, qid, picked, sent):
     """One line per answered item: where the time went, from the trigger
-    message (its snowflake time) to queued, to the outbox pickup, to
-    sent."""
+    message (its snowflake time) to the monitor first processing it
+    (ingest: the gateway or the poll delivering it, and the main loop
+    getting to it), to queued (hold: the burst coalescing), to the
+    outbox pickup (worker), to sent. An item that was never staged (a
+    welcome, a sweep recovery) has no hold."""
     t0 = _snowflake_ts(qid)
     queued = state.get("queued_at", {}).pop(qid, None)
+    ingested = state.get("ingested_at", {}).pop(qid, None)
     if not t0:
         return
     if queued:
-        print(f"Latency {qid}: coalesce {queued - t0:.1f}s, worker "
-              f"{picked - queued:.1f}s, send {sent - picked:.1f}s, total "
-              f"{sent - t0:.1f}s", flush=True)
+        ingested = min(ingested or queued, queued)
+        print(f"Latency {qid}: ingest {ingested - t0:.1f}s, hold "
+              f"{queued - ingested:.1f}s, worker {picked - queued:.1f}s, "
+              f"send {sent - picked:.1f}s, total {sent - t0:.1f}s",
+              flush=True)
     else:
         print(f"Latency {qid}: send {sent - picked:.1f}s, total "
               f"{sent - t0:.1f}s", flush=True)
@@ -3667,9 +3753,37 @@ def drain_gateway(state, inbox, channels):
 # ---------------------------------------------------------------------------
 def sweep_mentions(state, queue, channels):
     """Requeue mentions that no durable record accounts for. Returns True
-    when the queue changed."""
+    when the queue changed. One full pass; the main loop runs the same
+    pass in slices (SweepPass)."""
     if rest_backing_off():
         return False
+    acct = sweep_accounting(state, queue)
+    changed = False
+    for cid, info in sweep_targets(channels):
+        try:
+            changed |= sweep_channel(state, queue, acct, cid, info)
+        except SweepAborted:
+            break
+    return changed
+
+
+class SweepAborted(Exception):
+    """A 429 during the sweep: the pass stops (see above)."""
+
+
+def sweep_targets(channels):
+    """[(channel_id, info)] for one sweep pass: the monitored channels,
+    then the owners' polled DM channels (a DM lost in a gateway gap is
+    as lost as a mention)."""
+    return list(channels.items()) + [
+        (dm_id, {"dm": True, "name": name})
+        for dm_id, name in DM_CHANNELS.items()]
+
+
+def sweep_accounting(state, queue):
+    """The durable records a sweep diffs against, read now. A sliced
+    pass reads them afresh for every slice: what was queued, sent, or
+    staged since the previous slice counts as accounted for."""
     entries = _ledger_load()["entries"]
     q_ids = {q.get("message_id") for q in queue}
     outbox_targets = set()
@@ -3694,89 +3808,98 @@ def sweep_mentions(state, queue, channels):
     # is (and an outbox reply under a fragment accounts for the trigger).
     aliases = state.get("reply_aliases", {})
     outbox_targets |= {aliases[t] for t in outbox_targets if t in aliases}
-    # The owners' DM channels are swept too: a DM lost in a gateway gap
-    # is as lost as a mention.
-    dm_channels = [(dm_id, {"dm": True, "name": name})
-                   for dm_id, name in DM_CHANNELS.items()]
+    return {"entries": entries, "q_ids": q_ids,
+            "outbox_targets": outbox_targets, "quar_ids": quar_ids,
+            "replied": replied, "pending_ids": pending_ids,
+            "aliases": aliases}
+
+
+def sweep_channel(state, queue, acct, cid, info):
+    """Sweep one channel (info as in sweep_targets). Returns True when
+    it queued anything; raises SweepAborted on a 429."""
+    entries = acct["entries"]
+    q_ids = acct["q_ids"]
+    replied = acct["replied"]
+    aliases = acct["aliases"]
+    dm = bool(info.get("dm"))
+    cname = "DM with " + info["name"] if dm else channel_display(info)
+    try:
+        msgs = api_get(f"/channels/{cid}/messages?limit=20")
+    except Exception as e:
+        if getattr(e, "code", None) == 429:
+            print("Sweep aborted: rate limited.", flush=True)
+            raise SweepAborted() from e
+        return False
+    if not isinstance(msgs, list):
+        return False
     now = time.time()
     changed = False
-    for cid, info in list(channels.items()) + dm_channels:
-        dm = bool(info.get("dm"))
-        cname = "DM with " + info["name"] if dm else channel_display(info)
-        try:
-            msgs = api_get(f"/channels/{cid}/messages?limit=20")
-        except Exception as e:
-            if getattr(e, "code", None) == 429:
-                print("Sweep aborted: rate limited.", flush=True)
-                return changed
+    for m in sorted(msgs, key=lambda x: int(x["id"])):
+        mid = m["id"]
+        author = m.get("author", {}) or {}
+        if author.get("id") == BOT_ID:
+            continue  # (other bots: trigger_kind applies behavior.bots)
+        if dm:
+            # Owner DM channels: every owner message is a trigger.
+            if author.get("bot") \
+                    or author.get("id") not in OWNER_USER_IDS:
+                continue
+        # Direct address only.
+        elif trigger_kind(m) != "mention":
             continue
-        if not isinstance(msgs, list):
+        if predates_join(state, m, info.get("guild_id")):
             continue
-        for m in sorted(msgs, key=lambda x: int(x["id"])):
-            mid = m["id"]
-            author = m.get("author", {}) or {}
-            if author.get("id") == BOT_ID:
-                continue  # (other bots: trigger_kind applies behavior.bots)
-            if dm:
-                # Owner DM channels: every owner message is a trigger.
-                if author.get("bot") \
-                        or author.get("id") not in OWNER_USER_IDS:
-                    continue
-            # Direct address only.
-            elif trigger_kind(m) != "mention":
-                continue
-            if predates_join(state, m, info.get("guild_id")):
-                continue
-            age = now - _snowflake_ts(mid)
-            if age < SWEEP_GRACE_SECS or age > SWEEP_MAX_AGE_SECS:
-                continue
-            if mid in replied:
-                if entries.get(mid, {}).get("status") != "replied":
-                    ledger_record(mid, "replied", "sweep sync", cid,
-                                  author.get("username"))
-                continue
-            ids = {mid, aliases.get(mid, mid)}
-            if any(ids & s for s in (replied, quar_ids, q_ids,
-                                     outbox_targets, pending_ids)):
-                continue  # accounted for and in flight
-            ent = entries.get(mid)
-            if any(entries.get(i, {}).get("status") in LEDGER_TERMINAL
-                   for i in ids):
-                continue
-            if info.get("can_send") is False:
-                ledger_record(mid, "skipped",
-                              "no send permission in channel", cid,
+        age = now - _snowflake_ts(mid)
+        if age < SWEEP_GRACE_SECS or age > SWEEP_MAX_AGE_SECS:
+            continue
+        if mid in replied:
+            if entries.get(mid, {}).get("status") != "replied":
+                ledger_record(mid, "replied", "sweep sync", cid,
                               author.get("username"))
-                continue
-            recs = (ent or {}).get("recoveries", 0)
-            if recs >= SWEEP_MAX_RECOVERIES:
-                if ent and ent.get("status") != "skipped":
-                    ledger_record(mid, "skipped", "recovery cap reached",
-                                  cid, author.get("username"))
-                    print(f"Sweep: giving up on unrecoverable mention "
-                          f"{mid} from {author.get('username')} in "
-                          f"{cname} (recorded in mention ledger).",
-                          flush=True)
-                continue
-            ok = enqueue_message(m, cname, state, queue, dm=dm,
-                                 fragments=[],
-                                 guild_id=info.get("guild_id"))
-            if ok:
-                changed = True
-                q_ids.add(mid)
-                ledger_record(mid, "queued",
-                              f"sweep recovery #{recs + 1}", cid,
-                              author.get("username"),
-                              recoveries=recs + 1)
-                print(f"Sweep recovered lost mention {mid} from "
-                      f"{author.get('username')} in {cname}.", flush=True)
-            elif not _ledger_terminal(mid):
-                # (A gate inside enqueue, e.g. quarantine or the join
-                # watermark, may already have recorded a terminal state.)
-                ledger_record(mid, "enqueue_failed",
-                              "sweep enqueue failed", cid,
-                              author.get("username"),
-                              recoveries=recs + 1)
+            continue
+        ids = {mid, aliases.get(mid, mid)}
+        if any(ids & s for s in (replied, acct["quar_ids"], q_ids,
+                                 acct["outbox_targets"],
+                                 acct["pending_ids"])):
+            continue  # accounted for and in flight
+        ent = entries.get(mid)
+        if any(entries.get(i, {}).get("status") in LEDGER_TERMINAL
+               for i in ids):
+            continue
+        if info.get("can_send") is False:
+            ledger_record(mid, "skipped",
+                          "no send permission in channel", cid,
+                          author.get("username"))
+            continue
+        recs = (ent or {}).get("recoveries", 0)
+        if recs >= SWEEP_MAX_RECOVERIES:
+            if ent and ent.get("status") != "skipped":
+                ledger_record(mid, "skipped", "recovery cap reached",
+                              cid, author.get("username"))
+                print(f"Sweep: giving up on unrecoverable mention "
+                      f"{mid} from {author.get('username')} in "
+                      f"{cname} (recorded in mention ledger).",
+                      flush=True)
+            continue
+        ok = enqueue_message(m, cname, state, queue, dm=dm,
+                             fragments=[],
+                             guild_id=info.get("guild_id"))
+        if ok:
+            changed = True
+            q_ids.add(mid)
+            ledger_record(mid, "queued",
+                          f"sweep recovery #{recs + 1}", cid,
+                          author.get("username"),
+                          recoveries=recs + 1)
+            print(f"Sweep recovered lost mention {mid} from "
+                  f"{author.get('username')} in {cname}.", flush=True)
+        elif not _ledger_terminal(mid):
+            # (A gate inside enqueue, e.g. quarantine or the join
+            # watermark, may already have recorded a terminal state.)
+            ledger_record(mid, "enqueue_failed",
+                          "sweep enqueue failed", cid,
+                          author.get("username"),
+                          recoveries=recs + 1)
     return changed
 
 
@@ -3940,6 +4063,257 @@ def _note_no_send(msg, cname):
 
 
 
+# ---------------------------------------------------------------------------
+# Sliced REST work (2026-10-18). The main loop used to run the whole REST
+# poll (a request per channel), the sweep, the thread refresh, and
+# discovery inline. Behind a slow proxy (0.6s a request, ~40 channels)
+# one poll blocked the loop for ~23s of every 30, so a DM the gateway had
+# delivered at once sat in the inbox for 25-95s before it was even
+# staged. Now each tick spends about REST_SLICE_SECS on REST reads (at
+# least one request when any is due) and the fast path (gateway drain,
+# staging, burst flushes, typing, the outbox) runs between slices.
+#
+# The poll is a rotation over its targets: the owners' DM channels, then
+# every monitored channel. A rotation starts when the previous one has
+# finished and POLL_INTERVAL has passed since that one started; its
+# requests are spread over the first POLL_SPREAD of the interval, and
+# when Discord (or a proxy) is slower than that, it polls flat out, still
+# in slices, so every channel is read about once per interval. The first
+# rotation (the startup catch-up) is not paced. A cycle
+# (the unit of every cadence: sweep.every_cycles, the thread and channel
+# refreshes, the identity retry, the cleanup sweeps) is a completed
+# rotation, so the cadences mean what they meant. A channel discovered
+# mid-rotation joins the next one; one removed mid-rotation is skipped.
+#
+# The sweep pass, the thread refresh, and discovery are background jobs,
+# run one at a time in the order they were due, in slices that share the
+# tick's budget with the poll (alternating ticks when both have work).
+# Discovery and the thread refresh are generators that yield after each
+# request. Everything runs on the main thread: state and the rate-limit
+# globals keep one writer. While REST backs off (429), nothing is sliced
+# and the rotation waits; a sweep pass ends, as it always has.
+# ---------------------------------------------------------------------------
+REST_SLICE_SECS = 0.4
+POLL_SPREAD = 0.5
+POLL_TICK_SECS = 1.0  # pacing granularity: due targets go out together
+
+
+def poll_targets():
+    """The targets of one rotation. Empty until the bot knows its own id:
+    nothing can be classified before that, so watermarks stay put."""
+    if BOT_USER_ID is None:
+        return []
+    targets = [("dms",)] if dm_poll_user_ids() else []
+    return targets + [("channel", cid) for cid in CHANNELS]
+
+
+class PollRotation:
+    """One pass of the REST poll over its targets, done in slices."""
+
+    def __init__(self, targets, started, spread=POLL_SPREAD):
+        self.targets = list(targets)
+        self.pos = 0
+        self.started = started
+        self.spread = spread
+
+    def done(self):
+        return self.pos >= len(self.targets)
+
+    def next_due(self):
+        """When the next target is due on the pacing schedule."""
+        return self.started + (POLL_INTERVAL * self.spread * self.pos
+                               / max(1, len(self.targets)))
+
+    def due(self, now):
+        return not self.done() and now >= self.next_due()
+
+    def run_slice(self, state, deadline, joins_out, dms_out):
+        """Poll due targets until deadline, at least one. Polled guild
+        triggers are staged inside (stage_found); joins and DMs are
+        appended to joins_out / dms_out for the staging phase. Returns
+        the number of targets polled."""
+        n = 0
+        while self.due(time.time()) and not rest_backing_off():
+            if n and time.time() >= deadline:
+                break
+            target = self.targets[self.pos]
+            self.pos += 1
+            if self._poll(state, target, joins_out, dms_out):
+                n += 1
+        return n
+
+    def _poll(self, state, target, joins_out, dms_out):
+        if target[0] == "dms":
+            # DMs: every message not from the bot is addressed to the
+            # bot. Resolving the channels is a step; each DM channel is
+            # polled as the next ones.
+            self.targets[self.pos:self.pos] = [
+                ("dm", dm_id, dm_name)
+                for dm_id, dm_name in list_dm_channels()]
+            return True
+        if target[0] == "dm":
+            _, dm_id, dm_name = target
+            dms_out.extend((m, "DM with " + dm_name)
+                           for m in check_dm_channel(dm_id, dm_name, state))
+            return True
+        cid = target[1]
+        info = CHANNELS.get(cid)
+        if info is None:
+            return False  # unmonitored since the rotation began
+        cname = channel_display(info)
+        gid = info["guild_id"]
+        try:
+            # Triggers are staged inside, in arrival order.
+            _, joins = check_channel(cid, cname, state, gid)
+        except Exception as e:
+            print(f"Poll error in {cname}: {e}", flush=True)
+            return True
+        joins_out.extend((m, cname, gid) for m in joins)
+        return True
+
+
+class SweepPass:
+    """One reconciliation sweep pass (sweep_mentions), done in slices.
+    Each slice diffs against the durable records as they are then."""
+    name = "Sweep"
+
+    def __init__(self, targets):
+        self.targets = targets
+        self.pos = 0
+
+    def done(self):
+        return self.pos >= len(self.targets)
+
+    def run_slice(self, state, deadline, queue_ok):
+        if rest_backing_off() or not queue_ok:
+            # A backoff ends the pass (it must not add request pressure),
+            # and so does a queue that could not be read this tick (the
+            # sweep must not write it).
+            self.pos = len(self.targets)
+            return 0
+        queue = load_queue()  # after this tick's sends' removals
+        n_before = len(queue)
+        acct = sweep_accounting(state, queue)
+        changed = False
+        n = 0
+        while not self.done():
+            if n and time.time() >= deadline:
+                break
+            cid, info = self.targets[self.pos]
+            self.pos += 1
+            if not info.get("dm"):
+                info = CHANNELS.get(cid)  # current can_send
+                if info is None:
+                    continue  # unmonitored since the pass began
+            n += 1
+            try:
+                changed |= sweep_channel(state, queue, acct, cid, info)
+            except SweepAborted:
+                self.pos = len(self.targets)
+        if changed:
+            queue_edit(add=queue[n_before:])
+            save_state(state)
+        return n
+
+
+class GenJob:
+    """A background REST job written as a generator that yields after
+    each request (thread refresh, discovery)."""
+
+    def __init__(self, name, gen):
+        self.name = name
+        self.gen = gen
+        self.finished = False
+
+    def done(self):
+        return self.finished
+
+    def run_slice(self, state, deadline, queue_ok):
+        n = 0
+        while not self.finished and not rest_backing_off():
+            if n and time.time() >= deadline:
+                break
+            try:
+                next(self.gen)
+            except StopIteration:
+                self.finished = True
+                break
+            n += 1
+        return n
+
+
+def thread_refresh_iter(state):
+    """Light thread-only refresh: pick up brand-new posts and threads
+    minutes after they appear instead of waiting for the full channel
+    refresh. Only threads not already monitored cost an API probe."""
+    guilds = get_guilds()
+    yield
+    for gid, gname in guilds or []:
+        try:
+            chans = api_get(f"/guilds/{gid}/channels")
+        except Exception:
+            continue
+        finally:
+            yield
+        names_by_id = {c["id"]: c.get("name", "?") for c in chans}
+        new_threads = yield from discover_threads_iter(
+            gid, gname, names_by_id, CHANNELS)
+        for tid, info in new_threads.items():
+            seed_channel_seen(tid, channel_display(info), state)
+            CHANNELS[tid] = info
+            print(f"Now monitoring {channel_display(info)}.", flush=True)
+            yield
+        if new_threads:
+            save_state(state)
+
+
+def discovery_iter(state):
+    """Periodic re-discovery of readable channels, so permission changes
+    (grants or revocations) take effect without a restart. Applied when
+    complete; a channel the gateway or the thread refresh registered
+    while it ran is kept."""
+    global CHANNELS, GUILDS
+    before = dict(CHANNELS)
+    fresh, fresh_guilds = yield from discover_channels_iter(before)
+    GUILDS = fresh_guilds
+    for cid, info in fresh.items():
+        if cid not in CHANNELS:
+            # Seeds only a channel with no last_seen yet.
+            seed_channel_seen(cid, channel_display(info), state)
+            yield
+    for cid, info in CHANNELS.items():
+        if cid not in before and cid not in fresh:
+            fresh[cid] = info
+    if set(fresh) != set(CHANNELS):
+        added = [channel_display(n) for i, n in fresh.items()
+                 if i not in CHANNELS]
+        removed = [channel_display(n)
+                   for i, n in CHANNELS.items()
+                   if i not in fresh]
+        if added:
+            print(f"Now monitoring {', '.join(added)}.",
+                  flush=True)
+        if removed:
+            print(f"Lost access to {', '.join(removed)}; "
+                  f"unmonitoring.", flush=True)
+        CHANNELS = fresh
+    sync_guilds(state, fresh_guilds, fresh)
+    save_state(state)
+
+
+def outbox_waiting(since):
+    """True when reply_outbox.json holds a reply written after since (the
+    last outbox pass): a cheap stat, as the monitor leaves the file as
+    "[]". A file the last pass could not take (mid-write, or a pass that
+    failed) does not count, so it cannot make the loop spin."""
+    try:
+        st = os.stat(OUTBOX_FILE)
+    except OSError:
+        return False
+    # (50ms of slack: file times can trail time.time() slightly.)
+    return st.st_size > 4 and st.st_mtime > since - 0.05
+
+
 def main():
     global BOT_USER_ID, BOT_ID, BOT_NAME, CHANNELS, GUILDS, _FORCE_DISCOVERY
     _acquire_singleton()
@@ -4022,8 +4396,12 @@ def main():
     save_state(state)
 
     cycle = 0
-    last_full_poll = 0.0
-    was_backing_off = False
+    rotation = None          # the poll rotation in progress
+    rotation_started = None  # when the latest rotation began
+    backoff_seen = False     # REST backed off since the last cycle ended
+    jobs = []                # background REST jobs (SweepPass, GenJob)
+    poll_turn_next = True    # poll and jobs alternate when both are due
+    outbox_pass_at = 0.0     # when process_outbox last ran
     while True:
         # Each phase below has its own try/except: one failing phase (a
         # poison message, a corrupt file, a plugin) must not skip the
@@ -4042,47 +4420,24 @@ def main():
                   flush=True)
         now = time.time()
         backing = rest_backing_off()
-        full_poll = (now - last_full_poll >= POLL_INTERVAL) \
-            and not backing
-        # First poll after a rate-limit backoff: light recovery (no
-        # discovery refresh this cycle) so recovery doesn't open with
-        # the request burst that helped trip the limit.
-        recovery_cycle = was_backing_off and not backing
-        was_backing_off = backing
+        backoff_seen = backoff_seen or backing
+        if rotation is None and not backing and (
+                rotation_started is None
+                or now - rotation_started >= POLL_INTERVAL):
+            # The first rotation is the startup catch-up: it reads what
+            # arrived while the monitor was down, as fast as the slices
+            # allow instead of paced.
+            rotation = PollRotation(
+                poll_targets(), now,
+                spread=0.0 if rotation_started is None else POLL_SPREAD)
+            rotation_started = now
+        cycle_done = False
         joins_found = []
         dm_items = []
         queue = None  # read fresh below; None = unknown this cycle
-        if full_poll:
-            last_full_poll = now
-            cycle += 1
 
         try:
-            # Until the bot knows its own id nothing can be classified
-            # (mentions are matched against it, its own DMs filtered by
-            # it), so polls wait and the watermarks stay put.
-            if full_poll and BOT_USER_ID is not None:
-                for cid, info in CHANNELS.items():
-                    cname = channel_display(info)
-                    gid = info["guild_id"]
-                    try:
-                        # Triggers are staged inside, in arrival order.
-                        _, joins = check_channel(cid, cname, state, gid)
-                    except Exception as e:
-                        print(f"Poll error in {cname}: {e}", flush=True)
-                        continue
-                    joins_found.extend([(m, cname, gid) for m in joins])
-
-                # --- DMs: every message not from the bot is addressed
-                # to the bot ---
-                for dm_id, dm_name in list_dm_channels():
-                    dm_items.extend(
-                        (m, "DM with " + dm_name)
-                        for m in check_dm_channel(dm_id, dm_name, state))
-        except Exception as e:
-            print(f"Poll error: {e}", flush=True)
-
-        try:
-            # Gateway fast path: messages pushed in realtime are
+            # Gateway fast path first: messages pushed in realtime are
             # classified (and triggers staged) like polled ones. Anything
             # the poll already processed is skipped. Guild join/leave
             # events ride the same inbox. Waits for the bot's identity,
@@ -4095,14 +4450,37 @@ def main():
                           f"mention(s), {len(gw_joins)} join(s), "
                           f"{len(gw_dms)} DM(s).", flush=True)
                 joins_found.extend(gw_joins)
-                dm_items.extend(gw_dms)
+                for msg, cname in gw_dms:
+                    stage_trigger(state, msg, cname, None, "dm", dm=True)
         except Exception as e:
             print(f"Gateway drain error: {e}", flush=True)
 
+        # One REST slice per tick (see "Sliced REST work"): the poll's,
+        # or the background job's, alternating when both are due.
+        rest_spent = 0.0
+        poll_ready = rotation is not None and rotation.due(now) \
+            and not backing
+        jobs_ready = bool(jobs) and not backing
+        poll_turn = poll_ready and (poll_turn_next or not jobs_ready)
+        if poll_ready and jobs_ready:
+            poll_turn_next = not poll_turn_next
         try:
-            # Stage DMs into the coalescing buffer (bursts from the same
-            # author fold into one pending entry; guild triggers were
-            # staged as they were classified); welcomes queue
+            if poll_turn:
+                t0 = time.time()
+                rotation.run_slice(state, t0 + REST_SLICE_SECS,
+                                   joins_found, dm_items)
+                rest_spent = time.time() - t0
+        except Exception as e:
+            print(f"Poll error: {e}", flush=True)
+        if rotation is not None and rotation.done():
+            rotation = None
+            cycle += 1
+            cycle_done = True
+
+        try:
+            # Stage polled DMs into the coalescing buffer (bursts from
+            # the same author fold into one pending entry; guild triggers
+            # were staged as they were classified); welcomes queue
             # immediately. Matured bursts flush into single queue items.
             # The queue snapshot only serves the duplicate checks: what
             # gets written is just the items appended to it, applied to a
@@ -4145,13 +4523,23 @@ def main():
 
         try:
             # Send any replies drafted by the worker
+            outbox_pass_at = time.time()
             process_outbox(state)
             save_state(state)
         except Exception as e:
             print(f"Outbox error: {e}", flush=True)
 
+        # A rotation (cycle) just completed: the per-cycle work.
+        recovery_cycle = False
+        if cycle_done:
+            # A cycle that saw a rate-limit backoff is a light recovery
+            # (no discovery refresh) so recovery doesn't open with the
+            # request burst that helped trip the limit.
+            recovery_cycle = backoff_seen
+            backoff_seen = rest_backing_off()
+
         try:
-            if full_poll:
+            if cycle_done:
                 _rl_note_clean_cycle()
                 if BOT_USER_ID is None:
                     try:
@@ -4168,84 +4556,48 @@ def main():
             print(f"Identity retry error: {e}", flush=True)
 
         try:
-            if full_poll and queue is not None:
-                if cycle % SWEEP_EVERY_CYCLES == 0:
-                    queue = load_queue()  # after the sends' removals
-                    n_before = len(queue)
-                    if sweep_mentions(state, queue, CHANNELS):
-                        queue_edit(add=queue[n_before:])
-                        save_state(state)
-        except Exception as e:
-            print(f"Sweep error: {e}", flush=True)
-
-        try:
-            if full_poll:
-                # Periodically re-discover readable channels so permission
-                # changes (grants or revocations) take effect without a
-                # restart. Counted in full-poll cycles (POLL_INTERVAL each).
-                if (cycle % THREAD_REFRESH_CYCLES == 0
-                        and cycle % CHANNEL_REFRESH_CYCLES != 0
-                        and not recovery_cycle):
-                    # Light thread-only refresh: pick up brand-new posts and
-                    # threads minutes after they appear instead of waiting
-                    # for the full channel refresh. Only threads not already
-                    # monitored cost an API probe.
-                    try:
-                        for gid, gname in get_guilds() or []:
-                            try:
-                                chans = api_get(f"/guilds/{gid}/channels")
-                            except Exception:
-                                continue
-                            names_by_id = {c["id"]: c.get("name", "?")
-                                           for c in chans}
-                            new_threads = discover_threads_for_guild(
-                                gid, gname, names_by_id, CHANNELS)
-                            for tid, info in new_threads.items():
-                                seed_channel_seen(tid, channel_display(info),
-                                                  state)
-                                CHANNELS[tid] = info
-                                print(f"Now monitoring "
-                                      f"{channel_display(info)}.",
-                                      flush=True)
-                            if new_threads:
-                                save_state(state)
-                    except Exception as e:
-                        print(f"Thread refresh error: {e}", flush=True)
-        except Exception as e:
-            print(f"Thread refresh error: {e}", flush=True)
-
-        try:
-            if full_poll:
-                if (cycle % CHANNEL_REFRESH_CYCLES == 0 or _FORCE_DISCOVERY) \
-                        and not recovery_cycle:
+            # Background REST jobs, due by cycle (POLL_INTERVAL each).
+            # One of each kind at a time; they run in this order.
+            if cycle_done:
+                kinds = {j.name for j in jobs}
+                if cycle % SWEEP_EVERY_CYCLES == 0 \
+                        and BOT_USER_ID is not None \
+                        and "Sweep" not in kinds:
+                    jobs.append(SweepPass(sweep_targets(CHANNELS)))
+                # Periodically re-discover readable channels so
+                # permission changes take effect without a restart.
+                if (cycle % CHANNEL_REFRESH_CYCLES == 0
+                        or _FORCE_DISCOVERY) and not recovery_cycle:
                     _FORCE_DISCOVERY = False
-                    fresh, fresh_guilds = discover_channels(CHANNELS)
-                    GUILDS = fresh_guilds
-                    for cid, info in fresh.items():
-                        if cid not in CHANNELS:
-                            # Seeds only a channel with no last_seen yet.
-                            seed_channel_seen(cid, channel_display(info),
-                                              state)
-                    if set(fresh) != set(CHANNELS):
-                        added = [channel_display(n) for i, n in fresh.items()
-                                 if i not in CHANNELS]
-                        removed = [channel_display(n)
-                                   for i, n in CHANNELS.items()
-                                   if i not in fresh]
-                        if added:
-                            print(f"Now monitoring {', '.join(added)}.",
-                                  flush=True)
-                        if removed:
-                            print(f"Lost access to {', '.join(removed)}; "
-                                  f"unmonitoring.", flush=True)
-                        CHANNELS = fresh
-                    sync_guilds(state, fresh_guilds, fresh)
-                    save_state(state)
+                    if "Channel refresh" not in kinds:
+                        jobs.append(GenJob("Channel refresh",
+                                           discovery_iter(state)))
+                elif (cycle % THREAD_REFRESH_CYCLES == 0
+                        and not recovery_cycle
+                        and not kinds & {"Thread refresh",
+                                         "Channel refresh"}):
+                    jobs.append(GenJob("Thread refresh",
+                                       thread_refresh_iter(state)))
         except Exception as e:
-            print(f"Channel refresh error: {e}", flush=True)
+            print(f"Job scheduling error: {e}", flush=True)
+
+        if jobs and not rest_backing_off():
+            job = jobs[0]
+            try:
+                # On the poll's turn, only what is left of its budget.
+                if not poll_turn or rest_spent < REST_SLICE_SECS:
+                    job.run_slice(state, time.time() + REST_SLICE_SECS
+                                  - rest_spent, queue is not None)
+                if job.done():
+                    jobs.pop(0)
+            except Exception as e:
+                print(f"{job.name} error: {e}", flush=True)
+                jobs.pop(0)
+        elif jobs and isinstance(jobs[0], SweepPass):
+            jobs.pop(0)  # a backoff ends a sweep pass (see SweepPass)
 
         try:
-            if full_poll:
+            if cycle_done:
                 flush_join_notices(state, GUILDS, CHANNELS)
                 sweep_media()
                 sweep_generated()
@@ -4256,22 +4608,39 @@ def main():
             print(f"Cleanup error: {e}", flush=True)
 
         # Event-driven wait: a gateway MESSAGE_CREATE wakes the loop at
-        # once; otherwise it idles in ~2s ticks so coalesce flushes, the
-        # outbox, and typing stay near-realtime, while the full REST poll
-        # still runs every POLL_INTERVAL as gap repair.
+        # once. Otherwise it idles in ticks of at most 2s, shorter while
+        # REST slices are due (none while they are behind), a burst is
+        # about to flush, or the outbox holds a reply.
+        now = time.time()
         if rest_backing_off():
             wait_for = 2.0  # keep the fast path ticking during REST backoff
-        else:
+        elif jobs or (rotation is not None and rotation.due(now)):
+            wait_for = 0.0  # REST work is due: the next slice right away
+        elif rotation is not None:
+            wait_for = min(2.0, max(POLL_TICK_SECS,
+                                    rotation.next_due() - now))
+        elif rotation_started is not None:
             wait_for = min(2.0, max(
-                0.0, POLL_INTERVAL - (time.time() - last_full_poll)))
-        if any(e.get("next_try", 0) <= time.time()
-               for e in state.get("pending", {}).values()):
-            # A burst can flush early (burst_quiet): tick faster so it
-            # goes out soon after its author stops, not up to 2s later.
-            wait_for = min(wait_for, 0.5)
-        _gateway_status["wake"].wait(timeout=wait_for)
+                0.0, POLL_INTERVAL - (now - rotation_started)))
+        else:
+            wait_for = 2.0
+        burst_wait = pending_wait(state, now)
+        if burst_wait is not None:
+            # A burst can flush early (burst_quiet): wake when it may.
+            wait_for = min(wait_for, burst_wait)
+        # A reply the worker writes goes out within ~0.25s, even when it
+        # lands mid-wait: the wait is cut into 0.25s steps that stat the
+        # outbox.
+        until = now + (0.0 if outbox_waiting(outbox_pass_at)
+                       else wait_for)
+        while True:
+            left = until - time.time()
+            if left <= 0 or _gateway_status["wake"].wait(
+                    timeout=min(0.25, left)):
+                break
+            if outbox_waiting(outbox_pass_at):
+                break
         _gateway_status["wake"].clear()
-
 
 if __name__ == "__main__":
     main()
