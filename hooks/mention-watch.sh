@@ -14,10 +14,13 @@
 # An item still open when its lease runs out (LEASE_SECS, long enough
 # for a slow generation) is handed out again, in case its worker died.
 # Items the worker already answered (they have an outbox entry, waiting
-# for the monitor to send them) are never handed out.
+# for the monitor to send them) are never handed out. The worker appends
+# each reply as soon as it is drafted, so part of a wake can be answered
+# while the rest is still in progress; those keep their lease.
 #
 # The payload carries the items plus the persona text, so the worker's
-# happy path is one write: no reading the queue or persona files.
+# happy path is one append per item: no reading the queue or persona
+# files.
 #
 # This script targets Muse's hook runtime (it sources
 # $HATCH_HOOK_RUNTIME for the silent/wake/log/hook_state helpers and is
