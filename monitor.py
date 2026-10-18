@@ -1512,7 +1512,9 @@ def burst_quiet(entry, now):
         return False  # typing again since their newest message
     quiet = BOT_BURST_QUIET_SECS \
         if (entry["trigger"].get("author", {}) or {}).get("bot") \
-        else DM_BURST_QUIET_SECS if entry.get("dm") else BURST_QUIET_SECS
+        else BURST_QUIET_SECS
+    if entry.get("dm") and quiet == BURST_QUIET_SECS:
+        quiet = DM_BURST_QUIET_SECS  # a human's DM
     return now - act["msg_at"] >= quiet
 
 
@@ -3751,39 +3753,13 @@ def drain_gateway(state, inbox, channels):
 # 429: during a rate-limit storm the sweep must not add request pressure.
 # (The SWEEP_* constants are resolved from config in the header block.)
 # ---------------------------------------------------------------------------
-def sweep_mentions(state, queue, channels):
+def sweep_mentions(state, queue, channels, dms=True):
     """Requeue mentions that no durable record accounts for. Returns True
-    when the queue changed. One full pass; the main loop runs the same
-    pass in slices (SweepPass)."""
+    when the queue changed. dms=False leaves out the owners' DM channels
+    (the main loop's sliced pass, SweepPass, sweeps them as a step of
+    their own)."""
     if rest_backing_off():
         return False
-    acct = sweep_accounting(state, queue)
-    changed = False
-    for cid, info in sweep_targets(channels):
-        try:
-            changed |= sweep_channel(state, queue, acct, cid, info)
-        except SweepAborted:
-            break
-    return changed
-
-
-class SweepAborted(Exception):
-    """A 429 during the sweep: the pass stops (see above)."""
-
-
-def sweep_targets(channels):
-    """[(channel_id, info)] for one sweep pass: the monitored channels,
-    then the owners' polled DM channels (a DM lost in a gateway gap is
-    as lost as a mention)."""
-    return list(channels.items()) + [
-        (dm_id, {"dm": True, "name": name})
-        for dm_id, name in DM_CHANNELS.items()]
-
-
-def sweep_accounting(state, queue):
-    """The durable records a sweep diffs against, read now. A sliced
-    pass reads them afresh for every slice: what was queued, sent, or
-    staged since the previous slice counts as accounted for."""
     entries = _ledger_load()["entries"]
     q_ids = {q.get("message_id") for q in queue}
     outbox_targets = set()
@@ -3808,98 +3784,89 @@ def sweep_accounting(state, queue):
     # is (and an outbox reply under a fragment accounts for the trigger).
     aliases = state.get("reply_aliases", {})
     outbox_targets |= {aliases[t] for t in outbox_targets if t in aliases}
-    return {"entries": entries, "q_ids": q_ids,
-            "outbox_targets": outbox_targets, "quar_ids": quar_ids,
-            "replied": replied, "pending_ids": pending_ids,
-            "aliases": aliases}
-
-
-def sweep_channel(state, queue, acct, cid, info):
-    """Sweep one channel (info as in sweep_targets). Returns True when
-    it queued anything; raises SweepAborted on a 429."""
-    entries = acct["entries"]
-    q_ids = acct["q_ids"]
-    replied = acct["replied"]
-    aliases = acct["aliases"]
-    dm = bool(info.get("dm"))
-    cname = "DM with " + info["name"] if dm else channel_display(info)
-    try:
-        msgs = api_get(f"/channels/{cid}/messages?limit=20")
-    except Exception as e:
-        if getattr(e, "code", None) == 429:
-            print("Sweep aborted: rate limited.", flush=True)
-            raise SweepAborted() from e
-        return False
-    if not isinstance(msgs, list):
-        return False
+    # The owners' DM channels are swept too: a DM lost in a gateway gap
+    # is as lost as a mention.
+    dm_channels = [(dm_id, {"dm": True, "name": name})
+                   for dm_id, name in DM_CHANNELS.items()] if dms else []
     now = time.time()
     changed = False
-    for m in sorted(msgs, key=lambda x: int(x["id"])):
-        mid = m["id"]
-        author = m.get("author", {}) or {}
-        if author.get("id") == BOT_ID:
-            continue  # (other bots: trigger_kind applies behavior.bots)
-        if dm:
-            # Owner DM channels: every owner message is a trigger.
-            if author.get("bot") \
-                    or author.get("id") not in OWNER_USER_IDS:
+    for cid, info in list(channels.items()) + dm_channels:
+        dm = bool(info.get("dm"))
+        cname = "DM with " + info["name"] if dm else channel_display(info)
+        try:
+            msgs = api_get(f"/channels/{cid}/messages?limit=20")
+        except Exception as e:
+            if getattr(e, "code", None) == 429:
+                print("Sweep aborted: rate limited.", flush=True)
+                return changed
+            continue
+        if not isinstance(msgs, list):
+            continue
+        for m in sorted(msgs, key=lambda x: int(x["id"])):
+            mid = m["id"]
+            author = m.get("author", {}) or {}
+            if author.get("id") == BOT_ID:
+                continue  # (other bots: trigger_kind applies behavior.bots)
+            if dm:
+                # Owner DM channels: every owner message is a trigger.
+                if author.get("bot") \
+                        or author.get("id") not in OWNER_USER_IDS:
+                    continue
+            # Direct address only.
+            elif trigger_kind(m) != "mention":
                 continue
-        # Direct address only.
-        elif trigger_kind(m) != "mention":
-            continue
-        if predates_join(state, m, info.get("guild_id")):
-            continue
-        age = now - _snowflake_ts(mid)
-        if age < SWEEP_GRACE_SECS or age > SWEEP_MAX_AGE_SECS:
-            continue
-        if mid in replied:
-            if entries.get(mid, {}).get("status") != "replied":
-                ledger_record(mid, "replied", "sweep sync", cid,
+            if predates_join(state, m, info.get("guild_id")):
+                continue
+            age = now - _snowflake_ts(mid)
+            if age < SWEEP_GRACE_SECS or age > SWEEP_MAX_AGE_SECS:
+                continue
+            if mid in replied:
+                if entries.get(mid, {}).get("status") != "replied":
+                    ledger_record(mid, "replied", "sweep sync", cid,
+                                  author.get("username"))
+                continue
+            ids = {mid, aliases.get(mid, mid)}
+            if any(ids & s for s in (replied, quar_ids, q_ids,
+                                     outbox_targets, pending_ids)):
+                continue  # accounted for and in flight
+            ent = entries.get(mid)
+            if any(entries.get(i, {}).get("status") in LEDGER_TERMINAL
+                   for i in ids):
+                continue
+            if info.get("can_send") is False:
+                ledger_record(mid, "skipped",
+                              "no send permission in channel", cid,
                               author.get("username"))
-            continue
-        ids = {mid, aliases.get(mid, mid)}
-        if any(ids & s for s in (replied, acct["quar_ids"], q_ids,
-                                 acct["outbox_targets"],
-                                 acct["pending_ids"])):
-            continue  # accounted for and in flight
-        ent = entries.get(mid)
-        if any(entries.get(i, {}).get("status") in LEDGER_TERMINAL
-               for i in ids):
-            continue
-        if info.get("can_send") is False:
-            ledger_record(mid, "skipped",
-                          "no send permission in channel", cid,
-                          author.get("username"))
-            continue
-        recs = (ent or {}).get("recoveries", 0)
-        if recs >= SWEEP_MAX_RECOVERIES:
-            if ent and ent.get("status") != "skipped":
-                ledger_record(mid, "skipped", "recovery cap reached",
-                              cid, author.get("username"))
-                print(f"Sweep: giving up on unrecoverable mention "
-                      f"{mid} from {author.get('username')} in "
-                      f"{cname} (recorded in mention ledger).",
-                      flush=True)
-            continue
-        ok = enqueue_message(m, cname, state, queue, dm=dm,
-                             fragments=[],
-                             guild_id=info.get("guild_id"))
-        if ok:
-            changed = True
-            q_ids.add(mid)
-            ledger_record(mid, "queued",
-                          f"sweep recovery #{recs + 1}", cid,
-                          author.get("username"),
-                          recoveries=recs + 1)
-            print(f"Sweep recovered lost mention {mid} from "
-                  f"{author.get('username')} in {cname}.", flush=True)
-        elif not _ledger_terminal(mid):
-            # (A gate inside enqueue, e.g. quarantine or the join
-            # watermark, may already have recorded a terminal state.)
-            ledger_record(mid, "enqueue_failed",
-                          "sweep enqueue failed", cid,
-                          author.get("username"),
-                          recoveries=recs + 1)
+                continue
+            recs = (ent or {}).get("recoveries", 0)
+            if recs >= SWEEP_MAX_RECOVERIES:
+                if ent and ent.get("status") != "skipped":
+                    ledger_record(mid, "skipped", "recovery cap reached",
+                                  cid, author.get("username"))
+                    print(f"Sweep: giving up on unrecoverable mention "
+                          f"{mid} from {author.get('username')} in "
+                          f"{cname} (recorded in mention ledger).",
+                          flush=True)
+                continue
+            ok = enqueue_message(m, cname, state, queue, dm=dm,
+                                 fragments=[],
+                                 guild_id=info.get("guild_id"))
+            if ok:
+                changed = True
+                q_ids.add(mid)
+                ledger_record(mid, "queued",
+                              f"sweep recovery #{recs + 1}", cid,
+                              author.get("username"),
+                              recoveries=recs + 1)
+                print(f"Sweep recovered lost mention {mid} from "
+                      f"{author.get('username')} in {cname}.", flush=True)
+            elif not _ledger_terminal(mid):
+                # (A gate inside enqueue, e.g. quarantine or the join
+                # watermark, may already have recorded a terminal state.)
+                ledger_record(mid, "enqueue_failed",
+                              "sweep enqueue failed", cid,
+                              author.get("username"),
+                              recoveries=recs + 1)
     return changed
 
 
@@ -4173,43 +4140,46 @@ class PollRotation:
 
 
 class SweepPass:
-    """One reconciliation sweep pass (sweep_mentions), done in slices.
-    Each slice diffs against the durable records as they are then."""
+    """One reconciliation sweep pass (sweep_mentions), done in slices: a
+    step sweeps one channel (or the owners' DM channels), each against
+    the durable records as they are at that moment."""
     name = "Sweep"
 
-    def __init__(self, targets):
-        self.targets = targets
+    def __init__(self, channel_ids):
+        self.targets = [None] + list(channel_ids)  # None: the DMs
         self.pos = 0
 
     def done(self):
         return self.pos >= len(self.targets)
 
     def run_slice(self, state, deadline, queue_ok):
-        if rest_backing_off() or not queue_ok:
-            # A backoff ends the pass (it must not add request pressure),
-            # and so does a queue that could not be read this tick (the
-            # sweep must not write it).
+        if not queue_ok:
+            # The queue could not be read this tick: the sweep must not
+            # write it. The pass ends, as a skipped sweep did.
             self.pos = len(self.targets)
             return 0
         queue = load_queue()  # after this tick's sends' removals
         n_before = len(queue)
-        acct = sweep_accounting(state, queue)
         changed = False
         n = 0
         while not self.done():
+            if rest_backing_off():
+                # A 429 (here or elsewhere) ends the pass: the sweep must
+                # not add request pressure (sweep_mentions logs it).
+                self.pos = len(self.targets)
+                break
             if n and time.time() >= deadline:
                 break
-            cid, info = self.targets[self.pos]
+            cid = self.targets[self.pos]
             self.pos += 1
-            if not info.get("dm"):
-                info = CHANNELS.get(cid)  # current can_send
-                if info is None:
-                    continue  # unmonitored since the pass began
+            if cid is None:
+                changed |= sweep_mentions(state, queue, {})
+            elif cid in CHANNELS:  # (else unmonitored since it began)
+                changed |= sweep_mentions(state, queue,
+                                          {cid: CHANNELS[cid]}, dms=False)
+            else:
+                continue
             n += 1
-            try:
-                changed |= sweep_channel(state, queue, acct, cid, info)
-            except SweepAborted:
-                self.pos = len(self.targets)
         if changed:
             queue_edit(add=queue[n_before:])
             save_state(state)
@@ -4563,7 +4533,7 @@ def main():
                 if cycle % SWEEP_EVERY_CYCLES == 0 \
                         and BOT_USER_ID is not None \
                         and "Sweep" not in kinds:
-                    jobs.append(SweepPass(sweep_targets(CHANNELS)))
+                    jobs.append(SweepPass(list(CHANNELS)))
                 # Periodically re-discover readable channels so
                 # permission changes take effect without a restart.
                 if (cycle % CHANNEL_REFRESH_CYCLES == 0
