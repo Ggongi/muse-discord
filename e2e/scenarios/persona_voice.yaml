@@ -1,0 +1,32 @@
+# Tier 2: the real worker (claude -p) answers a casual question in the
+# test persona's voice. Deterministic checks only guard the mechanics
+# (an answer arrives, threaded, sane length, no mass pings); the judge
+# gets the persona text separately and grades the voice. The reply may
+# come as 1-4 parts (follow-up parts are not Discord replies), so
+# there is no replies_to/eq-1 check here.
+id: persona_voice
+tier: 2
+title: "A casual question is answered in the persona's voice"
+steps:
+  - send: { as: a, text: "<@SUT> hey, what's a good way to spend a rainy sunday afternoon?", label: q1 }
+  - wait_for: { sut_messages: 1, timeout: 240 }
+expect:
+  settle: 30
+  checks:
+    - sut_reply_count: { min: 1, max: 4 }
+    - latency: { from: q1, max: 240 }
+    - max_chars: 2000
+    - no_mass_mentions: true
+judge:
+  rubric: |
+    PASS when all of these hold:
+    - The bot actually answers the question with at least one concrete
+      suggestion for a rainy Sunday afternoon.
+    - The reply is written in the voice of the persona described in the
+      worker's persona file (its tone, vocabulary, quirks and
+      boundaries), not in a generic assistant voice. Name the persona
+      traits you saw, or the ones missing.
+    - It reads like a chat message: no headings, no bullet-point essay,
+      no "As an AI" disclaimers, no talk about prompts, queues, files
+      or tools.
+    FAIL otherwise.

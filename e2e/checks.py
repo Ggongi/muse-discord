@@ -1,0 +1,388 @@
+#!/usr/bin/env python3
+"""
+Deterministic transcript checks for the e2e harness.
+
+evaluate(scenario, transcript) runs every check listed under the
+scenario's expect.checks against the transcript run.py wrote (schema in
+the e2e spec: messages oldest first, labels -> message ids, the SUT's
+quarantine.json and mention_ledger.json under sut_files) and returns one
+{"name", "ok", "detail"} per check, in order. Pure functions: no I/O, no
+network, no clock.
+
+A "SUT message" is any transcript message with author "sut". A SUT
+message "replies to" a label when its Discord reply reference
+(reply_to) is that label's message id. Every detail string names what
+was expected and what was found (ids and a snippet of each message), so
+a failure in the PR comment is readable without opening the transcript.
+"""
+import re
+from datetime import datetime, timezone
+
+DISCORD_EPOCH_MS = 1420070400000
+SNIPPET = 60
+
+
+# ---------------------------------------------------------------------------
+# Transcript helpers
+# ---------------------------------------------------------------------------
+
+class CheckError(Exception):
+    """The transcript lacks something the check needs (a label that was
+    never sent, a missing SUT file). Reported as a failed check."""
+
+
+def _sut(tr):
+    return [m for m in tr.get("messages") or [] if m.get("author") == "sut"]
+
+
+def _label_id(tr, label):
+    mid = (tr.get("labels") or {}).get(label)
+    if not mid:
+        raise CheckError(f"label {label!r} has no message id in the "
+                         f"transcript (was the step sent?)")
+    return str(mid)
+
+
+def _snowflake_secs(mid):
+    try:
+        return ((int(mid) >> 22) + DISCORD_EPOCH_MS) / 1000.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _iso_secs(ts):
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _time_of(tr, mid):
+    """Seconds since the epoch a message was posted: its transcript ts,
+    else the time encoded in its snowflake id."""
+    for m in tr.get("messages") or []:
+        if str(m.get("id")) == mid:
+            t = _iso_secs(m.get("ts"))
+            if t is not None:
+                return t
+    t = _snowflake_secs(mid)
+    if t is None:
+        raise CheckError(f"cannot tell when message {mid} was posted")
+    return t
+
+
+def _msg_time(tr, m):
+    t = _iso_secs(m.get("ts"))
+    return t if t is not None else _time_of(tr, str(m.get("id")))
+
+
+def _show(msgs):
+    """'id "snippet" (reply to X)' for each message, for details."""
+    if not msgs:
+        return "none"
+    out = []
+    for m in msgs:
+        text = (m.get("content") or "").replace("\n", " ")
+        if len(text) > SNIPPET:
+            text = text[:SNIPPET] + "..."
+        rt = m.get("reply_to")
+        out.append(f'{m.get("id")} "{text}" '
+                   f'({"reply to " + str(rt) if rt else "not a reply"})')
+    return "; ".join(out)
+
+
+def _count_ok(n, spec):
+    if "eq" in spec:
+        return n == spec["eq"], f"expected {spec['eq']}"
+    want = []
+    ok = True
+    if "min" in spec:
+        ok &= n >= spec["min"]
+        want.append(f"at least {spec['min']}")
+    if "max" in spec:
+        ok &= n <= spec["max"]
+        want.append(f"at most {spec['max']}")
+    return ok, "expected " + " and ".join(want)
+
+
+def _replies_to(m, mid):
+    return str(m.get("reply_to") or "") == mid
+
+
+# ---------------------------------------------------------------------------
+# Checks: each takes (arg, transcript) and returns (ok, detail).
+# ---------------------------------------------------------------------------
+
+def check_sut_reply_count(spec, tr):
+    sut = _sut(tr)
+    ok, want = _count_ok(len(sut), spec)
+    return ok, f"{len(sut)} SUT message(s), {want}: {_show(sut)}"
+
+
+def check_replies_to(label, tr):
+    mid = _label_id(tr, label)
+    sut = _sut(tr)
+    if not sut:
+        return False, f"no SUT messages; expected replies to {label} ({mid})"
+    bad = [m for m in sut if not _replies_to(m, mid)]
+    if bad:
+        return False, (f"{len(bad)} of {len(sut)} SUT message(s) do not "
+                       f"reply to {label} ({mid}): {_show(bad)}")
+    return True, f"all {len(sut)} SUT message(s) reply to {label} ({mid})"
+
+
+def check_replies_to_any(labels, tr):
+    ids = {_label_id(tr, lb): lb for lb in labels}
+    sut = _sut(tr)
+    names = ", ".join(f"{lb} ({mid})" for mid, lb in ids.items())
+    if not sut:
+        return False, f"no SUT messages; expected replies to one of {names}"
+    bad = [m for m in sut if str(m.get("reply_to") or "") not in ids]
+    if bad:
+        return False, (f"{len(bad)} of {len(sut)} SUT message(s) reply to "
+                       f"none of {names}: {_show(bad)}")
+    return True, f"all {len(sut)} SUT message(s) reply to one of {names}"
+
+
+def check_no_sut_reply_to(label, tr):
+    mid = _label_id(tr, label)
+    bad = [m for m in _sut(tr) if _replies_to(m, mid)]
+    if bad:
+        return False, (f"{len(bad)} SUT message(s) reply to {label} "
+                       f"({mid}), expected none: {_show(bad)}")
+    return True, f"no SUT message replies to {label} ({mid})"
+
+
+def check_no_sut_before(label, tr):
+    mid = _label_id(tr, label)
+    t0 = _time_of(tr, mid)
+
+    def before(m):
+        # Snowflakes order messages exactly; ts is the fallback.
+        try:
+            return int(m["id"]) < int(mid)
+        except (KeyError, TypeError, ValueError):
+            return _msg_time(tr, m) < t0
+
+    bad = [m for m in _sut(tr) if before(m)]
+    if bad:
+        return False, (f"{len(bad)} SUT message(s) posted before {label} "
+                       f"({mid}), expected none: {_show(bad)}")
+    return True, f"no SUT message before {label} ({mid})"
+
+
+def check_latency(spec, tr):
+    label, limit = spec["from"], spec["max"]
+    mid = _label_id(tr, label)
+    replies = [m for m in _sut(tr) if _replies_to(m, mid)]
+    if not replies:
+        return False, (f"no SUT message replies to {label} ({mid}) at all; "
+                       f"SUT messages: {_show(_sut(tr))}")
+    t0 = _time_of(tr, mid)
+    first = min(replies, key=lambda m: _msg_time(tr, m))
+    took = _msg_time(tr, first) - t0
+    ok = took <= limit
+    return ok, (f"first reply to {label} ({mid}) came after {took:.1f}s, "
+                f"limit {limit}s: {_show([first])}")
+
+
+def check_max_chars(limit, tr):
+    sut = _sut(tr)
+    bad = [m for m in sut if len(m.get("content") or "") > limit]
+    lens = [len(m.get("content") or "") for m in sut]
+    if bad:
+        return False, (f"{len(bad)} SUT message(s) longer than {limit} "
+                       f"chars (lengths {lens}): {_show(bad)}")
+    return True, f"SUT message lengths {lens}, all <= {limit}"
+
+
+def check_total_chars(spec, tr):
+    sut = _sut(tr)
+    lens = [len(m.get("content") or "") for m in sut]
+    ok, want = _count_ok(sum(lens), spec)
+    return ok, (f"SUT messages total {sum(lens)} chars (lengths {lens}), "
+                f"{want}")
+
+
+def check_content_matches(pattern, tr):
+    sut = _sut(tr)
+    if not sut:
+        return False, f"no SUT messages; expected them to match /{pattern}/"
+    bad = [m for m in sut if not re.search(pattern, m.get("content") or "")]
+    if bad:
+        return False, (f"{len(bad)} of {len(sut)} SUT message(s) do not "
+                       f"match /{pattern}/: {_show(bad)}")
+    return True, f"all {len(sut)} SUT message(s) match /{pattern}/"
+
+
+# A raw @everyone / @here in sent text means the monitor's zero-width
+# neutralization (sanitize_reply) did not run, even if allowed_mentions
+# kept it from pinging.
+_RAW_MASS = re.compile(r"@(everyone|here)\b")
+
+
+def check_no_mass_mentions(_arg, tr):
+    problems = []
+    for m in _sut(tr):
+        why = []
+        if m.get("mention_everyone"):
+            why.append("mention_everyone is true")
+        if m.get("mention_roles"):
+            why.append(f"mention_roles {m['mention_roles']}")
+        raw = _RAW_MASS.search(m.get("content") or "")
+        if raw:
+            why.append(f"raw {raw.group(0)} in the text (not neutralized)")
+        if why:
+            problems.append(f"{m.get('id')}: {', '.join(why)}")
+    if problems:
+        return False, "mass mention(s) went out: " + "; ".join(problems)
+    return True, f"no mass mentions in {len(_sut(tr))} SUT message(s)"
+
+
+def check_no_duplicate_replies(_arg, tr):
+    seen, dups = {}, []
+    for m in _sut(tr):
+        key = (str(m.get("reply_to") or ""), m.get("content") or "")
+        if key in seen:
+            dups.append((seen[key], m))
+        else:
+            seen[key] = m
+    if dups:
+        pairs = "; ".join(f"{a.get('id')} and {b.get('id')} (reply to "
+                          f"{a.get('reply_to') or 'nothing'}, \""
+                          f"{(a.get('content') or '')[:SNIPPET]}\")"
+                          for a, b in dups)
+        return False, f"{len(dups)} duplicate SUT message(s): {pairs}"
+    return True, f"no duplicates among {len(_sut(tr))} SUT message(s)"
+
+
+def check_mentions(spec, tr):
+    """Some SUT message replying to the label both writes <@id> for the
+    driver and actually mentions them (the id is in its mentions). The
+    text test matters: Discord also lists the replied-to author in
+    mentions when a reply pings, so mentions alone would pass for the
+    author of the label's message without any <@id> in the reply."""
+    label, who = spec["label"], spec["user"]
+    mid = _label_id(tr, label)
+    uid = str((tr.get("ids") or {}).get(who.upper()) or "")
+    if not uid:
+        raise CheckError(f"transcript ids has no {who.upper()}")
+    replies = [m for m in _sut(tr) if _replies_to(m, mid)]
+    if not replies:
+        return False, (f"no SUT message replies to {label} ({mid}); SUT "
+                       f"messages: {_show(_sut(tr))}")
+    token = re.compile(rf"<@!?{re.escape(uid)}>")
+    for m in replies:
+        in_text = bool(token.search(m.get("content") or ""))
+        pinged = uid in [str(x) for x in m.get("mentions") or []]
+        if in_text and pinged:
+            return True, (f"SUT reply {m.get('id')} to {label} mentions "
+                          f"driver {who} ({uid})")
+    return False, (f"no SUT reply to {label} ({mid}) both writes <@{uid}> "
+                   f"and mentions driver {who}: "
+                   + "; ".join(f"{m.get('id')} mentions "
+                               f"{m.get('mentions') or []} "
+                               f"\"{(m.get('content') or '')[:SNIPPET]}\""
+                               for m in replies))
+
+
+def check_quarantined(label, tr):
+    mid = _label_id(tr, label)
+    q = (tr.get("sut_files") or {}).get("quarantine")
+    if q is None:
+        return False, (f"no quarantine.json in the SUT dir; expected "
+                       f"{label} ({mid}) to be quarantined")
+    if not isinstance(q, list):
+        return False, f"quarantine.json is not a list: {str(q)[:120]}"
+    for e in q:
+        if not isinstance(e, dict):
+            continue
+        ids = [str(e.get("message_id"))] + [
+            str(f.get("message_id")) for f in e.get("fragments") or []
+            if isinstance(f, dict)]
+        if mid in ids:
+            return True, (f"{label} ({mid}) quarantined (matched "
+                          f"{e.get('matched_pattern')!r})")
+    held = [str(e.get("message_id")) for e in q if isinstance(e, dict)]
+    return False, (f"{label} ({mid}) is not in quarantine.json "
+                   f"({len(q)} entries: {held})")
+
+
+def check_ledger_status(spec, tr):
+    label, want = spec["label"], spec["status"]
+    mid = _label_id(tr, label)
+    ledger = (tr.get("sut_files") or {}).get("ledger")
+    if not isinstance(ledger, dict) or not isinstance(
+            ledger.get("entries"), dict):
+        return False, (f"no usable mention_ledger.json in the SUT dir "
+                       f"(got {str(ledger)[:120]})")
+    entry = ledger["entries"].get(mid)
+    if not isinstance(entry, dict):
+        return False, f"{label} ({mid}) has no ledger entry; expected {want}"
+    got = entry.get("status")
+    reason = f", reason {entry.get('reason')!r}" if entry.get("reason") \
+        else ""
+    if got != want:
+        return False, (f"{label} ({mid}) ledger status {got!r}{reason}, "
+                       f"expected {want!r}")
+    return True, f"{label} ({mid}) ledger status {got!r}{reason}"
+
+
+def check_converse_turns(spec, tr):
+    n = tr.get("converse_turns")
+    if not isinstance(n, int) or isinstance(n, bool):
+        return False, (f"transcript has no converse_turns count (got "
+                       f"{n!r}); did the converse step run?")
+    ok, want = _count_ok(n, spec)
+    return ok, f"{n} SUT turn(s) during the converse step, {want}"
+
+
+CHECKS = {
+    "sut_reply_count": check_sut_reply_count,
+    "replies_to": check_replies_to,
+    "replies_to_any": check_replies_to_any,
+    "no_sut_reply_to": check_no_sut_reply_to,
+    "no_sut_before": check_no_sut_before,
+    "latency": check_latency,
+    "max_chars": check_max_chars,
+    "total_chars": check_total_chars,
+    "content_matches": check_content_matches,
+    "no_mass_mentions": check_no_mass_mentions,
+    "no_duplicate_replies": check_no_duplicate_replies,
+    "mentions": check_mentions,
+    "quarantined": check_quarantined,
+    "ledger_status": check_ledger_status,
+    "converse_turns": check_converse_turns,
+}
+
+
+def evaluate(scenario, transcript):
+    """One {"name", "ok", "detail"} per entry in expect.checks, in order.
+    Never raises: an unknown check, a malformed entry, or a transcript
+    missing what a check needs is a failed check with the reason."""
+    results = []
+    checks = ((scenario or {}).get("expect") or {}).get("checks") or []
+    for chk in checks:
+        if not isinstance(chk, dict) or len(chk) != 1:
+            results.append({"name": str(chk), "ok": False,
+                            "detail": "malformed check entry"})
+            continue
+        (name, arg), = chk.items()
+        fn = CHECKS.get(name)
+        if fn is None:
+            results.append({"name": name, "ok": False,
+                            "detail": "unknown check"})
+            continue
+        try:
+            ok, detail = fn(arg, transcript or {})
+        except CheckError as e:
+            ok, detail = False, str(e)
+        except Exception as e:  # a check must never take the run down
+            ok, detail = False, f"check crashed: {type(e).__name__}: {e}"
+        results.append({"name": name, "ok": bool(ok), "detail": detail})
+    return results

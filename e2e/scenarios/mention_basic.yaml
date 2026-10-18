@@ -1,0 +1,21 @@
+# The core path: a human @mentions the bot and gets exactly one reply,
+# threaded under the mention, at gateway speed. A human's burst flushes
+# ~1.5 s after their last message (burst_quiet), so the reply normally
+# lands within a few seconds; 20 s leaves CI headroom and still fails
+# a stalled pipeline. Also catches a lost mention, a double send, and
+# a reply posted unthreaded.
+id: mention_basic
+tier: 1
+title: "A mention gets exactly one threaded reply"
+steps:
+  - send: { as: a, text: "<@SUT> hello there", label: q1 }
+  - wait_for: { sut_messages: 1, timeout: 60 }
+expect:
+  settle: 15
+  checks:
+    - sut_reply_count: { eq: 1 }
+    - replies_to: q1
+    - latency: { from: q1, max: 20 }
+    - content_matches: "^ack 1$"
+    - no_duplicate_replies: true
+    - ledger_status: { label: q1, status: replied }
