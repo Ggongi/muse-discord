@@ -3,6 +3,30 @@
 Newest first. **Action needed** lists what an existing install must
 do after updating; UPDATING.md walks a Muse through it.
 
+## 2026-10-18: One slow reply no longer holds back the rest
+
+Faster:
+
+- When one wake carries several messages (say a DM plus two welcomes),
+  the worker now answers DMs and mentions first and sends each reply
+  as soon as it is written, instead of writing them all at the end.
+  Replies in the same channel keep their order.
+
+Fixed:
+
+- A reply to a message that was deleted before the reply went out
+  failed on every retry until it was dropped. It now posts as a
+  normal message.
+- The latency log could show a negative `ingest` when the machine's
+  clock trailed Discord's by a fraction of a second.
+
+**Action needed:**
+
+- Reinstall the worker prompt from `worker-prompt.template.md` (the
+  faster ordering only takes effect then). If your agent runtime
+  limits tool calls per run, allow `bin/outbox-append.py` to run once
+  per reply.
+
 ## 2026-10-18: Realtime messages no longer wait for the REST poll
 
 Fixed:
