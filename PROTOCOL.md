@@ -200,8 +200,13 @@ epoch seconds), `guild_first_seen` (fallback watermark when Discord
 has not reported the join time), `known_guilds` and `join_notices`
 (new-server detection and owed owner DMs), `reply_aliases`
 (burst fragment id -> trigger id, so a reply under the last fragment
-settles the whole burst in the ledger), and `queued_at` (when each
-recent item was queued, for the latency log).
+settles the whole burst in the ledger), and `ingested_at` and
+`queued_at` (when the monitor first processed each recent trigger, and
+when it queued it). Those feed the latency line monitor.log prints for
+each answered item, `Latency <id>: ingest 0.4s, hold 1.6s, worker
+30.1s, send 2.0s, total 34.1s`: ingest is from the message's creation
+to the monitor first processing it, hold is the burst coalescing,
+worker is from queued to the outbox pickup, and send is the delivery.
 Safe to delete while the monitor is stopped: the cost is re-seeding
 `last_seen` (history, DMs included, is treated as already seen) and
 losing rate-limit and plugin counters. Join watermarks are re-read
