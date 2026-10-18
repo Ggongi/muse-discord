@@ -186,6 +186,25 @@ if _BEHAVIOR.get("max_bot_turns") is not None:
     print("WARNING: behavior.max_bot_turns was removed and is ignored; "
           "the worker ends bot conversations by judgment.", flush=True)
 DM_POLICY = str(_BEHAVIOR.get("dm_policy") or "owner_only").lower()
+# Test-only (the e2e harness's driver bots stand in for people): these
+# author ids count as human everywhere the monitor checks author.bot
+# (see is_bot_author). Absent or empty = no effect.
+TREAT_AS_HUMAN = {str(u) for u in
+                  (CFG.get("testing") or {}).get("treat_as_human") or []}
+if TREAT_AS_HUMAN:
+    print(f"WARNING: testing.treat_as_human is set: {len(TREAT_AS_HUMAN)} "
+          f"bot account(s) are treated as humans. Test servers only.",
+          flush=True)
+
+
+def is_bot_author(author):
+    """True when a message author is a bot (Discord's author.bot), unless
+    testing.treat_as_human lists its id."""
+    author = author or {}
+    return bool(author.get("bot")) \
+        and str(author.get("id")) not in TREAT_AS_HUMAN
+
+
 # 0 = no coalescing: every trigger is queued on the next tick.
 COALESCE_SECS = _cfg_num(_BEHAVIOR, "coalesce_seconds", 5, float,
                          "behavior.coalesce_seconds", minimum=0)
@@ -1282,7 +1301,7 @@ def trigger_kind(msg):
     author = msg.get("author", {}) or {}
     if author.get("id") == BOT_ID:
         return None
-    if author.get("bot") and BOTS_POLICY != "direct":
+    if is_bot_author(author) and BOTS_POLICY != "direct":
         return None
     if "mention" in RESPOND_TO and is_mention(msg):
         return "mention"
@@ -1376,7 +1395,7 @@ def stage_trigger(state, msg, cname, guild_id, kind, dm=False):
         "dm": dm,
         "first_seen": time.time(),
         "window": BOT_COALESCE_SECS
-        if (msg.get("author", {}) or {}).get("bot") else COALESCE_SECS,
+        if is_bot_author(msg.get("author")) else COALESCE_SECS,
         "trigger": msg,
         "fragments": [],
     }
@@ -1464,7 +1483,7 @@ def burst_quiet(entry, now):
     if act.get("typing_seq", 0) > act["msg_seq"]:
         return False  # typing again since their newest message
     quiet = BOT_BURST_QUIET_SECS \
-        if (entry["trigger"].get("author", {}) or {}).get("bot") \
+        if is_bot_author(entry["trigger"].get("author")) \
         else BURST_QUIET_SECS
     return now - act["msg_at"] >= quiet
 
@@ -2437,7 +2456,7 @@ def record_history(state, channel_id, messages):
             "id": m["id"],
             "author": author.get("username", "?"),
             "author_id": author.get("id"),
-            "bot": bool(author.get("bot")),
+            "bot": is_bot_author(author),
             "text": text or "[shared media]",
             "ts": m.get("timestamp"),
         }
@@ -2575,7 +2594,7 @@ def classify_message(state, msg, channel_name, guild_id=None):
     author = msg.get("author", {}) or {}
     if author.get("id") == BOT_ID:
         return None  # the bot's own messages: never triggers or fragments
-    if author.get("bot") and BOTS_POLICY != "direct":
+    if is_bot_author(author) and BOTS_POLICY != "direct":
         return None
     if hold_fragment(state, msg.get("channel_id"), msg):
         return None  # folded into a burst already being coalesced
@@ -2588,7 +2607,7 @@ def is_join_message(msg):
     if msg.get("type") != 7:
         return False
     author = msg.get("author", {}) or {}
-    if author.get("bot"):
+    if is_bot_author(author):
         return False
     if author.get("id") == BOT_ID:
         return False
@@ -2679,8 +2698,7 @@ def bot_run_length(history, msg):
     between. 0 when msg is from a human."""
     run = 0
     older = [h for h in history if int(h["id"]) < int(msg["id"])]
-    for h in reversed(older + [{"bot": bool(
-            (msg.get("author", {}) or {}).get("bot"))}]):
+    for h in reversed(older + [{"bot": is_bot_author(msg.get("author"))}]):
         if not h.get("bot"):
             break
         run += 1
@@ -2704,7 +2722,7 @@ def conversation_participants(history, msg, reply_ctx):
         people[pid] = p
 
     author = msg.get("author", {}) or {}
-    add(author.get("id"), author.get("username"), author.get("bot"),
+    add(author.get("id"), author.get("username"), is_bot_author(author),
         (msg.get("member") or {}).get("nick") or author.get("global_name"))
     for h in reversed(history):
         add(h.get("author_id"), h.get("author"), h.get("bot"),
@@ -2761,7 +2779,7 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
                            author=author_name)
         return False
     chan_hist = state.get("history", {}).get(msg["channel_id"], [])
-    from_bot = bool(msg.get("author", {}).get("bot"))
+    from_bot = is_bot_author(msg.get("author"))
     bot_turns = bot_run_length(chan_hist, msg)
     # The worker sees the whole burst as one message: fragments joined in
     # order under the trigger's text.
@@ -3634,7 +3652,7 @@ def drain_gateway(state, inbox, channels):
             # everyone else's DMs unread and unrecorded; "off" disables
             # DM handling; "open" accepts any human's DM.
             author = m.get("author", {}) or {}
-            if author.get("bot"):
+            if is_bot_author(author):
                 if author.get("id") == BOT_ID:
                     record_history(state, cid, [m])
                     note_gateway_seen(state, cid, m["id"])
@@ -3719,7 +3737,7 @@ def sweep_mentions(state, queue, channels):
                 continue  # (other bots: trigger_kind applies behavior.bots)
             if dm:
                 # Owner DM channels: every owner message is a trigger.
-                if author.get("bot") \
+                if is_bot_author(author) \
                         or author.get("id") not in OWNER_USER_IDS:
                     continue
             # Direct address only.
