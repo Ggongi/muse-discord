@@ -13,10 +13,11 @@ that can read and write these files can implement a worker.
   component that holds the bot token.
 - **Worker** (an LLM agent session, woken on demand): takes its items
   from the wake payload (or the queue), drafts replies, and appends
-  them to the outbox in one locked write. It never edits the queue: the
-  monitor removes each item once it settles its reply. It NEVER holds
-  the token and never calls the Discord API except through the
-  allowlisted `bin/discord-api.py` tool on owner-command items.
+  each one to the outbox (a locked append) as soon as it is drafted.
+  It never edits the queue: the monitor removes each item once it
+  settles its reply. It NEVER holds the token and never calls the
+  Discord API except through the allowlisted `bin/discord-api.py` tool
+  on owner-command items.
 - **Wake mechanism**: something must notice a non-empty queue and start
   a worker session. The package ships `hooks/mention-watch.sh` for
   Muse's hook runtime (5s poll). Each wake hands out only the open
@@ -40,10 +41,11 @@ in the package dir: take the lock, re-read the file, apply only your
 own change (append new items, or remove specific ids), write it
 atomically, release. Never write back a copy read before taking the
 lock, and never hold the lock across network calls or model turns. The
-worker's only write is an outbox append, which `bin/outbox-append.py`
-does in one step (a JSON array on stdin; it refuses obviously
-malformed items and prints why). A runtime that cannot run it wraps its
-own append in `flock <package dir>/reply.lock <command>`.
+worker's only write is an outbox append, one per item it answers,
+which `bin/outbox-append.py` does in one step (an item or a JSON array
+on stdin; it refuses obviously malformed items and prints why). A
+runtime that cannot run it wraps its own append in
+`flock <package dir>/reply.lock <command>`.
 
 ### reply_queue.json (monitor -> worker)
 
@@ -235,9 +237,11 @@ Enforced by the monitor before anything reaches the queue:
    records the decision). Set `item` to the queue item's
    `message_id`. Never edit the queue: the monitor removes answered
    items.
-2. Append all your outbox items in one write under the lock
-   (`bin/outbox-append.py`); never rewrite the outbox, and never edit
-   the monitor's files (state, ledger, quarantine).
+2. Append each outbox item under the lock (`bin/outbox-append.py`)
+   as soon as it is drafted, so a slow item never delays the rest:
+   DMs and mentions first, then welcomes and other plugin items, but
+   items in the same channel in queue order. Never rewrite the outbox,
+   and never edit the monitor's files (state, ledger, quarantine).
 3. Never hold or request the bot token. Your only Discord write path
    is the outbox, plus `bin/discord-api.py` on items stamped
    `owner_command: true`.

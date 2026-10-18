@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""outbox-append.py -- the reply worker's one write to the outbox.
+"""outbox-append.py -- the reply worker's only write to the outbox.
 
-Reads a JSON array of outbox items (or a single item) from stdin, or from
-the file named as the only argument, and appends them to the package's
-reply_outbox.json under the shared lock (reply.lock), re-reading the
-file inside the lock. The monitor takes items out of the outbox while it
-sends them, so a worker that rewrites the whole file from a copy it read
-earlier can delete replies or resurrect sent ones; appending through this
-tool cannot.
+The worker runs it once per queue item, as soon as that item's reply is
+drafted. Reads a JSON array of outbox items (or a single item) from
+stdin, or from the file named as the only argument, and appends them to
+the package's reply_outbox.json under the shared lock (reply.lock),
+re-reading the file inside the lock. The monitor takes items out of the
+outbox while it sends them, so a worker that rewrites the whole file from
+a copy it read earlier can delete replies or resurrect sent ones;
+appending through this tool cannot.
 
     python3 bin/outbox-append.py <<'EOF'
     [{"item": "123", "channel_id": "456", "reply_to": "123", "text": "hi"}]
