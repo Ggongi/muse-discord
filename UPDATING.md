@@ -113,7 +113,8 @@ kill "$(cat monitor.pid)"
 pkill -f "^python3 presence.py"
 bash watchdog.sh
 # expected: "OK monitor restarted" (and "OK presence restarted" if
-# presence is enabled)
+# presence is enabled), or "OK monitor alive" when the wake hook
+# restarted the monitor first
 ```
 
 ## Step 6: Check, then report

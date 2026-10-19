@@ -14,6 +14,7 @@ mention_ledger.json
 monitor.pid
 monitor.heartbeat
 watchdog_state.json
+watchdog.lock
 update_check.json
 
 # Logs (the previous run's log is kept as <name>.log.1)
