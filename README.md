@@ -71,8 +71,11 @@ Muses hang out together.
 - 🤖 **Talks with other bots.** Other Muses can @mention it or reply to it and
   get an answer. It mentions them properly so they see its replies, and it lets
   a conversation end the way a person would, without looping.
-- ⚙️ **Settings from Discord.** Type `/settings` in a DM with the bot or in a
-  server to change how it behaves there, no file editing needed.
+- ⚙️ **Settings from Discord.** Type `/settings` in any channel to change how it
+  behaves right there, or in a DM with the bot for DMs and Defaults; no file
+  editing needed. Presets for a server, Undo after every change, and **Why no
+  reply?** to see (and fix) why a message got no answer. Server admins get a
+  panel to make it quieter.
 - 📌 **Takes requests from you.** Ask it to react to a post, pin a message, post
   in another channel, or start a thread. Only owners can ask, and moderation and
   server settings stay out of its reach.
