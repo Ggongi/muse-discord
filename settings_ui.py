@@ -47,10 +47,10 @@ ADMINISTRATOR = 1 << 3
 CUSTOM_ID_MAX = 100
 CONTENT_MAX = 2000
 SERVERS_PER_PAGE = 22        # + Everywhere, DMs, All servers = 25 options
-BIG_FOR_MEMORY = 50          # members: warn harder about memory
-BIG_FOR_CONVERSATIONAL = 500
-MEDIA_PER_DAY_RISKY = 20
-BOT_EXCHANGE_RISKY = 10
+BIG_FOR_MEMORY = ms.BIG_FOR_MEMORY   # members: warn harder about memory
+BIG_FOR_CONVERSATIONAL = ms.BIG_FOR_CONVERSATIONAL
+MEDIA_PER_DAY_RISKY = ms.MEDIA_PER_DAY_RISKY
+BOT_EXCHANGE_RISKY = ms.BOT_EXCHANGE_RISKY
 THREAD_TYPES = (10, 11, 12)
 CATEGORY = 4
 PICKABLE_CHANNELS = (0, 2, 4, 5, 13, 15, 16)
@@ -773,12 +773,36 @@ def control_button(R, where, key, v):
     return None
 
 
+def engine_place(where):
+    if where.kind == "server":
+        return ms.Place.server(where.gid)
+    if where.kind == "channel":
+        return ms.Place.channel(where.gid, where.cid)
+    return None
+
+
+def engine_admin(R, where, key, write):
+    """The engine's server-admin rule (muse_settings.admin_changes): the
+    value to write (a reset of an admin's own entry becomes the owners'
+    value), or raise SettingsError."""
+    place = engine_place(where)
+    if place is None:
+        raise ms.SettingsError(ADMIN_ONLY_QUIETER)
+    return ms.admin_changes(R.st, R.who.gid,
+                            [ms.Change(place, key, write)], R.ctx)[0].value
+
+
 def may_reset(R, where, key):
     if R.who.owner:
         return True
-    return admin_block(key, effective(R, where, key),
-                       inherited(R, where, key), "inherit",
-                       R.st.spec(key)) is None
+    if admin_block(key, effective(R, where, key), inherited(R, where, key),
+                   "inherit", R.st.spec(key)) is not None:
+        return False
+    try:
+        engine_admin(R, where, key, "inherit")
+    except ms.SettingsError:
+        return False
+    return True
 
 
 def reset_component(R, where, keys):
@@ -1258,6 +1282,10 @@ def _apply(R, where, key, raw, confirmed=False):
         block = admin_block(key, old, new, write, spec)
         if block:
             return notice(block)
+        try:
+            write = engine_admin(R, where, key, write)
+        except ms.SettingsError as e:
+            return notice(str(e))
     elif not confirmed:
         risk = risk_text(R, where, key, old, new)
         if risk:
@@ -1310,11 +1338,15 @@ def op_undo(R, where, confirmed=False, expect=None):
     if not may_view(R, where):
         return notice(REFUSAL)
     prefix = ms.scope_prefix(where.path)
-    cand = ms.undo_candidate(R.st, prefix)
-    if cand is None:
+    admin_gid = R.who.gid if R.who.admin else None
+    # Everything this Undo reverts (a whole group, wherever it landed);
+    # a server admin's Undo sees only server admins' changes there.
+    plan = ms.undo_plan(R.st, prefix, admin_gid=admin_gid)
+    if not plan:
         return notice("Nothing to undo here: no change made in Discord at "
                       "this scope is still in effect.")
-    _ks, path, key, target = cand
+    first = plan[0]
+    path, key, target = first.path, first.key, first.value
     if expect is not None and kcode(key) != expect:
         return notice("Something changed since; open the page again.")
     spec = R.st.spec(key)
@@ -1329,17 +1361,26 @@ def op_undo(R, where, confirmed=False, expect=None):
         if not ok:
             return notice(f"Can't undo: {new}")
     if R.who.admin:
-        block = admin_block(key, old, new, ms.display(spec, new), spec)
-        if block:
+        # The engine's rule: an admin may undo admins' own changes, back
+        # to (never past) what the owners set.
+        try:
+            ms.admin_check(R.st, R.who.gid, plan, R.ctx, revert=True)
+        except ms.SettingsError:
             return notice("Undoing the last change here would make the bot "
                           "louder. " + ADMIN_ONLY_QUIETER)
     elif not confirmed:
-        risk = risk_text(R, where, key, old, new)
-        if risk:
-            return message(*page_confirm(R, where, key, old, new, None, risk,
+        # Judged by the outcome of the whole Undo, not its first key.
+        risk = ms.assess(R.st, plan, R.ctx)
+        if risk.risky:
+            return message(*page_confirm(R, where, key, old, new, None,
+                                         " ".join(risk.warnings),
                                          undo=True), R.new)
     try:
-        k = R.ctx.undo(prefix, R.who.uid)
+        if R.who.admin:
+            k = R.ctx.undo(prefix, R.who.uid, admin_gid=R.who.gid,
+                           info=R.ctx)
+        else:
+            k = R.ctx.undo(prefix, R.who.uid)
     except ms.SettingsError as e:
         return notice(f"Can't undo: {e}")
     if k is None:

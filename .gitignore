@@ -2,6 +2,7 @@
 # from Discord, and the backups bin/settings.py migrate / fold keep
 config.yaml
 config.discord.yaml
+config.discord.yaml.lock
 config.yaml.bak-*
 
 # Runtime state and queues (created by the monitor)

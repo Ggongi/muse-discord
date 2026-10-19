@@ -422,6 +422,11 @@ python3 bin/settings.py show --server <id> --channel <id> --explain
 
 `--explain` prints each setting's effective value and where it came
 from (built-in, a line in config.yaml, or a broader scope).
+`python3 bin/settings.py explain --place server:<id>` says the same
+in plain words, and `set`, `reset`, `undo`, `preset`, `pause` and
+`resume` change settings the way /settings does (see
+`python3 bin/settings.py --help`; risky changes need `--yes`, which
+you add only after the owner says yes).
 Settings changed through the bot rather than the file are kept in
 `config.discord.yaml` next to it; `show --explain` names them too,
 and `python3 bin/settings.py fold` copies them into config.yaml (see
