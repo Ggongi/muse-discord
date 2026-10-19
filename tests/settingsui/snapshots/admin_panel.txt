@@ -1,5 +1,5 @@
 === admin_panel
-type 4 · 21 components · 656 chars
+type 4 · 21 components · 669 chars
 C amber
   TD | ## Quiet the bot in Muse Lounge
   TD | -# You're a server admin here, so you can make the bot quieter and undo what admins changed. The bot's owners get a summary of every change.
@@ -19,49 +19,49 @@ C amber
       - spam1  (<SPAM>)
   SEP
   TD | **Changes admins made here**
-  SEC | All of Muse Lounge: Never answer → @Bob and @spam1 · @you, 2 h ago
+  SEC | All of Muse Lounge: Never answer: added <@<SPAM>> · @you, 2 h ago
   SEC | -# Undo goes back to the owners' setting: @Bob
       [Undo] mdset:2:val:s<G1>:ig:=:q
 ROW
   [Why no reply?] mdset:2:pg:c<G1>.<GENERAL>:y
 
 === admin_panel > mdset:2:val:s<G1>:r:when-addressed:q
-type 7 · 26 components · 831 chars
+type 7 · 26 components · 844 chars
 SEC | **Done:** In Muse Lounge, When it answers: Chatty → Only when @mentioned
     [Undo] mdset:2:un:s<G1>:g0000000003
 C amber
   …
 
 === admin_panel > mdset:2:val:s<G1>:r:when-addressed:q > mdset:2:un:s<G1>:g0000000003
-type 7 · 22 components · 716 chars
+type 7 · 22 components · 729 chars
 TD | **Undone:** In Muse Lounge, When it answers → back to Chatty
 C amber
   TD | ## Quiet the bot in Muse Lounge
   …
 
 === admin_panel > mdset:2:val:s<G1>:r:off:q
-type 7 · 24 components · 755 chars
+type 7 · 24 components · 768 chars
 SEC | **Done:** In Muse Lounge, When it answers: Chatty → Off
     [Undo] mdset:2:un:s<G1>:g0000000004
 C amber
   …
 
 === admin_panel > mdset:2:val:s<G1>:r:off:q > mdset:2:un:s<G1>:g0000000004
-type 7 · 22 components · 716 chars
+type 7 · 22 components · 729 chars
 TD | **Undone:** In Muse Lounge, When it answers → back to Chatty
 C amber
   TD | ## Quiet the bot in Muse Lounge
   …
 
 === admin_panel > mdset:2:ppl:s<G1>:ig=<SAM>
-type 7 · 24 components · 789 chars
+type 7 · 24 components · 821 chars
 SEC | **Done:** In Muse Lounge, Never answer: @Bob and @spam1 → @Bob, @spam1 and @Sam
     [Undo] mdset:2:un:s<G1>:g0000000005
 C amber
   …
 
 === admin_panel > mdset:2:ppl:s<G1>:ig=<SAM> > mdset:2:un:s<G1>:g0000000005
-type 7 · 22 components · 722 chars
+type 7 · 22 components · 735 chars
 TD | **Undone:** In Muse Lounge, Never answer → back to @Bob and @spam1
 C amber
   TD | ## Quiet the bot in Muse Lounge
@@ -75,7 +75,7 @@ C amber
   …
 
 === admin_panel > mdset:2:rm:s<G1>:ig=<SPAM> > mdset:2:un:s<G1>:g0000000006
-type 7 · 22 components · 722 chars
+type 7 · 22 components · 735 chars
 TD | **Undone:** In Muse Lounge, Never answer → back to @Bob and @spam1
 C amber
   TD | ## Quiet the bot in Muse Lounge
@@ -89,7 +89,7 @@ C amber
   …
 
 === admin_panel > mdset:2:val:s<G1>:ig:=:q > mdset:2:un:s<G1>:g0000000007
-type 7 · 22 components · 722 chars
+type 7 · 22 components · 735 chars
 TD | **Undone:** In Muse Lounge, Never answer → back to @Bob and @spam1
 C amber
   TD | ## Quiet the bot in Muse Lounge
@@ -108,7 +108,7 @@ ROW
   [Refresh] mdset:2:pg:c<G1>.<GENERAL>:y
 
 === admin_panel > mdset:2:pg:c<G1>.<GENERAL>:y > mdset:2:pg:c<G1>.<GENERAL>:q
-type 7 · 21 components · 656 chars
+type 7 · 21 components · 669 chars
 C amber
   TD | ## Quiet the bot in Muse Lounge
   TD | -# You're a server admin here, so you can make the bot quieter and undo what admins changed. The bot's owners get a summary of every change.
@@ -128,7 +128,7 @@ C amber
       - spam1  (<SPAM>)
   SEP
   TD | **Changes admins made here**
-  SEC | All of Muse Lounge: Never answer → @Bob and @spam1 · @you, 2 h ago
+  SEC | All of Muse Lounge: Never answer: added <@<SPAM>> · @you, 2 h ago
   SEC | -# Undo goes back to the owners' setting: @Bob
       [Undo] mdset:2:val:s<G1>:ig:=:q
 ROW

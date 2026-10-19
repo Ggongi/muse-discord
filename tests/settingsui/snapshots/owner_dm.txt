@@ -247,7 +247,7 @@ C blurple
   TD | **Never answer**
   TD | -# Wins over everything else. Owners can't be added.
   ROW
-    MENTIONABLE mdset:2:ppl:d:ig “Nobody yet…” 0-25
+    USERS mdset:2:ppl:d:ig “Nobody yet…” 0-25
   TD | **Other bots**
   ROW
     SELECT mdset:2:set:d:b “Other bots…” 1-1
@@ -575,23 +575,16 @@ ROW
     - Server 42 — 142 members  (s<FILLER>)
     - More servers… — Page 3 of 3  (p2)
 
-=== owner_dm > mdset:2:pg:d:m > mdset:2:ppl:d:ig=<SAM>,<ROLE>
-type 7 · 21 components · 692 chars
-SEC | **Done:** In DMs, Never answer: Nobody → @Sam and @Mods
+=== owner_dm > mdset:2:pg:d:m > mdset:2:ppl:d:ig=<SAM>
+type 7 · 21 components · 682 chars
+SEC | **Done:** In DMs, Never answer: Nobody → @Sam
     [Undo] mdset:2:un:d:g000000000c
 C blurple
   …
 
-=== owner_dm > mdset:2:pg:d:m > mdset:2:ppl:d:ig=<SAM>,<ROLE> > mdset:2:un:d:g000000000c
+=== owner_dm > mdset:2:pg:d:m > mdset:2:ppl:d:ig=<SAM> > mdset:2:un:d:g000000000c
 type 7 · 19 components · 649 chars
 TD | **Undone:** In DMs, Never answer → back to Nobody
-C blurple
-  TD | ## DMs › More settings
-  …
-
-=== owner_dm > mdset:2:pg:d:m > mdset:2:ppl:d:ig
-type 7 · 19 components · 661 chars
-TD | **No change:** DMs already follows Defaults for Never answer.
 C blurple
   TD | ## DMs › More settings
   …
@@ -998,11 +991,11 @@ C blurple
   TD | **Only answer these people** · everyone
   TD | -# Pick people or roles to answer only them in Defaults. Owners always get answers.
   ROW
-    MENTIONABLE mdset:2:ppl:x:al “Everyone (pick to limit)…” 0-25
+    USERS mdset:2:ppl:x:al “Everyone (pick to limit)…” 0-25
   TD | **Never answer**
   TD | -# Wins over everything else. Owners can't be added.
   ROW
-    MENTIONABLE mdset:2:ppl:x:ig “Nobody yet…” 0-25
+    USERS mdset:2:ppl:x:ig “Nobody yet…” 0-25
   TD | **Other bots**
   ROW
     SELECT mdset:2:set:x:b “Other bots…” 1-1
@@ -1615,19 +1608,19 @@ C blurple
   …
 
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m
-type 7 · 28 components · 1194 chars
+type 7 · 28 components · 1207 chars
 C blurple
   TD | ## Muse Lounge › More settings
   SEP
   TD | **Only answer these people** · Same as Defaults: everyone
   TD | -# Pick people or roles to answer only them in Muse Lounge. Owners always get answers.
-  TD | -# To search people and roles, run /settings in Muse Lounge.
+  TD | -# To pick roles, or search everyone there, run /settings in Muse Lounge.
   ROW
-    MENTIONABLE mdset:2:ppl:s<G1>:al “Everyone (pick to limit)…” 0-25
+    USERS mdset:2:ppl:s<G1>:al “Everyone (pick to limit)…” 0-25
   TD | **Never answer** · ● changed here by <@<ADMIN>>, Oct 19 (config.yaml says @Bob)
   TD | -# Wins over everything else. Owners can't be added.
   ROW
-    MENTIONABLE mdset:2:ppl:s<G1>:ig “Nobody yet…” 0-25 defaults=<BOB>,<SPAM>
+    USERS mdset:2:ppl:s<G1>:ig “Nobody yet…” 0-25 defaults=<BOB>,<SPAM>
   TD | **Other bots**
   ROW
     SELECT mdset:2:set:s<G1>:b “Other bots…” 1-1
@@ -2442,19 +2435,19 @@ ROW
   [Back to Pixel Plaza] mdset:2:pg:s<G3>:b
 
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m
-type 7 · 25 components · 980 chars
+type 7 · 25 components · 993 chars
 C blurple
   TD | ## Pixel Plaza › More settings
   SEP
   TD | **Only answer these people** · Same as Defaults: everyone
   TD | -# Pick people or roles to answer only them in Pixel Plaza. Owners always get answers.
-  TD | -# To search people and roles, run /settings in Pixel Plaza.
+  TD | -# To pick roles, or search everyone there, run /settings in Pixel Plaza.
   ROW
-    MENTIONABLE mdset:2:ppl:s<G3>:al “Everyone (pick to limit)…” 0-25
+    USERS mdset:2:ppl:s<G3>:al “Everyone (pick to limit)…” 0-25
   TD | **Never answer**
   TD | -# Wins over everything else. Owners can't be added.
   ROW
-    MENTIONABLE mdset:2:ppl:s<G3>:ig “Nobody yet…” 0-25
+    USERS mdset:2:ppl:s<G3>:ig “Nobody yet…” 0-25
   TD | **Other bots**
   ROW
     SELECT mdset:2:set:s<G3>:b “Other bots…” 1-1
@@ -2792,19 +2785,19 @@ ROW
   [Back to Server 01] mdset:2:pg:s<FILLER>:b
 
 === owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m
-type 7 · 25 components · 972 chars
+type 7 · 25 components · 985 chars
 C blurple
   TD | ## Server 01 › More settings
   SEP
   TD | **Only answer these people** · Same as Defaults: everyone
   TD | -# Pick people or roles to answer only them in Server 01. Owners always get answers.
-  TD | -# To search people and roles, run /settings in Server 01.
+  TD | -# To pick roles, or search everyone there, run /settings in Server 01.
   ROW
-    MENTIONABLE mdset:2:ppl:s<FILLER>:al “Everyone (pick to limit)…” 0-25
+    USERS mdset:2:ppl:s<FILLER>:al “Everyone (pick to limit)…” 0-25
   TD | **Never answer**
   TD | -# Wins over everything else. Owners can't be added.
   ROW
-    MENTIONABLE mdset:2:ppl:s<FILLER>:ig “Nobody yet…” 0-25
+    USERS mdset:2:ppl:s<FILLER>:ig “Nobody yet…” 0-25
   TD | **Other bots**
   ROW
     SELECT mdset:2:set:s<FILLER>:b “Other bots…” 1-1
@@ -3139,23 +3132,16 @@ SEC | **Done:** By default, Only answer these people: Everyone → @Sam
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=x > mdset:2:pg:x:m > mdset:2:ppl:x:ig=<SAM>,<ROLE>
-type 7 · 28 components · 908 chars
-SEC | **Done:** By default, Never answer: Nobody → @Sam and @Mods
+=== owner_dm > mdset:2:go:d=x > mdset:2:pg:x:m > mdset:2:ppl:x:ig=<SAM>
+type 7 · 28 components · 898 chars
+SEC | **Done:** By default, Never answer: Nobody → @Sam
     [Undo] mdset:2:un:x:g000000003f
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=x > mdset:2:pg:x:m > mdset:2:ppl:x:ig=<SAM>,<ROLE> > mdset:2:un:x:g000000003f
+=== owner_dm > mdset:2:go:d=x > mdset:2:pg:x:m > mdset:2:ppl:x:ig=<SAM> > mdset:2:un:x:g000000003f
 type 7 · 26 components · 865 chars
 TD | **Undone:** By default, Never answer → back to Nobody
-C blurple
-  TD | ## Defaults › More settings
-  …
-
-=== owner_dm > mdset:2:go:d=x > mdset:2:pg:x:m > mdset:2:ppl:x:ig
-type 7 · 26 components · 878 chars
-TD | **No change:** Defaults already follows Defaults for Never answer.
 C blurple
   TD | ## Defaults › More settings
   …
@@ -3675,62 +3661,48 @@ C red
   …
 
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:ppl:s<G1>:al=<SAM> > mdset:2:ok:s<G1>:t000000001
-type 7 · 30 components · 1172 chars
+type 7 · 30 components · 1185 chars
 SEC | **Done:** In Muse Lounge, Only answer these people: Everyone → @Sam
     [Undo] mdset:2:un:s<G1>:g000000004e
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:ppl:s<G1>:ig=<SAM>,<ROLE>
-type 7 · 28 components · 1113 chars
-SEC | **Done:** In Muse Lounge, Never answer: @Bob and @spam1 → @Sam and @Mods
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:ppl:s<G1>:ig=<SAM>
+type 7 · 28 components · 1116 chars
+SEC | **Done:** In Muse Lounge, Never answer: @Bob and @spam1 → @Sam
     [Undo] mdset:2:un:s<G1>:g000000004f
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:ppl:s<G1>:ig=<SAM>,<ROLE> > mdset:2:un:s<G1>:g000000004f
-type 7 · 26 components · 1103 chars
-TD | **Undone:** In Muse Lounge, Never answer → back to @Bob and @spam1
-C blurple
-  TD | ## Muse Lounge › More settings
-  …
-
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:ppl:s<G1>:ig
-type 7 · 28 components · 1048 chars
-SEC | **Done:** In Muse Lounge, Never answer: @Bob and @spam1 → Nobody
-    [Undo] mdset:2:un:s<G1>:g0000000050
-C blurple
-  …
-
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:ppl:s<G1>:ig > mdset:2:un:s<G1>:g0000000050
-type 7 · 26 components · 1103 chars
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:ppl:s<G1>:ig=<SAM> > mdset:2:un:s<G1>:g000000004f
+type 7 · 26 components · 1116 chars
 TD | **Undone:** In Muse Lounge, Never answer → back to @Bob and @spam1
 C blurple
   TD | ## Muse Lounge › More settings
   …
 
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:set:s<G1>:b==
-type 7 · 26 components · 1123 chars
+type 7 · 26 components · 1136 chars
 TD | **No change:** Muse Lounge already follows Defaults for Other bots.
 C blurple
   TD | ## Muse Lounge › More settings
   …
 
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:set:s<G1>:b=when-addressed
-type 7 · 26 components · 1155 chars
+type 7 · 26 components · 1168 chars
 TD | **No change:** In Muse Lounge, Other bots is already Answer when they address it, same as Defaults.
 C blurple
   TD | ## Muse Lounge › More settings
   …
 
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:set:s<G1>:b=ignore
-type 7 · 28 components · 1178 chars
+type 7 · 28 components · 1191 chars
 SEC | **Done:** In Muse Lounge, Other bots: Answer when they address it → Ignore other bots
-    [Undo] mdset:2:un:s<G1>:g0000000051
+    [Undo] mdset:2:un:s<G1>:g0000000050
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:set:s<G1>:b=ignore > mdset:2:un:s<G1>:g0000000051
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:set:s<G1>:b=ignore > mdset:2:un:s<G1>:g0000000050
 type 7 · 6 components · 257 chars
 C red
   TD | ## Check before undoing
@@ -3745,14 +3717,14 @@ LABEL “Replies in a row to other bots” — 1 to 50. Blank = no cap here.
   INPUT v style 1 max 7 placeholder=“No cap”
 
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:mod:s<G1>:bx:m > submit
-type 7 · 28 components · 1151 chars
+type 7 · 28 components · 1164 chars
 SEC | **Done:** In Muse Lounge, Replies in a row to other bots: No limit → 12
-    [Undo] mdset:2:un:s<G1>:g0000000052
+    [Undo] mdset:2:un:s<G1>:g0000000051
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:mod:s<G1>:bx:m > submit > mdset:2:un:s<G1>:g0000000052
-type 7 · 26 components · 1133 chars
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:mod:s<G1>:bx:m > submit > mdset:2:un:s<G1>:g0000000051
+type 7 · 26 components · 1146 chars
 TD | **Undone:** In Muse Lounge, Replies in a row to other bots → back to No limit
 C blurple
   TD | ## Muse Lounge › More settings
@@ -3768,13 +3740,13 @@ LABEL “Replies per day (total)” — All replies in Muse Lounge except the ow
   INPUT pd style 1 max 7 placeholder=“No cap”
 
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:mod:s<G1>:c:m > submit
-type 7 · 28 components · 1213 chars
+type 7 · 28 components · 1226 chars
 SEC | **Done:** In Muse Lounge, Replies per person per day: No limit → 12; In Muse Lounge, Replies per day (total): No limit → 12
-    [Undo] mdset:2:un:s<G1>:g0000000053
+    [Undo] mdset:2:un:s<G1>:g0000000052
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:mod:s<G1>:c:m > submit > mdset:2:un:s<G1>:g0000000053
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:mod:s<G1>:c:m > submit > mdset:2:un:s<G1>:g0000000052
 type 7 · 6 components · 348 chars
 C red
   TD | ## Check before undoing
@@ -3782,28 +3754,28 @@ C red
   …
 
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:set:s<G1>:su==
-type 7 · 26 components · 1138 chars
+type 7 · 26 components · 1151 chars
 TD | **No change:** Muse Lounge already follows Defaults for Possible prompt injection.
 C blurple
   TD | ## Muse Lounge › More settings
   …
 
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:set:s<G1>:su=hold-for-review
-type 7 · 26 components · 1161 chars
+type 7 · 26 components · 1174 chars
 TD | **No change:** In Muse Lounge, Possible prompt injection is already Hold for my review, same as Defaults.
 C blurple
   TD | ## Muse Lounge › More settings
   …
 
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:set:s<G1>:su=ignore
-type 7 · 28 components · 1174 chars
+type 7 · 28 components · 1187 chars
 SEC | **Done:** In Muse Lounge, Possible prompt injection: Hold for my review → Drop it
-    [Undo] mdset:2:un:s<G1>:g0000000054
+    [Undo] mdset:2:un:s<G1>:g0000000053
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:set:s<G1>:su=ignore > mdset:2:un:s<G1>:g0000000054
-type 7 · 26 components · 1138 chars
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:m > mdset:2:set:s<G1>:su=ignore > mdset:2:un:s<G1>:g0000000053
+type 7 · 26 components · 1151 chars
 TD | **Undone:** In Muse Lounge, Possible prompt injection → back to Hold for my review
 C blurple
   TD | ## Muse Lounge › More settings
@@ -3812,11 +3784,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:y > mdset:2:fx:s<G1>:ig:-<SPAM>
 type 7 · 15 components · 1212 chars
 SEC | **Done:** In Muse Lounge, Never answer: @Bob and @spam1 → @Bob
-    [Undo] mdset:2:un:s<G1>:g0000000055
+    [Undo] mdset:2:un:s<G1>:g0000000054
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:y > mdset:2:fx:s<G1>:ig:-<SPAM> > mdset:2:un:s<G1>:g0000000055
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:pg:s<G1>:y > mdset:2:fx:s<G1>:ig:-<SPAM> > mdset:2:un:s<G1>:g0000000054
 type 7 · 15 components · 1133 chars
 TD | **Undone:** In Muse Lounge, Never answer → back to @Bob and @spam1
 C blurple
@@ -3840,18 +3812,18 @@ C red
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<GENERAL> > mdset:2:set:c<G1>.<GENERAL>:r=conversational > mdset:2:ok:c<G1>.<GENERAL>:t000000001
 type 7 · 25 components · 1129 chars
 SEC | **Done:** In #general, When it answers: Off → Chatty
-    [Undo] mdset:2:un:c<G1>.<GENERAL>:g0000000056
+    [Undo] mdset:2:un:c<G1>.<GENERAL>:g0000000055
 C blurple
   …
 
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<GENERAL> > mdset:2:set:c<G1>.<GENERAL>:r=when-addressed
 type 7 · 25 components · 1143 chars
 SEC | **Done:** In #general, When it answers: Off → Only when @mentioned
-    [Undo] mdset:2:un:c<G1>.<GENERAL>:g0000000057
+    [Undo] mdset:2:un:c<G1>.<GENERAL>:g0000000056
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<GENERAL> > mdset:2:set:c<G1>.<GENERAL>:r=when-addressed > mdset:2:un:c<G1>.<GENERAL>:g0000000057
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<GENERAL> > mdset:2:set:c<G1>.<GENERAL>:r=when-addressed > mdset:2:un:c<G1>.<GENERAL>:g0000000056
 type 7 · 6 components · 258 chars
 C red
   TD | ## Check before undoing
@@ -3882,11 +3854,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<GENERAL> > mdset:2:val:c<G1>.<GENERAL>:~media.enabled:on:b
 type 7 · 25 components · 1114 chars
 SEC | **Done:** In #general, Image and video generation: Off → On
-    [Undo] mdset:2:un:c<G1>.<GENERAL>:g0000000058
+    [Undo] mdset:2:un:c<G1>.<GENERAL>:g0000000057
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<GENERAL> > mdset:2:val:c<G1>.<GENERAL>:~media.enabled:on:b > mdset:2:un:c<G1>.<GENERAL>:g0000000058
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<GENERAL> > mdset:2:val:c<G1>.<GENERAL>:~media.enabled:on:b > mdset:2:un:c<G1>.<GENERAL>:g0000000057
 type 7 · 23 components · 1080 chars
 TD | **Undone:** In #general, Image and video generation → back to Off
 C blurple
@@ -4353,11 +4325,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<HIDDEN> > mdset:2:set:c<G1>.<HIDDEN>:r=when-addressed
 type 7 · 25 components · 1187 chars
 SEC | **Done:** In #hidden, When it answers: Chatty → Only when @mentioned
-    [Undo] mdset:2:un:c<G1>.<HIDDEN>:g0000000059
+    [Undo] mdset:2:un:c<G1>.<HIDDEN>:g0000000058
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<HIDDEN> > mdset:2:set:c<G1>.<HIDDEN>:r=when-addressed > mdset:2:un:c<G1>.<HIDDEN>:g0000000059
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<HIDDEN> > mdset:2:set:c<G1>.<HIDDEN>:r=when-addressed > mdset:2:un:c<G1>.<HIDDEN>:g0000000058
 type 7 · 6 components · 256 chars
 C red
   TD | ## Check before undoing
@@ -4367,11 +4339,11 @@ C red
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<HIDDEN> > mdset:2:set:c<G1>.<HIDDEN>:r=off
 type 7 · 25 components · 1218 chars
 SEC | **Done:** In #hidden, When it answers: Chatty → Off
-    [Undo] mdset:2:un:c<G1>.<HIDDEN>:g000000005a
+    [Undo] mdset:2:un:c<G1>.<HIDDEN>:g0000000059
 C grey
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<HIDDEN> > mdset:2:set:c<G1>.<HIDDEN>:r=off > mdset:2:un:c<G1>.<HIDDEN>:g000000005a
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<HIDDEN> > mdset:2:set:c<G1>.<HIDDEN>:r=off > mdset:2:un:c<G1>.<HIDDEN>:g0000000059
 type 7 · 6 components · 256 chars
 C red
   TD | ## Check before undoing
@@ -4395,11 +4367,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<HIDDEN> > mdset:2:val:c<G1>.<HIDDEN>:~media.enabled:on:b
 type 7 · 25 components · 1155 chars
 SEC | **Done:** In #hidden, Image and video generation: Off → On
-    [Undo] mdset:2:un:c<G1>.<HIDDEN>:g000000005b
+    [Undo] mdset:2:un:c<G1>.<HIDDEN>:g000000005a
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<HIDDEN> > mdset:2:val:c<G1>.<HIDDEN>:~media.enabled:on:b > mdset:2:un:c<G1>.<HIDDEN>:g000000005b
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<HIDDEN> > mdset:2:val:c<G1>.<HIDDEN>:~media.enabled:on:b > mdset:2:un:c<G1>.<HIDDEN>:g000000005a
 type 7 · 23 components · 1124 chars
 TD | **Undone:** In #hidden, Image and video generation → back to Off
 C blurple
@@ -4409,11 +4381,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<HIDDEN> > mdset:2:pz:c<G1>.<HIDDEN>
 type 7 · 25 components · 1218 chars
 SEC | **Done:** In #hidden, When it answers: Chatty → Off
-    [Undo] mdset:2:un:c<G1>.<HIDDEN>:g000000005c
+    [Undo] mdset:2:un:c<G1>.<HIDDEN>:g000000005b
 C grey
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<HIDDEN> > mdset:2:pz:c<G1>.<HIDDEN> > mdset:2:un:c<G1>.<HIDDEN>:g000000005c
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<HIDDEN> > mdset:2:pz:c<G1>.<HIDDEN> > mdset:2:un:c<G1>.<HIDDEN>:g000000005b
 type 7 · 6 components · 256 chars
 C red
   TD | ## Check before undoing
@@ -4874,11 +4846,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<LOBBY> > mdset:2:set:c<G1>.<LOBBY>:r=when-addressed
 type 7 · 25 components · 1124 chars
 SEC | **Done:** In #lobby, When it answers: Chatty → Only when @mentioned
-    [Undo] mdset:2:un:c<G1>.<LOBBY>:g000000005d
+    [Undo] mdset:2:un:c<G1>.<LOBBY>:g000000005c
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<LOBBY> > mdset:2:set:c<G1>.<LOBBY>:r=when-addressed > mdset:2:un:c<G1>.<LOBBY>:g000000005d
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<LOBBY> > mdset:2:set:c<G1>.<LOBBY>:r=when-addressed > mdset:2:un:c<G1>.<LOBBY>:g000000005c
 type 7 · 6 components · 254 chars
 C red
   TD | ## Check before undoing
@@ -4888,11 +4860,11 @@ C red
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<LOBBY> > mdset:2:set:c<G1>.<LOBBY>:r=off
 type 7 · 25 components · 1154 chars
 SEC | **Done:** In #lobby, When it answers: Chatty → Off
-    [Undo] mdset:2:un:c<G1>.<LOBBY>:g000000005e
+    [Undo] mdset:2:un:c<G1>.<LOBBY>:g000000005d
 C grey
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<LOBBY> > mdset:2:set:c<G1>.<LOBBY>:r=off > mdset:2:un:c<G1>.<LOBBY>:g000000005e
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<LOBBY> > mdset:2:set:c<G1>.<LOBBY>:r=off > mdset:2:un:c<G1>.<LOBBY>:g000000005d
 type 7 · 6 components · 254 chars
 C red
   TD | ## Check before undoing
@@ -4916,11 +4888,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<LOBBY> > mdset:2:val:c<G1>.<LOBBY>:~media.enabled:on:b
 type 7 · 25 components · 1092 chars
 SEC | **Done:** In #lobby, Image and video generation: Off → On
-    [Undo] mdset:2:un:c<G1>.<LOBBY>:g000000005f
+    [Undo] mdset:2:un:c<G1>.<LOBBY>:g000000005e
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<LOBBY> > mdset:2:val:c<G1>.<LOBBY>:~media.enabled:on:b > mdset:2:un:c<G1>.<LOBBY>:g000000005f
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<LOBBY> > mdset:2:val:c<G1>.<LOBBY>:~media.enabled:on:b > mdset:2:un:c<G1>.<LOBBY>:g000000005e
 type 7 · 23 components · 1061 chars
 TD | **Undone:** In #lobby, Image and video generation → back to Off
 C blurple
@@ -4930,11 +4902,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<LOBBY> > mdset:2:pz:c<G1>.<LOBBY>
 type 7 · 25 components · 1154 chars
 SEC | **Done:** In #lobby, When it answers: Chatty → Off
-    [Undo] mdset:2:un:c<G1>.<LOBBY>:g0000000060
+    [Undo] mdset:2:un:c<G1>.<LOBBY>:g000000005f
 C grey
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<LOBBY> > mdset:2:pz:c<G1>.<LOBBY> > mdset:2:un:c<G1>.<LOBBY>:g0000000060
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<LOBBY> > mdset:2:pz:c<G1>.<LOBBY> > mdset:2:un:c<G1>.<LOBBY>:g000000005f
 type 7 · 6 components · 254 chars
 C red
   TD | ## Check before undoing
@@ -5394,11 +5366,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<MUSECHAT> > mdset:2:set:c<G1>.<MUSECHAT>:r=when-addressed
 type 7 · 25 components · 1148 chars
 SEC | **Done:** In #muse-chat, When it answers: Chatty → Only when @mentioned
-    [Undo] mdset:2:un:c<G1>.<MUSECHAT>:g0000000061
+    [Undo] mdset:2:un:c<G1>.<MUSECHAT>:g0000000060
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<MUSECHAT> > mdset:2:set:c<G1>.<MUSECHAT>:r=when-addressed > mdset:2:un:c<G1>.<MUSECHAT>:g0000000061
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<MUSECHAT> > mdset:2:set:c<G1>.<MUSECHAT>:r=when-addressed > mdset:2:un:c<G1>.<MUSECHAT>:g0000000060
 type 7 · 6 components · 262 chars
 C red
   TD | ## Check before undoing
@@ -5408,11 +5380,11 @@ C red
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<MUSECHAT> > mdset:2:set:c<G1>.<MUSECHAT>:r=off
 type 7 · 25 components · 1182 chars
 SEC | **Done:** In #muse-chat, When it answers: Chatty → Off
-    [Undo] mdset:2:un:c<G1>.<MUSECHAT>:g0000000062
+    [Undo] mdset:2:un:c<G1>.<MUSECHAT>:g0000000061
 C grey
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<MUSECHAT> > mdset:2:set:c<G1>.<MUSECHAT>:r=off > mdset:2:un:c<G1>.<MUSECHAT>:g0000000062
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<MUSECHAT> > mdset:2:set:c<G1>.<MUSECHAT>:r=off > mdset:2:un:c<G1>.<MUSECHAT>:g0000000061
 type 7 · 6 components · 262 chars
 C red
   TD | ## Check before undoing
@@ -5436,11 +5408,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<MUSECHAT> > mdset:2:val:c<G1>.<MUSECHAT>:~media.enabled:on:b
 type 7 · 25 components · 1116 chars
 SEC | **Done:** In #muse-chat, Image and video generation: Off → On
-    [Undo] mdset:2:un:c<G1>.<MUSECHAT>:g0000000063
+    [Undo] mdset:2:un:c<G1>.<MUSECHAT>:g0000000062
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<MUSECHAT> > mdset:2:val:c<G1>.<MUSECHAT>:~media.enabled:on:b > mdset:2:un:c<G1>.<MUSECHAT>:g0000000063
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<MUSECHAT> > mdset:2:val:c<G1>.<MUSECHAT>:~media.enabled:on:b > mdset:2:un:c<G1>.<MUSECHAT>:g0000000062
 type 7 · 23 components · 1085 chars
 TD | **Undone:** In #muse-chat, Image and video generation → back to Off
 C blurple
@@ -5450,11 +5422,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<MUSECHAT> > mdset:2:pz:c<G1>.<MUSECHAT>
 type 7 · 25 components · 1182 chars
 SEC | **Done:** In #muse-chat, When it answers: Chatty → Off
-    [Undo] mdset:2:un:c<G1>.<MUSECHAT>:g0000000064
+    [Undo] mdset:2:un:c<G1>.<MUSECHAT>:g0000000063
 C grey
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<MUSECHAT> > mdset:2:pz:c<G1>.<MUSECHAT> > mdset:2:un:c<G1>.<MUSECHAT>:g0000000064
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<MUSECHAT> > mdset:2:pz:c<G1>.<MUSECHAT> > mdset:2:un:c<G1>.<MUSECHAT>:g0000000063
 type 7 · 6 components · 262 chars
 C red
   TD | ## Check before undoing
@@ -5926,11 +5898,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<FILLER> > mdset:2:set:c<G1>.<FILLER>:r=when-addressed
 type 7 · 25 components · 1142 chars
 SEC | **Done:** In #room-001, When it answers: Chatty → Only when @mentioned
-    [Undo] mdset:2:un:c<G1>.<FILLER>:g0000000065
+    [Undo] mdset:2:un:c<G1>.<FILLER>:g0000000064
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<FILLER> > mdset:2:set:c<G1>.<FILLER>:r=when-addressed > mdset:2:un:c<G1>.<FILLER>:g0000000065
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<FILLER> > mdset:2:set:c<G1>.<FILLER>:r=when-addressed > mdset:2:un:c<G1>.<FILLER>:g0000000064
 type 7 · 6 components · 260 chars
 C red
   TD | ## Check before undoing
@@ -5940,11 +5912,11 @@ C red
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<FILLER> > mdset:2:set:c<G1>.<FILLER>:r=off
 type 7 · 25 components · 1175 chars
 SEC | **Done:** In #room-001, When it answers: Chatty → Off
-    [Undo] mdset:2:un:c<G1>.<FILLER>:g0000000066
+    [Undo] mdset:2:un:c<G1>.<FILLER>:g0000000065
 C grey
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<FILLER> > mdset:2:set:c<G1>.<FILLER>:r=off > mdset:2:un:c<G1>.<FILLER>:g0000000066
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<FILLER> > mdset:2:set:c<G1>.<FILLER>:r=off > mdset:2:un:c<G1>.<FILLER>:g0000000065
 type 7 · 6 components · 260 chars
 C red
   TD | ## Check before undoing
@@ -5968,11 +5940,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<FILLER> > mdset:2:val:c<G1>.<FILLER>:~media.enabled:on:b
 type 7 · 25 components · 1110 chars
 SEC | **Done:** In #room-001, Image and video generation: Off → On
-    [Undo] mdset:2:un:c<G1>.<FILLER>:g0000000067
+    [Undo] mdset:2:un:c<G1>.<FILLER>:g0000000066
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<FILLER> > mdset:2:val:c<G1>.<FILLER>:~media.enabled:on:b > mdset:2:un:c<G1>.<FILLER>:g0000000067
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<FILLER> > mdset:2:val:c<G1>.<FILLER>:~media.enabled:on:b > mdset:2:un:c<G1>.<FILLER>:g0000000066
 type 7 · 23 components · 1079 chars
 TD | **Undone:** In #room-001, Image and video generation → back to Off
 C blurple
@@ -5982,11 +5954,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<FILLER> > mdset:2:pz:c<G1>.<FILLER>
 type 7 · 25 components · 1175 chars
 SEC | **Done:** In #room-001, When it answers: Chatty → Off
-    [Undo] mdset:2:un:c<G1>.<FILLER>:g0000000068
+    [Undo] mdset:2:un:c<G1>.<FILLER>:g0000000067
 C grey
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<FILLER> > mdset:2:pz:c<G1>.<FILLER> > mdset:2:un:c<G1>.<FILLER>:g0000000068
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=<FILLER> > mdset:2:pz:c<G1>.<FILLER> > mdset:2:un:c<G1>.<FILLER>:g0000000067
 type 7 · 6 components · 260 chars
 C red
   TD | ## Check before undoing
@@ -6781,10 +6753,10 @@ ROW
 type 7 · 28 components · 826 chars
 SEC | **Done:** In Pixel Plaza, Welcome new members: Off → On
 SEC | Welcomes go to: The server's system channel, #art.
-    [Undo] mdset:2:un:s<G3>:g0000000069
+    [Undo] mdset:2:un:s<G3>:g0000000068
   …
 
-=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:e > mdset:2:val:s<G3>:~welcome.enabled:on:e > mdset:2:un:s<G3>:g0000000069
+=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:e > mdset:2:val:s<G3>:~welcome.enabled:on:e > mdset:2:un:s<G3>:g0000000068
 type 7 · 26 components · 763 chars
 TD | **Undone:** In Pixel Plaza, Welcome new members → back to Off
 C blurple
@@ -6794,11 +6766,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:e > mdset:2:set:s<G3>:~welcome.channel=<ART>
 type 7 · 28 components · 773 chars
 SEC | **Done:** In Pixel Plaza, Welcome channel: The server's system channel → #art
-    [Undo] mdset:2:un:s<G3>:g000000006a
+    [Undo] mdset:2:un:s<G3>:g0000000069
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:e > mdset:2:set:s<G3>:~welcome.channel=<ART> > mdset:2:un:s<G3>:g000000006a
+=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:e > mdset:2:set:s<G3>:~welcome.channel=<ART> > mdset:2:un:s<G3>:g0000000069
 type 7 · 26 components · 783 chars
 TD | **Undone:** In Pixel Plaza, Welcome channel → back to The server's system channel
 C blurple
@@ -6829,11 +6801,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:e > mdset:2:val:s<G3>:~media.enabled:on:e
 type 7 · 28 components · 782 chars
 SEC | **Done:** In Pixel Plaza, Image and video generation: Off → On
-    [Undo] mdset:2:un:s<G3>:g000000006b
+    [Undo] mdset:2:un:s<G3>:g000000006a
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:e > mdset:2:val:s<G3>:~media.enabled:on:e > mdset:2:un:s<G3>:g000000006b
+=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:e > mdset:2:val:s<G3>:~media.enabled:on:e > mdset:2:un:s<G3>:g000000006a
 type 7 · 26 components · 770 chars
 TD | **Undone:** In Pixel Plaza, Image and video generation → back to Off
 C blurple
@@ -6857,11 +6829,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:e > mdset:2:set:s<G3>:~media.who=everyone
 type 7 · 28 components · 818 chars
 SEC | **Done:** In Pixel Plaza, Who can ask for images and video: Only you → Everyone
-    [Undo] mdset:2:un:s<G3>:g000000006c
+    [Undo] mdset:2:un:s<G3>:g000000006b
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:e > mdset:2:set:s<G3>:~media.who=everyone > mdset:2:un:s<G3>:g000000006c
+=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:e > mdset:2:set:s<G3>:~media.who=everyone > mdset:2:un:s<G3>:g000000006b
 type 7 · 26 components · 781 chars
 TD | **Undone:** In Pixel Plaza, Who can ask for images and video → back to Only you
 C blurple
@@ -6885,11 +6857,11 @@ LABEL “Generations per day” — 0 to 1,000. Blank = no cap here.
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:e > mdset:2:mod:s<G3>:mpd:e > submit
 type 7 · 28 components · 783 chars
 SEC | **Done:** In Pixel Plaza, Generations per day: No limit → 12
-    [Undo] mdset:2:un:s<G3>:g000000006d
+    [Undo] mdset:2:un:s<G3>:g000000006c
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:e > mdset:2:mod:s<G3>:mpd:e > submit > mdset:2:un:s<G3>:g000000006d
+=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:e > mdset:2:mod:s<G3>:mpd:e > submit > mdset:2:un:s<G3>:g000000006c
 type 7 · 26 components · 768 chars
 TD | **Undone:** In Pixel Plaza, Generations per day → back to No limit
 C blurple
@@ -6952,55 +6924,48 @@ C red
   …
 
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:ppl:s<G3>:al=<SAM> > mdset:2:ok:s<G3>:t000000001
-type 7 · 30 components · 1096 chars
+type 7 · 30 components · 1109 chars
 SEC | **Done:** In Pixel Plaza, Only answer these people: Everyone → @Sam
+    [Undo] mdset:2:un:s<G3>:g000000006d
+C blurple
+  …
+
+=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:ppl:s<G3>:ig=<SAM>
+type 7 · 28 components · 1083 chars
+SEC | **Done:** In Pixel Plaza, Never answer: Nobody → @Sam
     [Undo] mdset:2:un:s<G3>:g000000006e
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:ppl:s<G3>:ig=<SAM>,<ROLE>
-type 7 · 28 components · 1080 chars
-SEC | **Done:** In Pixel Plaza, Never answer: Nobody → @Sam and @Mods
-    [Undo] mdset:2:un:s<G3>:g000000006f
-C blurple
-  …
-
-=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:ppl:s<G3>:ig=<SAM>,<ROLE> > mdset:2:un:s<G3>:g000000006f
-type 7 · 26 components · 1037 chars
+=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:ppl:s<G3>:ig=<SAM> > mdset:2:un:s<G3>:g000000006e
+type 7 · 26 components · 1050 chars
 TD | **Undone:** In Pixel Plaza, Never answer → back to Nobody
 C blurple
   TD | ## Pixel Plaza › More settings
   …
 
-=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:ppl:s<G3>:ig
-type 7 · 26 components · 1049 chars
-TD | **No change:** Pixel Plaza already follows Defaults for Never answer.
-C blurple
-  TD | ## Pixel Plaza › More settings
-  …
-
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:set:s<G3>:b==
-type 7 · 26 components · 1047 chars
+type 7 · 26 components · 1060 chars
 TD | **No change:** Pixel Plaza already follows Defaults for Other bots.
 C blurple
   TD | ## Pixel Plaza › More settings
   …
 
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:set:s<G3>:b=when-addressed
-type 7 · 26 components · 1079 chars
+type 7 · 26 components · 1092 chars
 TD | **No change:** In Pixel Plaza, Other bots is already Answer when they address it, same as Defaults.
 C blurple
   TD | ## Pixel Plaza › More settings
   …
 
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:set:s<G3>:b=ignore
-type 7 · 28 components · 1102 chars
+type 7 · 28 components · 1115 chars
 SEC | **Done:** In Pixel Plaza, Other bots: Answer when they address it → Ignore other bots
-    [Undo] mdset:2:un:s<G3>:g0000000070
+    [Undo] mdset:2:un:s<G3>:g000000006f
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:set:s<G3>:b=ignore > mdset:2:un:s<G3>:g0000000070
+=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:set:s<G3>:b=ignore > mdset:2:un:s<G3>:g000000006f
 type 7 · 6 components · 257 chars
 C red
   TD | ## Check before undoing
@@ -7015,14 +6980,14 @@ LABEL “Replies in a row to other bots” — 1 to 50. Blank = no cap here.
   INPUT v style 1 max 7 placeholder=“No cap”
 
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:mod:s<G3>:bx:m > submit
-type 7 · 28 components · 1075 chars
+type 7 · 28 components · 1088 chars
 SEC | **Done:** In Pixel Plaza, Replies in a row to other bots: No limit → 12
-    [Undo] mdset:2:un:s<G3>:g0000000071
+    [Undo] mdset:2:un:s<G3>:g0000000070
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:mod:s<G3>:bx:m > submit > mdset:2:un:s<G3>:g0000000071
-type 7 · 26 components · 1057 chars
+=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:mod:s<G3>:bx:m > submit > mdset:2:un:s<G3>:g0000000070
+type 7 · 26 components · 1070 chars
 TD | **Undone:** In Pixel Plaza, Replies in a row to other bots → back to No limit
 C blurple
   TD | ## Pixel Plaza › More settings
@@ -7038,13 +7003,13 @@ LABEL “Replies per day (total)” — All replies in Pixel Plaza except the ow
   INPUT pd style 1 max 7 placeholder=“No cap”
 
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:mod:s<G3>:c:m > submit
-type 7 · 28 components · 1137 chars
+type 7 · 28 components · 1150 chars
 SEC | **Done:** In Pixel Plaza, Replies per person per day: No limit → 12; In Pixel Plaza, Replies per day (total): No limit → 12
-    [Undo] mdset:2:un:s<G3>:g0000000072
+    [Undo] mdset:2:un:s<G3>:g0000000071
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:mod:s<G3>:c:m > submit > mdset:2:un:s<G3>:g0000000072
+=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:mod:s<G3>:c:m > submit > mdset:2:un:s<G3>:g0000000071
 type 7 · 6 components · 350 chars
 C red
   TD | ## Check before undoing
@@ -7052,28 +7017,28 @@ C red
   …
 
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:set:s<G3>:su==
-type 7 · 26 components · 1062 chars
+type 7 · 26 components · 1075 chars
 TD | **No change:** Pixel Plaza already follows Defaults for Possible prompt injection.
 C blurple
   TD | ## Pixel Plaza › More settings
   …
 
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:set:s<G3>:su=hold-for-review
-type 7 · 26 components · 1085 chars
+type 7 · 26 components · 1098 chars
 TD | **No change:** In Pixel Plaza, Possible prompt injection is already Hold for my review, same as Defaults.
 C blurple
   TD | ## Pixel Plaza › More settings
   …
 
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:set:s<G3>:su=ignore
-type 7 · 28 components · 1098 chars
+type 7 · 28 components · 1111 chars
 SEC | **Done:** In Pixel Plaza, Possible prompt injection: Hold for my review → Drop it
-    [Undo] mdset:2:un:s<G3>:g0000000073
+    [Undo] mdset:2:un:s<G3>:g0000000072
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:set:s<G3>:su=ignore > mdset:2:un:s<G3>:g0000000073
-type 7 · 26 components · 1062 chars
+=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:set:s<G3>:su=ignore > mdset:2:un:s<G3>:g0000000072
+type 7 · 26 components · 1075 chars
 TD | **Undone:** In Pixel Plaza, Possible prompt injection → back to Hold for my review
 C blurple
   TD | ## Pixel Plaza › More settings
@@ -7096,11 +7061,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:gc:s<G3>=<ART> > mdset:2:set:c<G3>.<ART>:r=when-addressed
 type 7 · 25 components · 818 chars
 SEC | **Done:** In #art, When it answers: Chatty → Only when @mentioned
-    [Undo] mdset:2:un:c<G3>.<ART>:g0000000074
+    [Undo] mdset:2:un:c<G3>.<ART>:g0000000073
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:gc:s<G3>=<ART> > mdset:2:set:c<G3>.<ART>:r=when-addressed > mdset:2:un:c<G3>.<ART>:g0000000074
+=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:gc:s<G3>=<ART> > mdset:2:set:c<G3>.<ART>:r=when-addressed > mdset:2:un:c<G3>.<ART>:g0000000073
 type 7 · 6 components · 251 chars
 C red
   TD | ## Check before undoing
@@ -7110,11 +7075,11 @@ C red
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:gc:s<G3>=<ART> > mdset:2:set:c<G3>.<ART>:r=off
 type 7 · 25 components · 846 chars
 SEC | **Done:** In #art, When it answers: Chatty → Off
-    [Undo] mdset:2:un:c<G3>.<ART>:g0000000075
+    [Undo] mdset:2:un:c<G3>.<ART>:g0000000074
 C grey
   …
 
-=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:gc:s<G3>=<ART> > mdset:2:set:c<G3>.<ART>:r=off > mdset:2:un:c<G3>.<ART>:g0000000075
+=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:gc:s<G3>=<ART> > mdset:2:set:c<G3>.<ART>:r=off > mdset:2:un:c<G3>.<ART>:g0000000074
 type 7 · 6 components · 251 chars
 C red
   TD | ## Check before undoing
@@ -7138,11 +7103,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:gc:s<G3>=<ART> > mdset:2:val:c<G3>.<ART>:~media.enabled:on:b
 type 7 · 25 components · 786 chars
 SEC | **Done:** In #art, Image and video generation: Off → On
-    [Undo] mdset:2:un:c<G3>.<ART>:g0000000076
+    [Undo] mdset:2:un:c<G3>.<ART>:g0000000075
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:gc:s<G3>=<ART> > mdset:2:val:c<G3>.<ART>:~media.enabled:on:b > mdset:2:un:c<G3>.<ART>:g0000000076
+=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:gc:s<G3>=<ART> > mdset:2:val:c<G3>.<ART>:~media.enabled:on:b > mdset:2:un:c<G3>.<ART>:g0000000075
 type 7 · 23 components · 755 chars
 TD | **Undone:** In #art, Image and video generation → back to Off
 C blurple
@@ -7152,11 +7117,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G3> > mdset:2:gc:s<G3>=<ART> > mdset:2:pz:c<G3>.<ART>
 type 7 · 25 components · 846 chars
 SEC | **Done:** In #art, When it answers: Chatty → Off
-    [Undo] mdset:2:un:c<G3>.<ART>:g0000000077
+    [Undo] mdset:2:un:c<G3>.<ART>:g0000000076
 C grey
   …
 
-=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:gc:s<G3>=<ART> > mdset:2:pz:c<G3>.<ART> > mdset:2:un:c<G3>.<ART>:g0000000077
+=== owner_dm > mdset:2:go:d=s<G3> > mdset:2:gc:s<G3>=<ART> > mdset:2:pz:c<G3>.<ART> > mdset:2:un:c<G3>.<ART>:g0000000076
 type 7 · 6 components · 251 chars
 C red
   TD | ## Check before undoing
@@ -7445,10 +7410,10 @@ ROW
 type 7 · 26 components · 866 chars
 SEC | **Done:** In Server 01, Welcome new members: Off → On
 SEC | ⚠ Server 01 has no system channel, so welcomes are skipped. Pick a channel.
-    [Undo] mdset:2:un:s<FILLER>:g0000000078
+    [Undo] mdset:2:un:s<FILLER>:g0000000077
   …
 
-=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:e > mdset:2:val:s<FILLER>:~welcome.enabled:on:e > mdset:2:un:s<FILLER>:g0000000078
+=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:e > mdset:2:val:s<FILLER>:~welcome.enabled:on:e > mdset:2:un:s<FILLER>:g0000000077
 type 7 · 24 components · 778 chars
 TD | **Undone:** In Server 01, Welcome new members → back to Off
 C blurple
@@ -7479,11 +7444,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:e > mdset:2:val:s<FILLER>:~media.enabled:on:e
 type 7 · 26 components · 797 chars
 SEC | **Done:** In Server 01, Image and video generation: Off → On
-    [Undo] mdset:2:un:s<FILLER>:g0000000079
+    [Undo] mdset:2:un:s<FILLER>:g0000000078
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:e > mdset:2:val:s<FILLER>:~media.enabled:on:e > mdset:2:un:s<FILLER>:g0000000079
+=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:e > mdset:2:val:s<FILLER>:~media.enabled:on:e > mdset:2:un:s<FILLER>:g0000000078
 type 7 · 24 components · 785 chars
 TD | **Undone:** In Server 01, Image and video generation → back to Off
 C blurple
@@ -7507,11 +7472,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:e > mdset:2:set:s<FILLER>:~media.who=everyone
 type 7 · 26 components · 833 chars
 SEC | **Done:** In Server 01, Who can ask for images and video: Only you → Everyone
-    [Undo] mdset:2:un:s<FILLER>:g000000007a
+    [Undo] mdset:2:un:s<FILLER>:g0000000079
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:e > mdset:2:set:s<FILLER>:~media.who=everyone > mdset:2:un:s<FILLER>:g000000007a
+=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:e > mdset:2:set:s<FILLER>:~media.who=everyone > mdset:2:un:s<FILLER>:g0000000079
 type 7 · 24 components · 796 chars
 TD | **Undone:** In Server 01, Who can ask for images and video → back to Only you
 C blurple
@@ -7535,11 +7500,11 @@ LABEL “Generations per day” — 0 to 1,000. Blank = no cap here.
 === owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:e > mdset:2:mod:s<FILLER>:mpd:e > submit
 type 7 · 26 components · 798 chars
 SEC | **Done:** In Server 01, Generations per day: No limit → 12
-    [Undo] mdset:2:un:s<FILLER>:g000000007b
+    [Undo] mdset:2:un:s<FILLER>:g000000007a
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:e > mdset:2:mod:s<FILLER>:mpd:e > submit > mdset:2:un:s<FILLER>:g000000007b
+=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:e > mdset:2:mod:s<FILLER>:mpd:e > submit > mdset:2:un:s<FILLER>:g000000007a
 type 7 · 24 components · 783 chars
 TD | **Undone:** In Server 01, Generations per day → back to No limit
 C blurple
@@ -7599,55 +7564,48 @@ C red
   …
 
 === owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:ppl:s<FILLER>:al=<SAM> > mdset:2:ok:s<FILLER>:t000000001
-type 7 · 30 components · 1086 chars
+type 7 · 30 components · 1099 chars
 SEC | **Done:** In Server 01, Only answer these people: Everyone → @Sam
+    [Undo] mdset:2:un:s<FILLER>:g000000007b
+C blurple
+  …
+
+=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:ppl:s<FILLER>:ig=<SAM>
+type 7 · 28 components · 1073 chars
+SEC | **Done:** In Server 01, Never answer: Nobody → @Sam
     [Undo] mdset:2:un:s<FILLER>:g000000007c
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:ppl:s<FILLER>:ig=<SAM>,<ROLE>
-type 7 · 28 components · 1070 chars
-SEC | **Done:** In Server 01, Never answer: Nobody → @Sam and @Mods
-    [Undo] mdset:2:un:s<FILLER>:g000000007d
-C blurple
-  …
-
-=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:ppl:s<FILLER>:ig=<SAM>,<ROLE> > mdset:2:un:s<FILLER>:g000000007d
-type 7 · 26 components · 1027 chars
+=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:ppl:s<FILLER>:ig=<SAM> > mdset:2:un:s<FILLER>:g000000007c
+type 7 · 26 components · 1040 chars
 TD | **Undone:** In Server 01, Never answer → back to Nobody
 C blurple
   TD | ## Server 01 › More settings
   …
 
-=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:ppl:s<FILLER>:ig
-type 7 · 26 components · 1039 chars
-TD | **No change:** Server 01 already follows Defaults for Never answer.
-C blurple
-  TD | ## Server 01 › More settings
-  …
-
 === owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:set:s<FILLER>:b==
-type 7 · 26 components · 1037 chars
+type 7 · 26 components · 1050 chars
 TD | **No change:** Server 01 already follows Defaults for Other bots.
 C blurple
   TD | ## Server 01 › More settings
   …
 
 === owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:set:s<FILLER>:b=when-addressed
-type 7 · 26 components · 1069 chars
+type 7 · 26 components · 1082 chars
 TD | **No change:** In Server 01, Other bots is already Answer when they address it, same as Defaults.
 C blurple
   TD | ## Server 01 › More settings
   …
 
 === owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:set:s<FILLER>:b=ignore
-type 7 · 28 components · 1092 chars
+type 7 · 28 components · 1105 chars
 SEC | **Done:** In Server 01, Other bots: Answer when they address it → Ignore other bots
-    [Undo] mdset:2:un:s<FILLER>:g000000007e
+    [Undo] mdset:2:un:s<FILLER>:g000000007d
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:set:s<FILLER>:b=ignore > mdset:2:un:s<FILLER>:g000000007e
+=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:set:s<FILLER>:b=ignore > mdset:2:un:s<FILLER>:g000000007d
 type 7 · 6 components · 253 chars
 C red
   TD | ## Check before undoing
@@ -7662,14 +7620,14 @@ LABEL “Replies in a row to other bots” — 1 to 50. Blank = no cap here.
   INPUT v style 1 max 7 placeholder=“No cap”
 
 === owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:mod:s<FILLER>:bx:m > submit
-type 7 · 28 components · 1065 chars
+type 7 · 28 components · 1078 chars
 SEC | **Done:** In Server 01, Replies in a row to other bots: No limit → 12
-    [Undo] mdset:2:un:s<FILLER>:g000000007f
+    [Undo] mdset:2:un:s<FILLER>:g000000007e
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:mod:s<FILLER>:bx:m > submit > mdset:2:un:s<FILLER>:g000000007f
-type 7 · 26 components · 1047 chars
+=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:mod:s<FILLER>:bx:m > submit > mdset:2:un:s<FILLER>:g000000007e
+type 7 · 26 components · 1060 chars
 TD | **Undone:** In Server 01, Replies in a row to other bots → back to No limit
 C blurple
   TD | ## Server 01 › More settings
@@ -7685,42 +7643,42 @@ LABEL “Replies per day (total)” — All replies in Server 01 except the owne
   INPUT pd style 1 max 7 placeholder=“No cap”
 
 === owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:mod:s<FILLER>:c:m > submit
-type 7 · 28 components · 1125 chars
+type 7 · 28 components · 1138 chars
 SEC | **Done:** In Server 01, Replies per person per day: No limit → 12; In Server 01, Replies per day (total): No limit → 12
-    [Undo] mdset:2:un:s<FILLER>:g0000000080
+    [Undo] mdset:2:un:s<FILLER>:g000000007f
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:mod:s<FILLER>:c:m > submit > mdset:2:un:s<FILLER>:g0000000080
-type 7 · 26 components · 1101 chars
+=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:mod:s<FILLER>:c:m > submit > mdset:2:un:s<FILLER>:g000000007f
+type 7 · 26 components · 1114 chars
 TD | **Undone:** In Server 01, Replies per day (total) → back to No limit; In Server 01, Replies per person per day → back to No limit
 C blurple
   TD | ## Server 01 › More settings
   …
 
 === owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:set:s<FILLER>:su==
-type 7 · 26 components · 1052 chars
+type 7 · 26 components · 1065 chars
 TD | **No change:** Server 01 already follows Defaults for Possible prompt injection.
 C blurple
   TD | ## Server 01 › More settings
   …
 
 === owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:set:s<FILLER>:su=hold-for-review
-type 7 · 26 components · 1075 chars
+type 7 · 26 components · 1088 chars
 TD | **No change:** In Server 01, Possible prompt injection is already Hold for my review, same as Defaults.
 C blurple
   TD | ## Server 01 › More settings
   …
 
 === owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:set:s<FILLER>:su=ignore
-type 7 · 28 components · 1088 chars
+type 7 · 28 components · 1101 chars
 SEC | **Done:** In Server 01, Possible prompt injection: Hold for my review → Drop it
-    [Undo] mdset:2:un:s<FILLER>:g0000000082
+    [Undo] mdset:2:un:s<FILLER>:g0000000081
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:set:s<FILLER>:su=ignore > mdset:2:un:s<FILLER>:g0000000082
-type 7 · 26 components · 1052 chars
+=== owner_dm > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:set:s<FILLER>:su=ignore > mdset:2:un:s<FILLER>:g0000000081
+type 7 · 26 components · 1065 chars
 TD | **Undone:** In Server 01, Possible prompt injection → back to Hold for my review
 C blurple
   TD | ## Server 01 › More settings
@@ -10347,7 +10305,7 @@ C red
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pre:s<G2>=friends > mdset:2:ok:s<G2>:t000000001
 type 7 · 35 components · 1367 chars
 SEC | **Done:** In Study Group, What it may say about you: Public facts only → Anything it remembers
-    [Undo] mdset:2:un:s<G2>:g0000000083
+    [Undo] mdset:2:un:s<G2>:g0000000082
 C blurple
   …
 
@@ -10361,7 +10319,7 @@ C blurple
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pre:s<G2>=community > mdset:2:ok:s<G2>:t000000001
 type 7 · 35 components · 1555 chars
 SEC | **Done:** In Study Group, When it answers: Chatty → Only when @mentioned; In Study Group, Replies per person per day: No limit → 20; In Study Group, Replies per day (total): No limit → 300; In Study Group, Replies in a row to other bots: No limit → 4
-    [Undo] mdset:2:un:s<G2>:g0000000084
+    [Undo] mdset:2:un:s<G2>:g0000000083
 C blurple
   …
 
@@ -10375,7 +10333,7 @@ C blurple
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pre:s<G2>=work > mdset:2:ok:s<G2>:t000000001
 type 7 · 35 components · 1690 chars
 SEC | **Done:** In Study Group, When it answers: Chatty → Only when @mentioned; In Study Group, What it may say about you: Public facts only → Nothing personal; In Study Group, Other bots: Answer when they address it → Ignore other bots; In Study Group, Instructions for the Muse: (empty) → "Keep a professional tone. Keep replies brief."
-    [Undo] mdset:2:un:s<G2>:g0000000085
+    [Undo] mdset:2:un:s<G2>:g0000000084
 C blurple
   …
 
@@ -10396,11 +10354,11 @@ C blurple
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:set:s<G2>:r=when-addressed
 type 7 · 35 components · 1330 chars
 SEC | **Done:** In Study Group, When it answers: Chatty → Only when @mentioned
-    [Undo] mdset:2:un:s<G2>:g0000000086
+    [Undo] mdset:2:un:s<G2>:g0000000085
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:set:s<G2>:r=when-addressed > mdset:2:un:s<G2>:g0000000086
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:set:s<G2>:r=when-addressed > mdset:2:un:s<G2>:g0000000085
 type 7 · 33 components · 1281 chars
 TD | **Undone:** In Study Group, When it answers → back to Chatty
 C blurple
@@ -10410,11 +10368,11 @@ C blurple
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:set:s<G2>:r=off
 type 7 · 35 components · 1365 chars
 SEC | **Done:** In Study Group, When it answers: Chatty → Off
-    [Undo] mdset:2:un:s<G2>:g0000000087
+    [Undo] mdset:2:un:s<G2>:g0000000086
 C grey
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:set:s<G2>:r=off > mdset:2:un:s<G2>:g0000000087
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:set:s<G2>:r=off > mdset:2:un:s<G2>:g0000000086
 type 7 · 33 components · 1281 chars
 TD | **Undone:** In Study Group, When it answers → back to Chatty
 C blurple
@@ -10438,7 +10396,7 @@ C red
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:set:s<G2>:m=everything > mdset:2:ok:s<G2>:t000000001
 type 7 · 35 components · 1367 chars
 SEC | **Done:** In Study Group, What it may say about you: Public facts only → Anything it remembers
-    [Undo] mdset:2:un:s<G2>:g0000000088
+    [Undo] mdset:2:un:s<G2>:g0000000087
 C blurple
   …
 
@@ -10452,11 +10410,11 @@ C blurple
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:set:s<G2>:m=nothing
 type 7 · 35 components · 1347 chars
 SEC | **Done:** In Study Group, What it may say about you: Public facts only → Nothing personal
-    [Undo] mdset:2:un:s<G2>:g0000000089
+    [Undo] mdset:2:un:s<G2>:g0000000088
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:set:s<G2>:m=nothing > mdset:2:un:s<G2>:g0000000089
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:set:s<G2>:m=nothing > mdset:2:un:s<G2>:g0000000088
 type 7 · 33 components · 1302 chars
 TD | **Undone:** In Study Group, What it may say about you → back to Public facts only
 C blurple
@@ -10495,11 +10453,11 @@ LABEL “Replies per day (total)” — All replies in Study Group except the ow
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:mod:s<G2>:c:b > submit
 type 7 · 35 components · 1378 chars
 SEC | **Done:** In Study Group, Replies per person per day: No limit → 12; In Study Group, Replies per day (total): No limit → 12
-    [Undo] mdset:2:un:s<G2>:g000000008a
+    [Undo] mdset:2:un:s<G2>:g0000000089
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:mod:s<G2>:c:b > submit > mdset:2:un:s<G2>:g000000008a
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:mod:s<G2>:c:b > submit > mdset:2:un:s<G2>:g0000000089
 type 7 · 33 components · 1354 chars
 TD | **Undone:** In Study Group, Replies per day (total) → back to No limit; In Study Group, Replies per person per day → back to No limit
 C blurple
@@ -10510,10 +10468,10 @@ C blurple
 type 7 · 35 components · 1358 chars
 SEC | **Done:** In Study Group, Welcome new members: Off → On
 SEC | ⚠ Study Group has no system channel, so welcomes are skipped. Pick a channel.
-    [Undo] mdset:2:un:s<G2>:g000000008c
+    [Undo] mdset:2:un:s<G2>:g000000008b
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:val:s<G2>:~welcome.enabled:on:b > mdset:2:un:s<G2>:g000000008c
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:val:s<G2>:~welcome.enabled:on:b > mdset:2:un:s<G2>:g000000008b
 type 7 · 33 components · 1282 chars
 TD | **Undone:** In Study Group, Welcome new members → back to Off
 C blurple
@@ -10523,11 +10481,11 @@ C blurple
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:val:s<G2>:~media.enabled:on:b
 type 7 · 35 components · 1287 chars
 SEC | **Done:** In Study Group, Image and video generation: Off → On
-    [Undo] mdset:2:un:s<G2>:g000000008d
+    [Undo] mdset:2:un:s<G2>:g000000008c
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:val:s<G2>:~media.enabled:on:b > mdset:2:un:s<G2>:g000000008d
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:val:s<G2>:~media.enabled:on:b > mdset:2:un:s<G2>:g000000008c
 type 7 · 33 components · 1289 chars
 TD | **Undone:** In Study Group, Image and video generation → back to Off
 C blurple
@@ -10569,19 +10527,19 @@ ROW
   [Back to Study Group] mdset:2:pg:s<G2>:b
 
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m
-type 7 · 25 components · 1076 chars
+type 7 · 25 components · 1089 chars
 C blurple
   TD | ## Study Group › More settings
   SEP
   TD | **Only answer these people** · Same as Defaults: everyone
   TD | -# Pick people or roles to answer only them in Study Group. Owners always get answers.
-  TD | -# To search people and roles, run /settings in Study Group.
+  TD | -# To pick roles, or search everyone there, run /settings in Study Group.
   ROW
-    MENTIONABLE mdset:2:ppl:s<G2>:al “Everyone (pick to limit)…” 0-25
+    USERS mdset:2:ppl:s<G2>:al “Everyone (pick to limit)…” 0-25
   TD | **Never answer**
   TD | -# Wins over everything else. Owners can't be added.
   ROW
-    MENTIONABLE mdset:2:ppl:s<G2>:ig “Nobody yet…” 0-25
+    USERS mdset:2:ppl:s<G2>:ig “Nobody yet…” 0-25
   TD | **Other bots**
   ROW
     SELECT mdset:2:set:s<G2>:b “Other bots…” 1-1
@@ -10621,11 +10579,11 @@ ROW
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pz:s<G2>
 type 7 · 35 components · 1365 chars
 SEC | **Done:** In Study Group, When it answers: Chatty → Off
-    [Undo] mdset:2:un:s<G2>:g000000008e
+    [Undo] mdset:2:un:s<G2>:g000000008d
 C grey
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pz:s<G2> > mdset:2:un:s<G2>:g000000008e
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pz:s<G2> > mdset:2:un:s<G2>:g000000008d
 type 7 · 33 components · 1281 chars
 TD | **Undone:** In Study Group, When it answers → back to Chatty
 C blurple
@@ -11483,10 +11441,10 @@ ROW
 type 7 · 28 components · 902 chars
 SEC | **Done:** In Study Group, Welcome new members: Off → On
 SEC | ⚠ Study Group has no system channel, so welcomes are skipped. Pick a channel.
-    [Undo] mdset:2:un:s<G2>:g000000008f
+    [Undo] mdset:2:un:s<G2>:g000000008e
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:e > mdset:2:val:s<G2>:~welcome.enabled:on:e > mdset:2:un:s<G2>:g000000008f
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:e > mdset:2:val:s<G2>:~welcome.enabled:on:e > mdset:2:un:s<G2>:g000000008e
 type 7 · 26 components · 812 chars
 TD | **Undone:** In Study Group, Welcome new members → back to Off
 C blurple
@@ -11496,11 +11454,11 @@ C blurple
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:e > mdset:2:set:s<G2>:~welcome.channel=<HOMEWORK>
 type 7 · 28 components · 783 chars
 SEC | **Done:** In Study Group, Welcome channel: The server's system channel → #homework
-    [Undo] mdset:2:un:s<G2>:g0000000090
+    [Undo] mdset:2:un:s<G2>:g000000008f
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:e > mdset:2:set:s<G2>:~welcome.channel=<HOMEWORK> > mdset:2:un:s<G2>:g0000000090
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:e > mdset:2:set:s<G2>:~welcome.channel=<HOMEWORK> > mdset:2:un:s<G2>:g000000008f
 type 7 · 26 components · 832 chars
 TD | **Undone:** In Study Group, Welcome channel → back to The server's system channel
 C blurple
@@ -11531,11 +11489,11 @@ C blurple
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:e > mdset:2:val:s<G2>:~media.enabled:on:e
 type 7 · 28 components · 831 chars
 SEC | **Done:** In Study Group, Image and video generation: Off → On
-    [Undo] mdset:2:un:s<G2>:g0000000091
+    [Undo] mdset:2:un:s<G2>:g0000000090
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:e > mdset:2:val:s<G2>:~media.enabled:on:e > mdset:2:un:s<G2>:g0000000091
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:e > mdset:2:val:s<G2>:~media.enabled:on:e > mdset:2:un:s<G2>:g0000000090
 type 7 · 26 components · 819 chars
 TD | **Undone:** In Study Group, Image and video generation → back to Off
 C blurple
@@ -11559,11 +11517,11 @@ C blurple
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:e > mdset:2:set:s<G2>:~media.who=everyone
 type 7 · 28 components · 867 chars
 SEC | **Done:** In Study Group, Who can ask for images and video: Only you → Everyone
-    [Undo] mdset:2:un:s<G2>:g0000000092
+    [Undo] mdset:2:un:s<G2>:g0000000091
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:e > mdset:2:set:s<G2>:~media.who=everyone > mdset:2:un:s<G2>:g0000000092
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:e > mdset:2:set:s<G2>:~media.who=everyone > mdset:2:un:s<G2>:g0000000091
 type 7 · 26 components · 830 chars
 TD | **Undone:** In Study Group, Who can ask for images and video → back to Only you
 C blurple
@@ -11587,11 +11545,11 @@ LABEL “Generations per day” — 0 to 1,000. Blank = no cap here.
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:e > mdset:2:mod:s<G2>:mpd:e > submit
 type 7 · 28 components · 832 chars
 SEC | **Done:** In Study Group, Generations per day: No limit → 12
-    [Undo] mdset:2:un:s<G2>:g0000000093
+    [Undo] mdset:2:un:s<G2>:g0000000092
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:e > mdset:2:mod:s<G2>:mpd:e > submit > mdset:2:un:s<G2>:g0000000093
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:e > mdset:2:mod:s<G2>:mpd:e > submit > mdset:2:un:s<G2>:g0000000092
 type 7 · 26 components · 817 chars
 TD | **Undone:** In Study Group, Generations per day → back to No limit
 C blurple
@@ -11654,55 +11612,48 @@ C red
   …
 
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:ppl:s<G2>:al=<SAM> > mdset:2:ok:s<G2>:t000000001
-type 7 · 30 components · 1192 chars
+type 7 · 30 components · 1205 chars
 SEC | **Done:** In Study Group, Only answer these people: Everyone → @Sam
+    [Undo] mdset:2:un:s<G2>:g0000000093
+C blurple
+  …
+
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:ppl:s<G2>:ig=<SAM>
+type 7 · 28 components · 1179 chars
+SEC | **Done:** In Study Group, Never answer: Nobody → @Sam
     [Undo] mdset:2:un:s<G2>:g0000000094
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:ppl:s<G2>:ig=<SAM>,<ROLE>
-type 7 · 28 components · 1176 chars
-SEC | **Done:** In Study Group, Never answer: Nobody → @Sam and @Mods
-    [Undo] mdset:2:un:s<G2>:g0000000095
-C blurple
-  …
-
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:ppl:s<G2>:ig=<SAM>,<ROLE> > mdset:2:un:s<G2>:g0000000095
-type 7 · 26 components · 1133 chars
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:ppl:s<G2>:ig=<SAM> > mdset:2:un:s<G2>:g0000000094
+type 7 · 26 components · 1146 chars
 TD | **Undone:** In Study Group, Never answer → back to Nobody
 C blurple
   TD | ## Study Group › More settings
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:ppl:s<G2>:ig
-type 7 · 26 components · 1145 chars
-TD | **No change:** Study Group already follows Defaults for Never answer.
-C blurple
-  TD | ## Study Group › More settings
-  …
-
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:b==
-type 7 · 26 components · 1143 chars
+type 7 · 26 components · 1156 chars
 TD | **No change:** Study Group already follows Defaults for Other bots.
 C blurple
   TD | ## Study Group › More settings
   …
 
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:b=when-addressed
-type 7 · 26 components · 1175 chars
+type 7 · 26 components · 1188 chars
 TD | **No change:** In Study Group, Other bots is already Answer when they address it, same as Defaults.
 C blurple
   TD | ## Study Group › More settings
   …
 
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:b=ignore
-type 7 · 28 components · 1198 chars
+type 7 · 28 components · 1211 chars
 SEC | **Done:** In Study Group, Other bots: Answer when they address it → Ignore other bots
-    [Undo] mdset:2:un:s<G2>:g0000000096
+    [Undo] mdset:2:un:s<G2>:g0000000095
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:b=ignore > mdset:2:un:s<G2>:g0000000096
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:b=ignore > mdset:2:un:s<G2>:g0000000095
 type 7 · 6 components · 257 chars
 C red
   TD | ## Check before undoing
@@ -11717,14 +11668,14 @@ LABEL “Replies in a row to other bots” — 1 to 50. Blank = no cap here.
   INPUT v style 1 max 7 placeholder=“No cap”
 
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:mod:s<G2>:bx:m > submit
-type 7 · 28 components · 1171 chars
+type 7 · 28 components · 1184 chars
 SEC | **Done:** In Study Group, Replies in a row to other bots: No limit → 12
-    [Undo] mdset:2:un:s<G2>:g0000000097
+    [Undo] mdset:2:un:s<G2>:g0000000096
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:mod:s<G2>:bx:m > submit > mdset:2:un:s<G2>:g0000000097
-type 7 · 26 components · 1153 chars
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:mod:s<G2>:bx:m > submit > mdset:2:un:s<G2>:g0000000096
+type 7 · 26 components · 1166 chars
 TD | **Undone:** In Study Group, Replies in a row to other bots → back to No limit
 C blurple
   TD | ## Study Group › More settings
@@ -11740,63 +11691,63 @@ LABEL “Replies per day (total)” — All replies in Study Group except the ow
   INPUT pd style 1 max 7 placeholder=“No cap”
 
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:mod:s<G2>:c:m > submit
-type 7 · 28 components · 1233 chars
+type 7 · 28 components · 1246 chars
 SEC | **Done:** In Study Group, Replies per person per day: No limit → 12; In Study Group, Replies per day (total): No limit → 12
-    [Undo] mdset:2:un:s<G2>:g0000000098
+    [Undo] mdset:2:un:s<G2>:g0000000097
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:mod:s<G2>:c:m > submit > mdset:2:un:s<G2>:g0000000098
-type 7 · 26 components · 1209 chars
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:mod:s<G2>:c:m > submit > mdset:2:un:s<G2>:g0000000097
+type 7 · 26 components · 1222 chars
 TD | **Undone:** In Study Group, Replies per day (total) → back to No limit; In Study Group, Replies per person per day → back to No limit
 C blurple
   TD | ## Study Group › More settings
   …
 
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:su==
-type 7 · 28 components · 1078 chars
+type 7 · 28 components · 1091 chars
 SEC | **Done:** In Study Group, Possible prompt injection: Answer it (no check) → Hold for my review
-    [Undo] mdset:2:un:s<G2>:g000000009a
+    [Undo] mdset:2:un:s<G2>:g0000000099
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:su== > mdset:2:un:s<G2>:g000000009a
-type 7 · 26 components · 1160 chars
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:su== > mdset:2:un:s<G2>:g0000000099
+type 7 · 26 components · 1173 chars
 TD | **Undone:** In Study Group, Possible prompt injection → back to Answer it (no check)
 C blurple
   TD | ## Study Group › More settings
   …
 
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:su=hold-for-review
-type 7 · 28 components · 1151 chars
+type 7 · 28 components · 1164 chars
 SEC | **Done:** In Study Group, Possible prompt injection: Answer it (no check) → Hold for my review
-    [Undo] mdset:2:un:s<G2>:g000000009b
+    [Undo] mdset:2:un:s<G2>:g000000009a
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:su=hold-for-review > mdset:2:un:s<G2>:g000000009b
-type 7 · 26 components · 1160 chars
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:su=hold-for-review > mdset:2:un:s<G2>:g000000009a
+type 7 · 26 components · 1173 chars
 TD | **Undone:** In Study Group, Possible prompt injection → back to Answer it (no check)
 C blurple
   TD | ## Study Group › More settings
   …
 
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:su=ignore
-type 7 · 28 components · 1140 chars
+type 7 · 28 components · 1153 chars
 SEC | **Done:** In Study Group, Possible prompt injection: Answer it (no check) → Drop it
-    [Undo] mdset:2:un:s<G2>:g000000009c
+    [Undo] mdset:2:un:s<G2>:g000000009b
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:su=ignore > mdset:2:un:s<G2>:g000000009c
-type 7 · 26 components · 1160 chars
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:su=ignore > mdset:2:un:s<G2>:g000000009b
+type 7 · 26 components · 1173 chars
 TD | **Undone:** In Study Group, Possible prompt injection → back to Answer it (no check)
 C blurple
   TD | ## Study Group › More settings
   …
 
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:su=answer
-type 7 · 26 components · 1090 chars
+type 7 · 26 components · 1103 chars
 TD | **No change.**
 C blurple
   TD | ## Study Group › More settings
@@ -11819,11 +11770,11 @@ C blurple
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:gc:s<G2>=<HOMEWORK> > mdset:2:set:c<G2>.<HOMEWORK>:r=when-addressed
 type 7 · 25 components · 848 chars
 SEC | **Done:** In #homework, When it answers: Chatty → Only when @mentioned
-    [Undo] mdset:2:un:c<G2>.<HOMEWORK>:g000000009d
+    [Undo] mdset:2:un:c<G2>.<HOMEWORK>:g000000009c
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:gc:s<G2>=<HOMEWORK> > mdset:2:set:c<G2>.<HOMEWORK>:r=when-addressed > mdset:2:un:c<G2>.<HOMEWORK>:g000000009d
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:gc:s<G2>=<HOMEWORK> > mdset:2:set:c<G2>.<HOMEWORK>:r=when-addressed > mdset:2:un:c<G2>.<HOMEWORK>:g000000009c
 type 7 · 23 components · 777 chars
 TD | **Undone:** In #homework, When it answers → back to Chatty
 C blurple
@@ -11833,11 +11784,11 @@ C blurple
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:gc:s<G2>=<HOMEWORK> > mdset:2:set:c<G2>.<HOMEWORK>:r=off
 type 7 · 25 components · 881 chars
 SEC | **Done:** In #homework, When it answers: Chatty → Off
-    [Undo] mdset:2:un:c<G2>.<HOMEWORK>:g000000009e
+    [Undo] mdset:2:un:c<G2>.<HOMEWORK>:g000000009d
 C grey
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:gc:s<G2>=<HOMEWORK> > mdset:2:set:c<G2>.<HOMEWORK>:r=off > mdset:2:un:c<G2>.<HOMEWORK>:g000000009e
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:gc:s<G2>=<HOMEWORK> > mdset:2:set:c<G2>.<HOMEWORK>:r=off > mdset:2:un:c<G2>.<HOMEWORK>:g000000009d
 type 7 · 23 components · 777 chars
 TD | **Undone:** In #homework, When it answers → back to Chatty
 C blurple
@@ -11861,11 +11812,11 @@ C blurple
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:gc:s<G2>=<HOMEWORK> > mdset:2:val:c<G2>.<HOMEWORK>:~media.enabled:on:b
 type 7 · 25 components · 816 chars
 SEC | **Done:** In #homework, Image and video generation: Off → On
-    [Undo] mdset:2:un:c<G2>.<HOMEWORK>:g000000009f
+    [Undo] mdset:2:un:c<G2>.<HOMEWORK>:g000000009e
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:gc:s<G2>=<HOMEWORK> > mdset:2:val:c<G2>.<HOMEWORK>:~media.enabled:on:b > mdset:2:un:c<G2>.<HOMEWORK>:g000000009f
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:gc:s<G2>=<HOMEWORK> > mdset:2:val:c<G2>.<HOMEWORK>:~media.enabled:on:b > mdset:2:un:c<G2>.<HOMEWORK>:g000000009e
 type 7 · 23 components · 785 chars
 TD | **Undone:** In #homework, Image and video generation → back to Off
 C blurple
@@ -11875,11 +11826,11 @@ C blurple
 === owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:gc:s<G2>=<HOMEWORK> > mdset:2:pz:c<G2>.<HOMEWORK>
 type 7 · 25 components · 881 chars
 SEC | **Done:** In #homework, When it answers: Chatty → Off
-    [Undo] mdset:2:un:c<G2>.<HOMEWORK>:g00000000a0
+    [Undo] mdset:2:un:c<G2>.<HOMEWORK>:g000000009f
 C grey
   …
 
-=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:gc:s<G2>=<HOMEWORK> > mdset:2:pz:c<G2>.<HOMEWORK> > mdset:2:un:c<G2>.<HOMEWORK>:g00000000a0
+=== owner_dm > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:gc:s<G2>=<HOMEWORK> > mdset:2:pz:c<G2>.<HOMEWORK> > mdset:2:un:c<G2>.<HOMEWORK>:g000000009f
 type 7 · 23 components · 777 chars
 TD | **Undone:** In #homework, When it answers → back to Chatty
 C blurple
@@ -12694,11 +12645,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=p1 > mdset:2:gc:s<G1>=p2 > mdset:2:gc:s<G1>=p3 > mdset:2:gc:s<G1>=<WELCOME> > mdset:2:set:c<G1>.<WELCOME>:r=when-addressed
 type 7 · 25 components · 1135 chars
 SEC | **Done:** In #welcome, When it answers: Chatty → Only when @mentioned
-    [Undo] mdset:2:un:c<G1>.<WELCOME>:g00000000a1
+    [Undo] mdset:2:un:c<G1>.<WELCOME>:g00000000a0
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=p1 > mdset:2:gc:s<G1>=p2 > mdset:2:gc:s<G1>=p3 > mdset:2:gc:s<G1>=<WELCOME> > mdset:2:set:c<G1>.<WELCOME>:r=when-addressed > mdset:2:un:c<G1>.<WELCOME>:g00000000a1
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=p1 > mdset:2:gc:s<G1>=p2 > mdset:2:gc:s<G1>=p3 > mdset:2:gc:s<G1>=<WELCOME> > mdset:2:set:c<G1>.<WELCOME>:r=when-addressed > mdset:2:un:c<G1>.<WELCOME>:g00000000a0
 type 7 · 6 components · 258 chars
 C red
   TD | ## Check before undoing
@@ -12708,11 +12659,11 @@ C red
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=p1 > mdset:2:gc:s<G1>=p2 > mdset:2:gc:s<G1>=p3 > mdset:2:gc:s<G1>=<WELCOME> > mdset:2:set:c<G1>.<WELCOME>:r=off
 type 7 · 25 components · 1167 chars
 SEC | **Done:** In #welcome, When it answers: Chatty → Off
-    [Undo] mdset:2:un:c<G1>.<WELCOME>:g00000000a2
+    [Undo] mdset:2:un:c<G1>.<WELCOME>:g00000000a1
 C grey
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=p1 > mdset:2:gc:s<G1>=p2 > mdset:2:gc:s<G1>=p3 > mdset:2:gc:s<G1>=<WELCOME> > mdset:2:set:c<G1>.<WELCOME>:r=off > mdset:2:un:c<G1>.<WELCOME>:g00000000a2
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=p1 > mdset:2:gc:s<G1>=p2 > mdset:2:gc:s<G1>=p3 > mdset:2:gc:s<G1>=<WELCOME> > mdset:2:set:c<G1>.<WELCOME>:r=off > mdset:2:un:c<G1>.<WELCOME>:g00000000a1
 type 7 · 6 components · 258 chars
 C red
   TD | ## Check before undoing
@@ -12736,11 +12687,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=p1 > mdset:2:gc:s<G1>=p2 > mdset:2:gc:s<G1>=p3 > mdset:2:gc:s<G1>=<WELCOME> > mdset:2:val:c<G1>.<WELCOME>:~media.enabled:on:b
 type 7 · 25 components · 1103 chars
 SEC | **Done:** In #welcome, Image and video generation: Off → On
-    [Undo] mdset:2:un:c<G1>.<WELCOME>:g00000000a3
+    [Undo] mdset:2:un:c<G1>.<WELCOME>:g00000000a2
 C blurple
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=p1 > mdset:2:gc:s<G1>=p2 > mdset:2:gc:s<G1>=p3 > mdset:2:gc:s<G1>=<WELCOME> > mdset:2:val:c<G1>.<WELCOME>:~media.enabled:on:b > mdset:2:un:c<G1>.<WELCOME>:g00000000a3
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=p1 > mdset:2:gc:s<G1>=p2 > mdset:2:gc:s<G1>=p3 > mdset:2:gc:s<G1>=<WELCOME> > mdset:2:val:c<G1>.<WELCOME>:~media.enabled:on:b > mdset:2:un:c<G1>.<WELCOME>:g00000000a2
 type 7 · 23 components · 1073 chars
 TD | **Undone:** In #welcome, Image and video generation → back to Off
 C blurple
@@ -12750,11 +12701,11 @@ C blurple
 === owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=p1 > mdset:2:gc:s<G1>=p2 > mdset:2:gc:s<G1>=p3 > mdset:2:gc:s<G1>=<WELCOME> > mdset:2:pz:c<G1>.<WELCOME>
 type 7 · 25 components · 1167 chars
 SEC | **Done:** In #welcome, When it answers: Chatty → Off
-    [Undo] mdset:2:un:c<G1>.<WELCOME>:g00000000a4
+    [Undo] mdset:2:un:c<G1>.<WELCOME>:g00000000a3
 C grey
   …
 
-=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=p1 > mdset:2:gc:s<G1>=p2 > mdset:2:gc:s<G1>=p3 > mdset:2:gc:s<G1>=<WELCOME> > mdset:2:pz:c<G1>.<WELCOME> > mdset:2:un:c<G1>.<WELCOME>:g00000000a4
+=== owner_dm > mdset:2:go:d=s<G1> > mdset:2:gc:s<G1>=p1 > mdset:2:gc:s<G1>=p2 > mdset:2:gc:s<G1>=p3 > mdset:2:gc:s<G1>=<WELCOME> > mdset:2:pz:c<G1>.<WELCOME> > mdset:2:un:c<G1>.<WELCOME>:g00000000a3
 type 7 · 6 components · 258 chars
 C red
   TD | ## Check before undoing

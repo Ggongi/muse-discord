@@ -115,6 +115,30 @@ token_from: env:MUSE_TEST_TOKEN
 """
 
 
+HOSTILE_MD = ("**b** __u__ @everyone @here <@&55500000000000000001> "
+              "[x](https://evil.example) ||s|| `c` # h ")
+
+
+def go_hostile():
+    """The hostile fixtures (review B): 100-character names full of
+    markdown, links and mentions, 200 servers, 280 channels in Muse
+    Lounge, hostile display names. Changes this module's fixtures in
+    place: call it only in a process of its own (test_crawl_hostile)."""
+    def long(base, n=100):
+        return ((base + " " + HOSTILE_MD) * 3)[:n]
+    GUILDS[:] = [dict(g, name=long(g["name"])) for g in GUILDS] + [
+        {"id": f"6200000000000000{i:04d}", "name": long(f"Extra {i}"),
+         "member_count": 10, "system_channel_id": None}
+        for i in range(1, 138)]
+    for chans in CHANNELS.values():
+        for c in chans:
+            c["name"] = long(c["name"])
+    CHANNELS[G1] += [_chan(f"7200000000000000{i:04d}", long(f"zz-{i:03d}"))
+                     for i in range(1, 201)]
+    for k in list(NAMES):
+        NAMES[k] = ("**" + NAMES[k] + "** @everyone [x](https://e.x)")[:32]
+
+
 def sf(ts, seq=1):
     return str(((int(ts * 1000) - 1420070400000) << 22) + seq)
 

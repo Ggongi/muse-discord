@@ -9,7 +9,7 @@ ROW
   [Open #muse-chat settings] mdset:2:pg:c<G1>.<MUSECHAT>:q
 
 === why_admin > mdset:2:pg:c<G1>.<MUSECHAT>:q
-type 7 · 24 components · 707 chars
+type 7 · 24 components · 720 chars
 C amber
   TD | ## Quiet the bot in Muse Lounge
   TD | -# You're a server admin here, so you can make the bot quieter and undo what admins changed. The bot's owners get a summary of every change.
@@ -32,36 +32,36 @@ C amber
       - spam1  (<SPAM>)
   SEP
   TD | **Changes admins made here**
-  SEC | All of Muse Lounge: Never answer → @Bob and @spam1 · @you, 2 h ago
+  SEC | All of Muse Lounge: Never answer: added <@<SPAM>> · @you, 2 h ago
   SEC | -# Undo goes back to the owners' setting: @Bob
       [Undo] mdset:2:val:s<G1>:ig:=:q
 ROW
   [Why no reply?] mdset:2:pg:c<G1>.<MUSECHAT>:y
 
 === why_admin > mdset:2:pg:c<G1>.<MUSECHAT>:q > mdset:2:val:c<G1>.<MUSECHAT>:r:when-addressed:q
-type 7 · 29 components · 870 chars
+type 7 · 29 components · 883 chars
 SEC | **Done:** In #muse-chat, When it answers: Chatty → Only when @mentioned
     [Undo] mdset:2:un:s<G1>:g0000000003
 C amber
   …
 
 === why_admin > mdset:2:pg:c<G1>.<MUSECHAT>:q > mdset:2:val:c<G1>.<MUSECHAT>:r:when-addressed:q > mdset:2:un:s<G1>:g0000000003
-type 7 · 25 components · 819 chars
-TD | **Undone:** In #muse-chat, When it answers → back to Chatty (this includes a change in a channel of this server)
+type 7 · 25 components · 779 chars
+TD | **Undone:** In #muse-chat, When it answers → back to Chatty
 C amber
   TD | ## Quiet the bot in Muse Lounge
   …
 
 === why_admin > mdset:2:pg:c<G1>.<MUSECHAT>:q > mdset:2:val:c<G1>.<MUSECHAT>:r:off:q
-type 7 · 27 components · 802 chars
+type 7 · 27 components · 815 chars
 SEC | **Done:** In #muse-chat, When it answers: Chatty → Off
     [Undo] mdset:2:un:s<G1>:g0000000004
 C amber
   …
 
 === why_admin > mdset:2:pg:c<G1>.<MUSECHAT>:q > mdset:2:val:c<G1>.<MUSECHAT>:r:off:q > mdset:2:un:s<G1>:g0000000004
-type 7 · 25 components · 819 chars
-TD | **Undone:** In #muse-chat, When it answers → back to Chatty (this includes a change in a channel of this server)
+type 7 · 25 components · 779 chars
+TD | **Undone:** In #muse-chat, When it answers → back to Chatty
 C amber
   TD | ## Quiet the bot in Muse Lounge
   …
@@ -97,7 +97,7 @@ C blurple
   …
 
 === why_admin > mdset:2:pg:c<G1>.<MUSECHAT>:q > mdset:2:pg:c<G1>.<MUSECHAT>:y > mdset:2:fx:s<G1>:ig:-<SPAM> > mdset:2:un:s<G1>:g0000000005
-type 7 · 25 components · 773 chars
+type 7 · 25 components · 786 chars
 TD | **Undone:** In Muse Lounge, Never answer → back to @Bob and @spam1
 C amber
   TD | ## Quiet the bot in Muse Lounge

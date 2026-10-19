@@ -106,6 +106,9 @@ ADMIN_ONLY_QUIETER = ("Server admins can make the bot quieter here, never "
                       "louder. Ask one of the bot's owners for that.")
 OVERLAY_BROKEN = ("⚠ config.discord.yaml can't be read, so changes from "
                   "Discord are paused. Fix it on the bot's machine.")
+ROLES_ELSEWHERE = ("Roles only count in their own server, so the roles "
+                   "you picked were left out. Run /settings in that server "
+                   "to pick them.")
 FIXED_NOTE = "-# Fixed. {who} must send again; refused messages stay " \
              "unanswered."
 
@@ -207,6 +210,29 @@ def clip(text, n):
     return text if len(text) <= n else text[:n - 1] + "…"
 
 
+_MD = re.compile(r"([\\*_~|>#\[\]()`])")
+_UNMD = re.compile(r"\\([\\*_~|>#\[\]()`])")
+ZWSP = "\u200b"
+
+
+def esc(text):
+    """A name (a server's, a channel's, a person's: anyone can choose
+    them) made safe to put in a Text Display: markdown escaped, mentions
+    and @everyone / @here neutralised, on one line. Labels and options
+    are plain text in Discord; plain() undoes this for them."""
+    t = " ".join(str(text).split())
+    t = _MD.sub(r"\\\1", t)
+    t = re.sub(r"<(?=[@#])", "<" + ZWSP, t)
+    return re.sub(r"@(?=(everyone|here)\b)", "@" + ZWSP, t)
+
+
+def plain(text):
+    """esc() undone, for text Discord shows as is (labels, options,
+    placeholders, modal titles)."""
+    t = _UNMD.sub(r"\1", str(text)).replace(ZWSP, "")
+    return t[:-2] + "…" if t.endswith("\\…") else t
+
+
 def td(text):
     return {"type": TEXT, "content": clip(text, 3900)}
 
@@ -279,8 +305,69 @@ def people_defaults(value):
 
 def message(R, comps):
     data = {"flags": COMPONENTS_V2 | (EPHEMERAL if R.new else 0),
-            "components": comps, "allowed_mentions": {"parse": []}}
+            "components": finish_text(comps),
+            "allowed_mentions": {"parse": []}}
     return {"type": 4 if R.new else 7, "data": data}
+
+
+LIMITS = {"label": 80, "placeholder": 150}
+
+
+def _all(comps):
+    for c in comps or []:
+        if isinstance(c, dict):
+            yield c
+            yield from _all(c.get("components"))
+            for k in ("accessory", "component"):
+                if isinstance(c.get(k), dict):
+                    yield from _all([c[k]])
+
+
+def text_size(comps):
+    n = 0
+    for c in _all(comps):
+        for k in ("content", "label", "placeholder", "description"):
+            if isinstance(c.get(k), str):
+                n += len(c[k])
+        for o in c.get("options") or []:
+            n += len(o.get("label", "")) + len(o.get("description", ""))
+    return n
+
+
+def finish_text(comps):
+    """Labels, options and placeholders as plain text (names unescaped),
+    then the page within TEXT_BUDGET: option labels shortened to 60,
+    then option descriptions dropped, then long texts clipped."""
+    for c in _all(comps):
+        for k, n in LIMITS.items():
+            if isinstance(c.get(k), str):
+                c[k] = clip(plain(c[k]), n)
+        if c.get("type") == LABEL and isinstance(c.get("description"), str):
+            c["description"] = clip(plain(c["description"]), 100)
+        for o in c.get("options") or []:
+            o["label"] = clip(plain(o["label"]), 100)
+            if "description" in o:
+                o["description"] = clip(plain(o["description"]), 100)
+    if text_size(comps) <= TEXT_BUDGET:
+        return comps
+    for c in _all(comps):
+        for o in c.get("options") or []:
+            o["label"] = clip(o["label"], 60)
+    for c in sorted((c for c in _all(comps) if c.get("options")),
+                    key=lambda c: -len(c["options"])):
+        if text_size(comps) <= TEXT_BUDGET:
+            return comps
+        for o in c["options"]:
+            o.pop("description", None)
+    while text_size(comps) > TEXT_BUDGET:
+        tds = [c for c in _all(comps) if c.get("type") == TEXT]
+        big = max(tds, key=lambda c: len(c["content"]), default=None)
+        if big is None or len(big["content"]) < 80:
+            break
+        over = text_size(comps) - TEXT_BUDGET
+        big["content"] = clip(big["content"],
+                              max(60, len(big["content"]) - over - 1))
+    return comps
 
 
 def card(text, colour=None, extra=()):
@@ -295,9 +382,13 @@ def notice(text):
 
 
 def modal(custom_id, title, components):
+    comps = finish_text(components[:5])
+    for c in comps:
+        if c.get("type") == LABEL:
+            c["label"] = clip(plain(c["label"]), 45)
     return {"type": 9, "data": {"custom_id": custom_id,
-                                "title": clip(title, 45),
-                                "components": components[:5]}}
+                                "title": clip(plain(title), 45),
+                                "components": comps}}
 
 
 def labelled(text, component, description=None):
@@ -357,6 +448,7 @@ def _harvest_names(ix):
     """Names the interaction itself carries (the clicking user, resolved
     users and members, a context command's message author)."""
     out = {}
+    people = set()
 
     def user(u, member=None):
         if not isinstance(u, dict) or not u.get("id"):
@@ -365,6 +457,7 @@ def _harvest_names(ix):
              or u.get("username"))
         if n:
             out[str(u["id"])] = str(n)
+            people.add(str(u["id"]))
     m = ix.get("member") or {}
     user(m.get("user"), m)
     user(ix.get("user"))
@@ -375,13 +468,14 @@ def _harvest_names(ix):
     for rid, r in (res.get("roles") or {}).items():
         if isinstance(r, dict) and r.get("name"):
             out[str(rid)] = "@" + str(r["name"])
+            people.add(str(rid))
     for msg in (res.get("messages") or {}).values():
         if isinstance(msg, dict):
             user(msg.get("author"), msg.get("member"))
     for chid, ch in (res.get("channels") or {}).items():
         if isinstance(ch, dict) and ch.get("name"):
             out[str(chid)] = str(ch["name"])
-    return out
+    return out, people
 
 
 class Req:
@@ -395,7 +489,7 @@ class Req:
         self.data = ix.get("data") or {}
         self.new = False
         self.banner = None
-        self.extra_names = _harvest_names(ix)
+        self.extra_names, self.extra_users = _harvest_names(ix)
         self._guilds = None
         self._chans = {}
         self.go_page = 0
@@ -483,7 +577,12 @@ class Req:
         return ch.get("readable") is not False
 
     def look(self, some_id):
-        """A name for a server, channel, role or person (None: unknown)."""
+        """A name for a server, channel, role or person (None: unknown),
+        escaped for a Text Display (see esc)."""
+        n = self._look(some_id)
+        return esc(n) if n else None
+
+    def _look(self, some_id):
         i = str(some_id)
         if i in self.extra_names:
             return self.extra_names[i]
@@ -505,11 +604,20 @@ class Req:
         return (self.st.labels or {}).get(i)
 
     def person(self, uid):
-        """A person's name for a label (no mention markup), or None."""
-        n = self.look(uid)
+        """A person's (or role's) name, escaped, or None: only from the
+        interaction's resolved data and the people the monitor has seen,
+        never a server's or channel's name for a forged id."""
+        i = str(uid)
+        n = self.extra_names.get(i) if i in self.extra_users else None
+        if not n:
+            fn = getattr(self.ctx, "display_name", None)
+            try:
+                n = fn(i) if callable(fn) else None
+            except Exception:
+                n = None
         if n and str(n).startswith("@"):
             n = str(n)[1:]
-        return n
+        return esc(n) if n else None
 
     def typed(self):
         """(channel id, in a thread?) where the interaction happened, a
@@ -667,7 +775,7 @@ def who_text(R, by):
         return "@you"
     if _ID.fullmatch(by):
         return f"<@{by}>"
-    return by or "someone"
+    return esc(by) if by else "someone"
 
 
 def tag(R, v):
@@ -1085,17 +1193,17 @@ def notes_text(R, place):
         gname = R.gname(place.guild_id)
         head = (f"{gname}'s instructions apply here." if base
                 else f"{gname} has no instructions.")
-        added = f"“{clip(own.here, 120)}”" if own.set and own.here \
+        added = f"“{esc(clip(own.here, 120))}”" if own.set and own.here \
             else "nothing"
         return (f"**Instructions for the Muse**{tag(R, own)}\n{head} "
                 f"Added for {R.name(place)}: {added}")
     v = Val(R, place, "style.notes")
     if v.set:
-        notes = f"“{clip(v.here, 160)}”" if v.here else "None set here"
+        notes = f"“{esc(clip(v.here, 160))}”" if v.here else "None set here"
     elif place.kind == "defaults":
         notes = "None yet"
     else:
-        notes = f"Same as Defaults: “{clip(v.value, 120)}”" if v.value \
+        notes = f"Same as Defaults: “{esc(clip(v.value, 120))}”" if v.value \
             else "Same as Defaults: nothing"
     length = value(R, place, "style.length")
     return (f"**Instructions for the Muse**{tag(R, v)}\n{notes} · Reply "
@@ -1293,8 +1401,23 @@ def page_server(R, place):
     return finish(R, place, inner, footer, GREY if paused else BLURPLE)
 
 
-def people_select(R, place, key, kind, placeholder, add_only=False):
-    v = value(R, place, key)
+def roles_here(R, place):
+    """Roles can be picked for place: it is a server, and the
+    interaction is in that server (a role belongs to one server)."""
+    return place.guild_id is not None and R.in_guild(place.guild_id)
+
+
+def people_select(R, place, key, kind, placeholder, add_only=False,
+                  value_=None):
+    """A mentionable select in the place's own server; elsewhere a user
+    select (roles of another server mean nothing; the roles already on
+    the list are kept, see v_ppl)."""
+    v = value(R, place, key) if value_ is None else value_
+    if kind == MENTIONABLE_SELECT and not roles_here(R, place):
+        kind = USER_SELECT
+        v = [p for p in v if not str(p).startswith("role:")] \
+            if isinstance(v, list) else v
+        placeholder = placeholder.replace("people or roles", "people")
     s = picker(kind, cid("ppl", ptok(place), kcode(key)), placeholder,
                1 if add_only else 0, 25,
                None if add_only else people_defaults(v))
@@ -1311,7 +1434,8 @@ def page_more(R, place):
     keys = ms.place_keys(R.st, place, "more")
     hint = ""
     if place.kind == "server" and not R.in_guild(place.guild_id):
-        hint = (f"\n-# To search people and roles, run /settings in "
+        hint = (f"\n-# To pick roles, or search everyone there, run "
+                f"/settings in "
                 f"{where}.")
     if "who.allow" in keys and place.kind != "dms":
         v = Val(R, place, "who.allow")
@@ -1415,7 +1539,7 @@ def welcome_where(R, place):
         if (R.chan(gid, v) or {}).get("can_send") is False:
             text += "\n-# The bot can't post there; welcomes are skipped."
         return text
-    return f"#{v}"
+    return f"#{esc(v)}"
 
 
 def page_extras(R, place):
@@ -1474,10 +1598,9 @@ def page_extras(R, place):
         if isinstance(v.value, list) or R.pending == "plugins.media.who":
             picked = [p for p in (v.value if isinstance(v.value, list)
                                   else []) if p not in R.ctx.owners]
-            s = picker(MENTIONABLE_SELECT,
-                       cid("ppl", tok, "~media.who"), "Pick people…", 0,
-                       25, people_defaults(picked))
-            inner.append(row(s))
+            inner.append(people_select(R, place, "plugins.media.who",
+                                       MENTIONABLE_SELECT, "Pick people…",
+                                       value_=picked))
         vp = Val(R, place, "plugins.media.per_day")
         cur = "No cap" if vp.value is None else f"{vp.value:,} a day"
         if not vp.set and place.kind != "defaults":
@@ -1643,7 +1766,7 @@ def page_botwide(R):
     kind = st.top("presence.kind")
     sv = Val(R, place, "presence.status")
     uv = Val(R, place, "updates.notify")
-    text = (f"“{clip(status, 128)}”" if status else "None") + \
+    text = (f"“{esc(clip(status, 128))}”" if status else "None") + \
         f"\n-# Shown as {str(kind).capitalize()}; the kind is set in " \
         f"config.yaml."
     on = bool(st.top("updates.notify"))
@@ -1668,7 +1791,7 @@ def page_servers(R, origin):
             f"server{'s' if len(R.guilds()) != 1 else ''}"
             + (f" (page {page + 1} of {pages})." if pages > 1 else "."))
     if R.server_query:
-        head += f"\n-# {n:,} matching “{clip(R.server_query, 40)}”."
+        head += f"\n-# {n:,} matching “{esc(clip(R.server_query, 40))}”."
     inner = [td(head)]
     if opts:
         inner.append(row(sel(cid("go", ptok(origin)), opts,
@@ -1766,9 +1889,9 @@ def explain_outcome(R, o):
     code = o.get("code") or "other"
     aid = str(o.get("author_id") or "")
     who_m = f"<@{aid}>" if _ID.fullmatch(aid) else (
-        f"@{o['author']}" if o.get("author") else "They")
+        f"@{esc(o['author'])}" if o.get("author") else "They")
     short = R.person(aid) if aid else None
-    short = short or o.get("author") or "them"
+    short = short or (esc(o["author"]) if o.get("author") else "them")
     sc, place = _outcome_scope(R, o)
     where = R.name(place) if place else "DMs"
     detail = o.get("detail") if isinstance(o.get("detail"), dict) else {}
@@ -1824,9 +1947,7 @@ def explain_outcome(R, o):
                     added = " (in config.yaml)"
             fix = None
             if setter is not None:
-                cur = Val(R, setter, "who.ignore").value or []
-                ch = [ms.Change(setter, "who.ignore",
-                                [p for p in cur if p != aid])]
+                ch = fix_changes(R, setter, "who.ignore", f"-{aid}")
                 fix = _fix_button(R, f"Remove {short}", setter,
                                   "who.ignore", f"-{aid}", ch)
             return (f"{who_m} is on **Never answer** in "
@@ -1891,6 +2012,9 @@ def explain_outcome(R, o):
                 _fix_button(R, "Hold for my review instead", setter,
                             "privacy.suspicious", "vhold-for-review", ch)
                 if setter else None, True)
+    if R.admin and code in ("quarantined", "never-share"):
+        return ("Held for the owners' review." if code == "quarantined"
+                else "The reply was held for the owners."), None, True
     text = {
         "quarantined": "Held for your review; look for the bot's DM.",
         "predates-join": "It was sent before the bot joined.",
@@ -1927,10 +2051,13 @@ def page_why(R, place):
             continue
         if shown >= most:
             break
+        if (o.get("guild_id") or place.guild_id) != place.guild_id:
+            continue
+        o = dict(o, guild_id=place.guild_id)
         shown += 1
         aid = str(o.get("author_id") or "")
         who_m = f"<@{aid}>" if _ID.fullmatch(aid) else (
-            f"@{o['author']}" if o.get("author") else "Someone")
+            f"@{esc(o['author'])}" if o.get("author") else "Someone")
         mid = str(o.get("message_id") or "")
         link = msg_link(o.get("guild_id"), o.get("channel_id"), mid)
         when = ago(R, o.get("at") or snowflake_time(mid))
@@ -2031,6 +2158,7 @@ def why_card(R):
     here, _thread = R.typed()
     author = msg.get("author") or {}
     aid = str(author.get("id") or "")
+    chan = None
     if gid:
         chan = here or ch
         place = ms.Place.channel(gid, chan, R.category_of(gid, chan))
@@ -2049,18 +2177,27 @@ def why_card(R):
             o = fn(tid)
     except Exception as e:
         R.ctx.log(f"settings_ui: outcome: {e}")
+    if isinstance(o, dict):
+        # Where the message is comes from the interaction, never from the
+        # ledger: an entry for another server (a forged or stale id), or a
+        # server message seen from a DM, counts as not recorded.
+        if (o.get("guild_id") or None) not in (None, gid) \
+                or (not gid and o.get("guild_id")):
+            o = None
+        elif gid:
+            o = dict(o, guild_id=gid, channel_id=ch, parent_id=chan)
+        else:
+            o = dict(o, guild_id=None, parent_id=None)
     tail = None
     if aid and aid == str(R.ctx.bot_id):
         inner.append(td("That's the bot's own message."))
     elif o and o.get("status") == "replied":
-        rid = o.get("reply_id")
-        inner.append(td(f"It replied: [reply]({msg_link(gid, ch, rid)})."
-                        if rid else "It replied."))
+        inner.append(td("It replied."))
     elif o and o.get("status") == "queued":
         inner.append(td(f"Still working on it (queued "
                         f"{ago(R, o.get('at')).replace(' ago', '')} ago)."))
     elif o and o.get("status") in REFUSED:
-        o = dict(o, author_id=o.get("author_id") or aid)
+        o = dict(o, author_id=aid or o.get("author_id"))
         text, fix, holds = explain_outcome(R, o)
         inner.append(section(text, fix) if fix else td(text))
         if fix:
@@ -2160,10 +2297,12 @@ def page_quiet(R, gid):
     entry = st.overlay.get((("servers", gid), "who.ignore"))
     by = (entry or {}).get("by") if ms.entry_role(entry) == "admin" \
         else None
+    _pin, adds = admin_ignore(R, gid)
+    added = [p for p in adds if p not in owners_list]
     parts = []
     for p in ign[:10]:
         m = f"<@&{p[5:]}>" if str(p).startswith("role:") else f"<@{p}>"
-        if p in owners_list:
+        if p not in added:
             parts.append(f"{m} (set by the owners)")
         else:
             parts.append(f"{m} (added by {who_text(R, by)})" if by
@@ -2174,7 +2313,6 @@ def page_quiet(R, gid):
                     + (", ".join(parts) if parts else "Nobody yet.")))
     inner.append(row(picker(MENTIONABLE_SELECT, cid("ppl", f"s{gid}", "ig"),
                             "Add to Never answer…", 1, 25)))
-    added = [p for p in ign if p not in owners_list]
     if added:
         inner.append(row(sel(cid("rm", f"s{gid}", "ig"), [
             opt((R.person(p[5:]) if str(p).startswith("role:")
@@ -2214,7 +2352,11 @@ def page_quiet(R, gid):
         sc = pl.scope(key)
         where = R.name(pl) if pl.kind == "channel" else f"All of {gname}"
         new = e.get("_norm", e.get("value"))
-        line = (f"{where}: {ms.label(key)} → {vl(R, key, new)} · "
+        what = f"{ms.label(key)} → {vl(R, key, new)}"
+        if key == "who.ignore":
+            what = (f"{ms.label(key)}: added "
+                    f"{mention_list(admin_ignore(R, gid)[1], 5)}")
+        line = (f"{where}: {what} · "
                 f"{who_text(R, e.get('by'))}, {ago(R, e.get('at'))}\n-# Undo "
                 f"goes back to the owners' setting: "
                 f"{vl(R, key, owners.get(key, sc))}")
@@ -2563,6 +2705,9 @@ def parse_cap(R, key, text):
     if raw.lower() in NO_CAP or t in NO_CAP:
         return "inherit", None
     rng = f"{spec.min:,} to {spec.max:,}, or blank for no cap"
+    if re.fullmatch(r"-\d+", t):
+        return None, (f"“{clip(raw, 30)}” can't be negative. "
+                      f"{CAP_WORDS[key]} takes {rng}.")
     if not re.fullmatch(r"\d+", t):
         return None, (f"“{clip(raw, 30)}” isn't a whole number. "
                       f"{CAP_WORDS[key]} takes {rng}.")
@@ -2737,8 +2882,7 @@ def do_changes(R, origin, changes, confirmed=False, named=(), notes=()):
         for p in res.written:
             try:
                 R.ctx.notify_owners_admin_change(
-                    R.admin_gid, R.uid, p.keystr, vl(R, p.key, p.old),
-                    vl(R, p.key, p.new))
+                    R.admin_gid, R.uid, p.keystr, p.old, p.new)
             except Exception as e:
                 R.ctx.log(f"settings_ui: admin notice: {e}")
     text = "; ".join(res.describe(R.look))
@@ -2841,6 +2985,9 @@ def do_undo(R, place, expect=None, origin=None, confirmed=False):
             lines = ["Undo would make: " + clip(text[len("Undo: "):], 600)]
             return message(R, page_confirm(R, origin, lines, a.warnings,
                                            tok, undo=True))
+    if R.admin:
+        text = text.replace(" (this includes a change in a channel of this "
+                            "server)", "")
     try:
         kw = {"children": children, "expect": gid}
         if admin_gid:
@@ -2855,12 +3002,15 @@ def do_undo(R, place, expect=None, origin=None, confirmed=False):
         R.banner = [td("Nothing to undo here.")]
         return show(R, *origin)
     if R.admin:
+        before = R.st
+        R.reload()
         for ch in plan:
             try:
+                sc = _scope_at(ch.place, ch.key, ch.path)
                 R.ctx.notify_owners_admin_change(
                     R.admin_gid, R.uid,
-                    ms.format_key(ms.change_path(R.st, ch), ch.key),
-                    "(undo)", "the owners' setting")
+                    ms.format_key(ms.change_path(before, ch), ch.key),
+                    before.get(ch.key, sc), R.st.get(ch.key, sc))
             except Exception as e:
                 R.ctx.log(f"settings_ui: admin notice: {e}")
     R.reload()
@@ -2871,16 +3021,41 @@ def do_undo(R, place, expect=None, origin=None, confirmed=False):
 # ---------------------------------------------------------------------------
 # Building changes from a click
 # ---------------------------------------------------------------------------
-def people_from(R, values):
-    """[ids and "role:<id>"] from a user / mentionable select's values."""
+def people_from(R, values, place):
+    """([ids and "role:<id>"], roles dropped?) from a user / mentionable
+    select's values. Only ids Discord resolved count (a forged value is
+    dropped), and a role only for the server the interaction is in: a
+    role id means nothing in another server."""
     res = R.data.get("resolved") or {}
-    roles = set(str(r) for r in (res.get("roles") or {}))
-    out = []
+    users = {str(u) for u in (res.get("users") or {})} | \
+        {str(u) for u in (res.get("members") or {})}
+    roles = {str(r) for r in (res.get("roles") or {})}
+    own = place.guild_id is not None and R.in_guild(place.guild_id)
+    out, dropped = [], False
     for v in values:
-        if not _ID.fullmatch(v):
-            continue
-        out.append(f"role:{v}" if v in roles else v)
-    return list(dict.fromkeys(out))
+        if v in roles:
+            if own:
+                out.append(f"role:{v}")
+            else:
+                dropped = True
+        elif v in users and _ID.fullmatch(v):
+            out.append(v)
+    return list(dict.fromkeys(out)), dropped
+
+
+def admin_ignore(R, gid):
+    """(the owners' own Never answer list at the server's layer, the
+    admins' additions) for a server: an admin's entry holds only those
+    two (the engine adds what the owners set elsewhere)."""
+    path = ("servers", str(gid))
+    s_, pin, _src = ms.owners_view(R.st, gid).layer(path, "who.ignore")
+    pin = list(pin) if s_ and isinstance(pin, list) else []
+    e = R.st.overlay.get((path, "who.ignore"))
+    own = e.get("_norm") if isinstance(e, dict) \
+        and ms.entry_role(e) == "admin" else None
+    adds = [p for p in (own if isinstance(own, list) else [])
+            if p not in pin]
+    return pin, adds
 
 
 def list_change(R, place, key, new):
@@ -2918,8 +3093,9 @@ def changes_for_people(R, place, key, picked, add_only=False):
         if len(kept) < len(picked):
             notes.append("Owners can't be added to Never answer.")
         if add_only:
-            cur = value(R, place, key) or []
-            kept = list(dict.fromkeys(list(cur) + kept))
+            pin, adds = admin_ignore(R, place.guild_id)
+            new = list(dict.fromkeys(pin + adds + kept))
+            return [ms.Change(place, key, new)], notes, ()
         return [list_change(R, place, key, kept)], notes, ()
     if key == "plugins.media.who":
         if not picked:
@@ -2944,6 +3120,12 @@ def fix_changes(R, place, key, op):
         spec = R.st.spec(key)
         if spec is None or spec.type != "people":
             return None
+        if R.admin and key == "who.ignore" and op[0] == "-" \
+                and place.kind == "server":
+            pin, adds = admin_ignore(R, place.guild_id)
+            left = pin + [p for p in adds if p != uid]
+            return [ms.Change(place, key, left if left != pin or not adds
+                              else "inherit")]
         cur = value(R, place, key)
         cur = list(cur) if isinstance(cur, list) else []
         new = cur + [uid] if op[0] == "+" else [p for p in cur if p != uid]
@@ -3239,13 +3421,23 @@ def v_ppl(R, place, args, values):
     spec = R.st.spec(key)
     if key != "who.dms_from" and (spec is None or spec.type != "people"):
         return notice(OUT_OF_DATE)
-    picked = people_from(R, values)
+    picked, dropped = people_from(R, values, place)
     if R.admin and (key != "who.ignore" or place.kind != "server"):
         return notice(ADMIN_ONLY_QUIETER)
-    changes, notes, named = changes_for_people(R, place, key, picked,
-                                               add_only=R.admin)
     if R.admin and not picked:
         return notice(OUT_OF_DATE)
+    if dropped and not picked:
+        R.banner = banner_error(ROLES_ELSEWHERE)
+        return show(R, place, "q" if R.admin else page_of(place, key))
+    if not roles_here(R, place) and key != "who.dms_from":
+        # A user select (see people_select): keep the roles on the list.
+        cur = value(R, place, key)
+        picked = picked + [p for p in (cur if isinstance(cur, list)
+                                       else []) if p.startswith("role:")]
+    changes, notes, named = changes_for_people(R, place, key, picked,
+                                               add_only=R.admin)
+    if dropped:
+        notes = list(notes) + [ROLES_ELSEWHERE]
     return do_changes(R, (place, page_of(place, key)), changes,
                       named=named, notes=notes)
 
@@ -3267,8 +3459,13 @@ def v_rm(R, place, args, values):
     if place.kind != "server" and not (R.owner and place.kind in
                                        ("defaults", "dms")):
         return notice(OUT_OF_DATE)
-    if R.admin and gone_ & set(owners_ignore(R, place.guild_id)):
-        return notice(ADMIN_ONLY_QUIETER)
+    if R.admin:
+        pin, adds = admin_ignore(R, place.guild_id)
+        if gone_ - set(adds):
+            return notice(ADMIN_ONLY_QUIETER)
+        left = pin + [p for p in adds if p not in gone_]
+        return do_changes(R, (place, "q"), [ms.Change(
+            place, key, left if left != pin or not adds else "inherit")])
     cur = value(R, place, key) or []
     left = [p for p in cur if p not in gone_]
     return do_changes(R, (place, "q" if R.admin else page_of(place, key)),
@@ -3512,12 +3709,6 @@ def v_rs(R, place, args, values):
     return v_pz(R, place, args, values, resume=True)
 
 
-def owners_ignore(R, gid):
-    """Never answer in a server as the owners (and config.yaml) set it."""
-    return ms.owners_view(R.st, gid).get("who.ignore",
-                                         ms.Scope.server(gid)) or []
-
-
 def v_fx(R, place, args, values):
     if len(args) != 2:
         return notice(OUT_OF_DATE)
@@ -3525,7 +3716,7 @@ def v_fx(R, place, args, values):
     if key is None:
         return notice(OUT_OF_DATE)
     if R.admin and key == "who.ignore" and args[1].startswith("-") \
-            and args[1][1:] in owners_ignore(R, place.guild_id):
+            and args[1][1:] not in admin_ignore(R, place.guild_id)[1]:
         return notice(ADMIN_ONLY_QUIETER)
     changes = fix_changes(R, place, key, args[1])
     if not changes:

@@ -1171,11 +1171,11 @@ C blurple
   TD | **Only answer these people** · everyone
   TD | -# Pick people or roles to answer only them in Defaults. Owners always get answers.
   ROW
-    MENTIONABLE mdset:2:ppl:x:al “Everyone (pick to limit)…” 0-25
+    USERS mdset:2:ppl:x:al “Everyone (pick to limit)…” 0-25
   TD | **Never answer**
   TD | -# Wins over everything else. Owners can't be added.
   ROW
-    MENTIONABLE mdset:2:ppl:x:ig “Nobody yet…” 0-25
+    USERS mdset:2:ppl:x:ig “Nobody yet…” 0-25
   TD | **Other bots**
   ROW
     SELECT mdset:2:set:x:b “Other bots…” 1-1
@@ -1438,7 +1438,7 @@ C blurple
   TD | **Never answer**
   TD | -# Wins over everything else. Owners can't be added.
   ROW
-    MENTIONABLE mdset:2:ppl:d:ig “Nobody yet…” 0-25
+    USERS mdset:2:ppl:d:ig “Nobody yet…” 0-25
   TD | **Other bots**
   ROW
     SELECT mdset:2:set:d:b “Other bots…” 1-1
@@ -2670,23 +2670,16 @@ SEC | **Done:** By default, Only answer these people: Everyone → @Sam
 C blurple
   …
 
-=== owner_channel > mdset:2:pg:x:b > mdset:2:pg:x:m > mdset:2:ppl:x:ig=<SAM>,<ROLE>
-type 7 · 28 components · 908 chars
-SEC | **Done:** By default, Never answer: Nobody → @Sam and @Mods
+=== owner_channel > mdset:2:pg:x:b > mdset:2:pg:x:m > mdset:2:ppl:x:ig=<SAM>
+type 7 · 28 components · 898 chars
+SEC | **Done:** By default, Never answer: Nobody → @Sam
     [Undo] mdset:2:un:x:g0000000039
 C blurple
   …
 
-=== owner_channel > mdset:2:pg:x:b > mdset:2:pg:x:m > mdset:2:ppl:x:ig=<SAM>,<ROLE> > mdset:2:un:x:g0000000039
+=== owner_channel > mdset:2:pg:x:b > mdset:2:pg:x:m > mdset:2:ppl:x:ig=<SAM> > mdset:2:un:x:g0000000039
 type 7 · 26 components · 865 chars
 TD | **Undone:** By default, Never answer → back to Nobody
-C blurple
-  TD | ## Defaults › More settings
-  …
-
-=== owner_channel > mdset:2:pg:x:b > mdset:2:pg:x:m > mdset:2:ppl:x:ig
-type 7 · 26 components · 878 chars
-TD | **No change:** Defaults already follows Defaults for Never answer.
 C blurple
   TD | ## Defaults › More settings
   …
@@ -2980,23 +2973,16 @@ C blurple
 ROW
   [Back] mdset:2:pg:x:b
 
-=== owner_channel > mdset:2:pg:d:b > mdset:2:pg:d:m > mdset:2:ppl:d:ig=<SAM>,<ROLE>
-type 7 · 21 components · 692 chars
-SEC | **Done:** In DMs, Never answer: Nobody → @Sam and @Mods
+=== owner_channel > mdset:2:pg:d:b > mdset:2:pg:d:m > mdset:2:ppl:d:ig=<SAM>
+type 7 · 21 components · 682 chars
+SEC | **Done:** In DMs, Never answer: Nobody → @Sam
     [Undo] mdset:2:un:d:g000000003f
 C blurple
   …
 
-=== owner_channel > mdset:2:pg:d:b > mdset:2:pg:d:m > mdset:2:ppl:d:ig=<SAM>,<ROLE> > mdset:2:un:d:g000000003f
+=== owner_channel > mdset:2:pg:d:b > mdset:2:pg:d:m > mdset:2:ppl:d:ig=<SAM> > mdset:2:un:d:g000000003f
 type 7 · 19 components · 649 chars
 TD | **Undone:** In DMs, Never answer → back to Nobody
-C blurple
-  TD | ## DMs › More settings
-  …
-
-=== owner_channel > mdset:2:pg:d:b > mdset:2:pg:d:m > mdset:2:ppl:d:ig
-type 7 · 19 components · 661 chars
-TD | **No change:** DMs already follows Defaults for Never answer.
 C blurple
   TD | ## DMs › More settings
   …
@@ -3312,19 +3298,19 @@ ROW
   [Back to Pixel Plaza] mdset:2:pg:s<G3>:b
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m
-type 7 · 25 components · 980 chars
+type 7 · 25 components · 993 chars
 C blurple
   TD | ## Pixel Plaza › More settings
   SEP
   TD | **Only answer these people** · Same as Defaults: everyone
   TD | -# Pick people or roles to answer only them in Pixel Plaza. Owners always get answers.
-  TD | -# To search people and roles, run /settings in Pixel Plaza.
+  TD | -# To pick roles, or search everyone there, run /settings in Pixel Plaza.
   ROW
-    MENTIONABLE mdset:2:ppl:s<G3>:al “Everyone (pick to limit)…” 0-25
+    USERS mdset:2:ppl:s<G3>:al “Everyone (pick to limit)…” 0-25
   TD | **Never answer**
   TD | -# Wins over everything else. Owners can't be added.
   ROW
-    MENTIONABLE mdset:2:ppl:s<G3>:ig “Nobody yet…” 0-25
+    USERS mdset:2:ppl:s<G3>:ig “Nobody yet…” 0-25
   TD | **Other bots**
   ROW
     SELECT mdset:2:set:s<G3>:b “Other bots…” 1-1
@@ -3662,19 +3648,19 @@ ROW
   [Back to Server 01] mdset:2:pg:s<FILLER>:b
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m
-type 7 · 25 components · 972 chars
+type 7 · 25 components · 985 chars
 C blurple
   TD | ## Server 01 › More settings
   SEP
   TD | **Only answer these people** · Same as Defaults: everyone
   TD | -# Pick people or roles to answer only them in Server 01. Owners always get answers.
-  TD | -# To search people and roles, run /settings in Server 01.
+  TD | -# To pick roles, or search everyone there, run /settings in Server 01.
   ROW
-    MENTIONABLE mdset:2:ppl:s<FILLER>:al “Everyone (pick to limit)…” 0-25
+    USERS mdset:2:ppl:s<FILLER>:al “Everyone (pick to limit)…” 0-25
   TD | **Never answer**
   TD | -# Wins over everything else. Owners can't be added.
   ROW
-    MENTIONABLE mdset:2:ppl:s<FILLER>:ig “Nobody yet…” 0-25
+    USERS mdset:2:ppl:s<FILLER>:ig “Nobody yet…” 0-25
   TD | **Other bots**
   ROW
     SELECT mdset:2:set:s<FILLER>:b “Other bots…” 1-1
@@ -4308,49 +4294,42 @@ C red
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:ppl:s<G3>:al=<SAM> > mdset:2:ok:s<G3>:t000000001
-type 7 · 30 components · 1096 chars
+type 7 · 30 components · 1109 chars
 SEC | **Done:** In Pixel Plaza, Only answer these people: Everyone → @Sam
     [Undo] mdset:2:un:s<G3>:g000000005e
 C blurple
   …
 
-=== owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:ppl:s<G3>:ig=<SAM>,<ROLE>
-type 7 · 28 components · 1080 chars
-SEC | **Done:** In Pixel Plaza, Never answer: Nobody → @Sam and @Mods
+=== owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:ppl:s<G3>:ig=<SAM>
+type 7 · 28 components · 1083 chars
+SEC | **Done:** In Pixel Plaza, Never answer: Nobody → @Sam
     [Undo] mdset:2:un:s<G3>:g000000005f
 C blurple
   …
 
-=== owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:ppl:s<G3>:ig=<SAM>,<ROLE> > mdset:2:un:s<G3>:g000000005f
-type 7 · 26 components · 1037 chars
+=== owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:ppl:s<G3>:ig=<SAM> > mdset:2:un:s<G3>:g000000005f
+type 7 · 26 components · 1050 chars
 TD | **Undone:** In Pixel Plaza, Never answer → back to Nobody
 C blurple
   TD | ## Pixel Plaza › More settings
   …
 
-=== owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:ppl:s<G3>:ig
-type 7 · 26 components · 1049 chars
-TD | **No change:** Pixel Plaza already follows Defaults for Never answer.
-C blurple
-  TD | ## Pixel Plaza › More settings
-  …
-
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:set:s<G3>:b==
-type 7 · 26 components · 1047 chars
+type 7 · 26 components · 1060 chars
 TD | **No change:** Pixel Plaza already follows Defaults for Other bots.
 C blurple
   TD | ## Pixel Plaza › More settings
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:set:s<G3>:b=when-addressed
-type 7 · 26 components · 1079 chars
+type 7 · 26 components · 1092 chars
 TD | **No change:** In Pixel Plaza, Other bots is already Answer when they address it, same as Defaults.
 C blurple
   TD | ## Pixel Plaza › More settings
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:set:s<G3>:b=ignore
-type 7 · 28 components · 1102 chars
+type 7 · 28 components · 1115 chars
 SEC | **Done:** In Pixel Plaza, Other bots: Answer when they address it → Ignore other bots
     [Undo] mdset:2:un:s<G3>:g0000000060
 C blurple
@@ -4371,14 +4350,14 @@ LABEL “Replies in a row to other bots” — 1 to 50. Blank = no cap here.
   INPUT v style 1 max 7 placeholder=“No cap”
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:mod:s<G3>:bx:m > submit
-type 7 · 28 components · 1075 chars
+type 7 · 28 components · 1088 chars
 SEC | **Done:** In Pixel Plaza, Replies in a row to other bots: No limit → 12
     [Undo] mdset:2:un:s<G3>:g0000000061
 C blurple
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:mod:s<G3>:bx:m > submit > mdset:2:un:s<G3>:g0000000061
-type 7 · 26 components · 1057 chars
+type 7 · 26 components · 1070 chars
 TD | **Undone:** In Pixel Plaza, Replies in a row to other bots → back to No limit
 C blurple
   TD | ## Pixel Plaza › More settings
@@ -4394,7 +4373,7 @@ LABEL “Replies per day (total)” — All replies in Pixel Plaza except the ow
   INPUT pd style 1 max 7 placeholder=“No cap”
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:mod:s<G3>:c:m > submit
-type 7 · 28 components · 1137 chars
+type 7 · 28 components · 1150 chars
 SEC | **Done:** In Pixel Plaza, Replies per person per day: No limit → 12; In Pixel Plaza, Replies per day (total): No limit → 12
     [Undo] mdset:2:un:s<G3>:g0000000062
 C blurple
@@ -4408,28 +4387,28 @@ C red
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:set:s<G3>:su==
-type 7 · 26 components · 1062 chars
+type 7 · 26 components · 1075 chars
 TD | **No change:** Pixel Plaza already follows Defaults for Possible prompt injection.
 C blurple
   TD | ## Pixel Plaza › More settings
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:set:s<G3>:su=hold-for-review
-type 7 · 26 components · 1085 chars
+type 7 · 26 components · 1098 chars
 TD | **No change:** In Pixel Plaza, Possible prompt injection is already Hold for my review, same as Defaults.
 C blurple
   TD | ## Pixel Plaza › More settings
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:set:s<G3>:su=ignore
-type 7 · 28 components · 1098 chars
+type 7 · 28 components · 1111 chars
 SEC | **Done:** In Pixel Plaza, Possible prompt injection: Hold for my review → Drop it
     [Undo] mdset:2:un:s<G3>:g0000000063
 C blurple
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m > mdset:2:set:s<G3>:su=ignore > mdset:2:un:s<G3>:g0000000063
-type 7 · 26 components · 1062 chars
+type 7 · 26 components · 1075 chars
 TD | **Undone:** In Pixel Plaza, Possible prompt injection → back to Hold for my review
 C blurple
   TD | ## Pixel Plaza › More settings
@@ -4930,49 +4909,42 @@ C red
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:ppl:s<FILLER>:al=<SAM> > mdset:2:ok:s<FILLER>:t000000001
-type 7 · 30 components · 1086 chars
+type 7 · 30 components · 1099 chars
 SEC | **Done:** In Server 01, Only answer these people: Everyone → @Sam
     [Undo] mdset:2:un:s<FILLER>:g000000006c
 C blurple
   …
 
-=== owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:ppl:s<FILLER>:ig=<SAM>,<ROLE>
-type 7 · 28 components · 1070 chars
-SEC | **Done:** In Server 01, Never answer: Nobody → @Sam and @Mods
+=== owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:ppl:s<FILLER>:ig=<SAM>
+type 7 · 28 components · 1073 chars
+SEC | **Done:** In Server 01, Never answer: Nobody → @Sam
     [Undo] mdset:2:un:s<FILLER>:g000000006d
 C blurple
   …
 
-=== owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:ppl:s<FILLER>:ig=<SAM>,<ROLE> > mdset:2:un:s<FILLER>:g000000006d
-type 7 · 26 components · 1027 chars
+=== owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:ppl:s<FILLER>:ig=<SAM> > mdset:2:un:s<FILLER>:g000000006d
+type 7 · 26 components · 1040 chars
 TD | **Undone:** In Server 01, Never answer → back to Nobody
 C blurple
   TD | ## Server 01 › More settings
   …
 
-=== owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:ppl:s<FILLER>:ig
-type 7 · 26 components · 1039 chars
-TD | **No change:** Server 01 already follows Defaults for Never answer.
-C blurple
-  TD | ## Server 01 › More settings
-  …
-
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:set:s<FILLER>:b==
-type 7 · 26 components · 1037 chars
+type 7 · 26 components · 1050 chars
 TD | **No change:** Server 01 already follows Defaults for Other bots.
 C blurple
   TD | ## Server 01 › More settings
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:set:s<FILLER>:b=when-addressed
-type 7 · 26 components · 1069 chars
+type 7 · 26 components · 1082 chars
 TD | **No change:** In Server 01, Other bots is already Answer when they address it, same as Defaults.
 C blurple
   TD | ## Server 01 › More settings
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:set:s<FILLER>:b=ignore
-type 7 · 28 components · 1092 chars
+type 7 · 28 components · 1105 chars
 SEC | **Done:** In Server 01, Other bots: Answer when they address it → Ignore other bots
     [Undo] mdset:2:un:s<FILLER>:g000000006e
 C blurple
@@ -4993,14 +4965,14 @@ LABEL “Replies in a row to other bots” — 1 to 50. Blank = no cap here.
   INPUT v style 1 max 7 placeholder=“No cap”
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:mod:s<FILLER>:bx:m > submit
-type 7 · 28 components · 1065 chars
+type 7 · 28 components · 1078 chars
 SEC | **Done:** In Server 01, Replies in a row to other bots: No limit → 12
     [Undo] mdset:2:un:s<FILLER>:g000000006f
 C blurple
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:mod:s<FILLER>:bx:m > submit > mdset:2:un:s<FILLER>:g000000006f
-type 7 · 26 components · 1047 chars
+type 7 · 26 components · 1060 chars
 TD | **Undone:** In Server 01, Replies in a row to other bots → back to No limit
 C blurple
   TD | ## Server 01 › More settings
@@ -5016,42 +4988,42 @@ LABEL “Replies per day (total)” — All replies in Server 01 except the owne
   INPUT pd style 1 max 7 placeholder=“No cap”
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:mod:s<FILLER>:c:m > submit
-type 7 · 28 components · 1125 chars
+type 7 · 28 components · 1138 chars
 SEC | **Done:** In Server 01, Replies per person per day: No limit → 12; In Server 01, Replies per day (total): No limit → 12
     [Undo] mdset:2:un:s<FILLER>:g0000000070
 C blurple
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:mod:s<FILLER>:c:m > submit > mdset:2:un:s<FILLER>:g0000000070
-type 7 · 26 components · 1101 chars
+type 7 · 26 components · 1114 chars
 TD | **Undone:** In Server 01, Replies per day (total) → back to No limit; In Server 01, Replies per person per day → back to No limit
 C blurple
   TD | ## Server 01 › More settings
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:set:s<FILLER>:su==
-type 7 · 26 components · 1052 chars
+type 7 · 26 components · 1065 chars
 TD | **No change:** Server 01 already follows Defaults for Possible prompt injection.
 C blurple
   TD | ## Server 01 › More settings
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:set:s<FILLER>:su=hold-for-review
-type 7 · 26 components · 1075 chars
+type 7 · 26 components · 1088 chars
 TD | **No change:** In Server 01, Possible prompt injection is already Hold for my review, same as Defaults.
 C blurple
   TD | ## Server 01 › More settings
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:set:s<FILLER>:su=ignore
-type 7 · 28 components · 1088 chars
+type 7 · 28 components · 1101 chars
 SEC | **Done:** In Server 01, Possible prompt injection: Hold for my review → Drop it
     [Undo] mdset:2:un:s<FILLER>:g0000000072
 C blurple
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m > mdset:2:set:s<FILLER>:su=ignore > mdset:2:un:s<FILLER>:g0000000072
-type 7 · 26 components · 1052 chars
+type 7 · 26 components · 1065 chars
 TD | **Undone:** In Server 01, Possible prompt injection → back to Hold for my review
 C blurple
   TD | ## Server 01 › More settings
@@ -6038,19 +6010,19 @@ ROW
   [Back to Study Group] mdset:2:pg:s<G2>:b
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m
-type 7 · 25 components · 1076 chars
+type 7 · 25 components · 1089 chars
 C blurple
   TD | ## Study Group › More settings
   SEP
   TD | **Only answer these people** · Same as Defaults: everyone
   TD | -# Pick people or roles to answer only them in Study Group. Owners always get answers.
-  TD | -# To search people and roles, run /settings in Study Group.
+  TD | -# To pick roles, or search everyone there, run /settings in Study Group.
   ROW
-    MENTIONABLE mdset:2:ppl:s<G2>:al “Everyone (pick to limit)…” 0-25
+    USERS mdset:2:ppl:s<G2>:al “Everyone (pick to limit)…” 0-25
   TD | **Never answer**
   TD | -# Wins over everything else. Owners can't be added.
   ROW
-    MENTIONABLE mdset:2:ppl:s<G2>:ig “Nobody yet…” 0-25
+    USERS mdset:2:ppl:s<G2>:ig “Nobody yet…” 0-25
   TD | **Other bots**
   ROW
     SELECT mdset:2:set:s<G2>:b “Other bots…” 1-1
@@ -6499,49 +6471,42 @@ C red
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:ppl:s<G2>:al=<SAM> > mdset:2:ok:s<G2>:t000000001
-type 7 · 30 components · 1192 chars
+type 7 · 30 components · 1205 chars
 SEC | **Done:** In Study Group, Only answer these people: Everyone → @Sam
     [Undo] mdset:2:un:s<G2>:g0000000084
 C blurple
   …
 
-=== owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:ppl:s<G2>:ig=<SAM>,<ROLE>
-type 7 · 28 components · 1176 chars
-SEC | **Done:** In Study Group, Never answer: Nobody → @Sam and @Mods
+=== owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:ppl:s<G2>:ig=<SAM>
+type 7 · 28 components · 1179 chars
+SEC | **Done:** In Study Group, Never answer: Nobody → @Sam
     [Undo] mdset:2:un:s<G2>:g0000000085
 C blurple
   …
 
-=== owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:ppl:s<G2>:ig=<SAM>,<ROLE> > mdset:2:un:s<G2>:g0000000085
-type 7 · 26 components · 1133 chars
+=== owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:ppl:s<G2>:ig=<SAM> > mdset:2:un:s<G2>:g0000000085
+type 7 · 26 components · 1146 chars
 TD | **Undone:** In Study Group, Never answer → back to Nobody
 C blurple
   TD | ## Study Group › More settings
   …
 
-=== owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:ppl:s<G2>:ig
-type 7 · 26 components · 1145 chars
-TD | **No change:** Study Group already follows Defaults for Never answer.
-C blurple
-  TD | ## Study Group › More settings
-  …
-
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:b==
-type 7 · 26 components · 1143 chars
+type 7 · 26 components · 1156 chars
 TD | **No change:** Study Group already follows Defaults for Other bots.
 C blurple
   TD | ## Study Group › More settings
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:b=when-addressed
-type 7 · 26 components · 1175 chars
+type 7 · 26 components · 1188 chars
 TD | **No change:** In Study Group, Other bots is already Answer when they address it, same as Defaults.
 C blurple
   TD | ## Study Group › More settings
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:b=ignore
-type 7 · 28 components · 1198 chars
+type 7 · 28 components · 1211 chars
 SEC | **Done:** In Study Group, Other bots: Answer when they address it → Ignore other bots
     [Undo] mdset:2:un:s<G2>:g0000000086
 C blurple
@@ -6562,14 +6527,14 @@ LABEL “Replies in a row to other bots” — 1 to 50. Blank = no cap here.
   INPUT v style 1 max 7 placeholder=“No cap”
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:mod:s<G2>:bx:m > submit
-type 7 · 28 components · 1171 chars
+type 7 · 28 components · 1184 chars
 SEC | **Done:** In Study Group, Replies in a row to other bots: No limit → 12
     [Undo] mdset:2:un:s<G2>:g0000000087
 C blurple
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:mod:s<G2>:bx:m > submit > mdset:2:un:s<G2>:g0000000087
-type 7 · 26 components · 1153 chars
+type 7 · 26 components · 1166 chars
 TD | **Undone:** In Study Group, Replies in a row to other bots → back to No limit
 C blurple
   TD | ## Study Group › More settings
@@ -6585,63 +6550,63 @@ LABEL “Replies per day (total)” — All replies in Study Group except the ow
   INPUT pd style 1 max 7 placeholder=“No cap”
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:mod:s<G2>:c:m > submit
-type 7 · 28 components · 1233 chars
+type 7 · 28 components · 1246 chars
 SEC | **Done:** In Study Group, Replies per person per day: No limit → 12; In Study Group, Replies per day (total): No limit → 12
     [Undo] mdset:2:un:s<G2>:g0000000088
 C blurple
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:mod:s<G2>:c:m > submit > mdset:2:un:s<G2>:g0000000088
-type 7 · 26 components · 1209 chars
+type 7 · 26 components · 1222 chars
 TD | **Undone:** In Study Group, Replies per day (total) → back to No limit; In Study Group, Replies per person per day → back to No limit
 C blurple
   TD | ## Study Group › More settings
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:su==
-type 7 · 28 components · 1078 chars
+type 7 · 28 components · 1091 chars
 SEC | **Done:** In Study Group, Possible prompt injection: Answer it (no check) → Hold for my review
     [Undo] mdset:2:un:s<G2>:g000000008a
 C blurple
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:su== > mdset:2:un:s<G2>:g000000008a
-type 7 · 26 components · 1160 chars
+type 7 · 26 components · 1173 chars
 TD | **Undone:** In Study Group, Possible prompt injection → back to Answer it (no check)
 C blurple
   TD | ## Study Group › More settings
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:su=hold-for-review
-type 7 · 28 components · 1151 chars
+type 7 · 28 components · 1164 chars
 SEC | **Done:** In Study Group, Possible prompt injection: Answer it (no check) → Hold for my review
     [Undo] mdset:2:un:s<G2>:g000000008b
 C blurple
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:su=hold-for-review > mdset:2:un:s<G2>:g000000008b
-type 7 · 26 components · 1160 chars
+type 7 · 26 components · 1173 chars
 TD | **Undone:** In Study Group, Possible prompt injection → back to Answer it (no check)
 C blurple
   TD | ## Study Group › More settings
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:su=ignore
-type 7 · 28 components · 1140 chars
+type 7 · 28 components · 1153 chars
 SEC | **Done:** In Study Group, Possible prompt injection: Answer it (no check) → Drop it
     [Undo] mdset:2:un:s<G2>:g000000008c
 C blurple
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:su=ignore > mdset:2:un:s<G2>:g000000008c
-type 7 · 26 components · 1160 chars
+type 7 · 26 components · 1173 chars
 TD | **Undone:** In Study Group, Possible prompt injection → back to Answer it (no check)
 C blurple
   TD | ## Study Group › More settings
   …
 
 === owner_channel > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m > mdset:2:set:s<G2>:su=answer
-type 7 · 26 components · 1090 chars
+type 7 · 26 components · 1103 chars
 TD | **No change.**
 C blurple
   TD | ## Study Group › More settings

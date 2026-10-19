@@ -1279,14 +1279,14 @@ ROW
   [Back to Pixel Plaza] mdset:2:pg:s<G3>:b
 
 === overlay_broken > mdset:2:pg:d:b > mdset:2:go:d=s<G3> > mdset:2:pg:s<G3>:m
-type 7 · 16 components · 744 chars
+type 7 · 16 components · 757 chars
 TD | ⚠ config.discord.yaml can't be read, so changes from Discord are paused. Fix it on the bot's machine.
 C blurple
   TD | ## Pixel Plaza › More settings
   SEP
   TD | **Only answer these people** · Same as Defaults: everyone
   TD | -# Pick people or roles to answer only them in Pixel Plaza. Owners always get answers.
-  TD | -# To search people and roles, run /settings in Pixel Plaza.
+  TD | -# To pick roles, or search everyone there, run /settings in Pixel Plaza.
   TD | **Never answer**
   TD | -# Wins over everything else. Owners can't be added.
   TD | **Other bots**
@@ -1396,14 +1396,14 @@ ROW
   [Back to Server 01] mdset:2:pg:s<FILLER>:b
 
 === overlay_broken > mdset:2:pg:d:b > mdset:2:go:d=s<FILLER> > mdset:2:pg:s<FILLER>:m
-type 7 · 16 components · 736 chars
+type 7 · 16 components · 749 chars
 TD | ⚠ config.discord.yaml can't be read, so changes from Discord are paused. Fix it on the bot's machine.
 C blurple
   TD | ## Server 01 › More settings
   SEP
   TD | **Only answer these people** · Same as Defaults: everyone
   TD | -# Pick people or roles to answer only them in Server 01. Owners always get answers.
-  TD | -# To search people and roles, run /settings in Server 01.
+  TD | -# To pick roles, or search everyone there, run /settings in Server 01.
   TD | **Never answer**
   TD | -# Wins over everything else. Owners can't be added.
   TD | **Other bots**
@@ -2605,14 +2605,14 @@ ROW
   [Back to Study Group] mdset:2:pg:s<G2>:b
 
 === overlay_broken > mdset:2:pg:d:b > mdset:2:go:d=p1 > mdset:2:go:d=p2 > mdset:2:go:d=s<G2> > mdset:2:pg:s<G2>:m
-type 7 · 16 components · 779 chars
+type 7 · 16 components · 792 chars
 TD | ⚠ config.discord.yaml can't be read, so changes from Discord are paused. Fix it on the bot's machine.
 C blurple
   TD | ## Study Group › More settings
   SEP
   TD | **Only answer these people** · Same as Defaults: everyone
   TD | -# Pick people or roles to answer only them in Study Group. Owners always get answers.
-  TD | -# To search people and roles, run /settings in Study Group.
+  TD | -# To pick roles, or search everyone there, run /settings in Study Group.
   TD | **Never answer**
   TD | -# Wins over everything else. Owners can't be added.
   TD | **Other bots**

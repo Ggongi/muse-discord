@@ -31,6 +31,11 @@ RAW_KEYS = re.compile(r"\b(who|style|privacy|limits|plugins)\.")
 RAW_VALUES = re.compile(r"\b(conversational|when-addressed|none|"
                         r"public-only)\b")
 BARE_ID = re.compile(r"\d{15,25}")
+# Text Displays: the only links are ours (messages), names never ping or
+# mention anyone (spec §7, review B #4).
+FOREIGN_LINK = re.compile(r"(?<!\\)\]\((?!https://discord\.com/channels/)")
+MASS_PING = re.compile(r"@(everyone|here)\b")
+RAW_MENTION = re.compile(r"<(@|@&|#)(?!\d{15,25}>)")
 STRIP = re.compile(r"<(@|@&|#)\d+>|\]\(https://discord\.com/[^)]*\)")
 NAMES = {H.OWNER: "OWNER", H.OWNER2: "OWNER2", H.ADMIN: "ADMIN",
          H.MEMBER: "MEMBER", H.SAM: "SAM", H.KAI: "KAI", H.ANA: "ANA",
@@ -39,7 +44,7 @@ NAMES = {H.OWNER: "OWNER", H.OWNER2: "OWNER2", H.ADMIN: "ADMIN",
          H.GENERAL: "GENERAL", H.MUSECHAT: "MUSECHAT",
          H.WELCOME: "WELCOME", H.LOBBY: "LOBBY", H.HIDDEN: "HIDDEN",
          H.THREAD: "THREAD", H.HOMEWORK: "HOMEWORK", H.ART: "ART"}
-FILLER = re.compile(r"(61000000000000000\d{3}|71000000000000000\d{3})")
+FILLER = re.compile(r"(6[12]000000000000000\d{3}|7[12]000000000000000\d{3})")
 COLOURS = {UI.BLURPLE: "blurple", UI.GREY: "grey", UI.AMBER: "amber",
            UI.RED: "red"}
 STYLES = {1: "primary", 2: "", 3: "success", 4: "danger"}
@@ -158,6 +163,13 @@ def check(resp, where):
             no(not cid.startswith("mdset:2:"), f"custom id {cid}")
             no(len(cid) > 100, f"custom id {len(cid)} chars: {cid}")
     no(len(ids) != len(set(ids)), "duplicate custom ids")
+    for c in H.walk(data.get("components")):
+        if c.get("type") != 10:
+            continue
+        t = c.get("content") or ""
+        no(bool(FOREIGN_LINK.search(t)), f"a link a name made in {t!r}")
+        no(bool(MASS_PING.search(t)), f"@everyone / @here in {t!r}")
+        no(bool(RAW_MENTION.search(t)), f"a mention a name made in {t!r}")
     for line in visible(resp):
         no(bool(RAW_KEYS.search(line)), f"raw key in {line!r}")
         no(bool(RAW_VALUES.search(line)), f"raw value in {line!r}")
