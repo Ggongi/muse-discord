@@ -294,3 +294,58 @@ Resolution for a param `key` for one guild (implemented by the core's
 
 per_guild keys may be guild IDs (preferred, names can collide) or
 server names.
+
+## Update notices
+
+How an owner hears about a new version and starts the update from
+Discord. None of it involves the reply worker.
+
+### update_check.json (watchdog -> monitor)
+
+Written by `watchdog.sh` at most once a day (`updates.check: false`
+turns the check, and the DMs, off). The fields the monitor reads:
+
+| Field           | Meaning                                         |
+| --------------- | ----------------------------------------------- |
+| `upstream`      | upstream commit id; `""` when nothing is new    |
+| `behind`        | how many commits HEAD is behind it              |
+| `entries`       | headings of the CHANGELOG entries new upstream  |
+| `action_needed` | true when one of those lists **Action needed**  |
+
+`checked` (epoch seconds) and `announced` (the commit of the last
+`UPDATE:` line) are the watchdog's own.
+
+### The DM and its buttons
+
+For each new `upstream` commit, the monitor DMs every owner once: the
+new entry headings (up to 5, then "+N more"), a note when action is
+needed, and an action row with two buttons, custom ids
+`mdupd:now:<commit>` and `mdupd:later:<commit>`. It skips the DM when
+HEAD already contains the commit. In `state.json`, `update_notice`
+holds the announced `commit`, the owners still owed the DM (retried
+each poll cycle, up to 10 times), and the owner's `choice`.
+
+A click reaches the monitor as a gateway `INTERACTION_CREATE` (no
+intent needed; the application must not have an Interactions Endpoint
+URL set, or Discord sends clicks there instead). A dedicated thread
+answers it at once, independent of the main loop, because Discord
+fails an interaction not acknowledged within 3 seconds. Interactions
+are dispatched by custom id prefix (`mdupd` here; a slash command
+would register as `/<name>`):
+
+- From a non-owner, or for a commit other than the newest announced
+  one: an ephemeral reply (only the clicker sees it), nothing else.
+- **Update now**: writes `update_request.json`, then edits the DM to
+  show the choice and drop the buttons.
+- **Later**: records the choice and edits the DM the same way. That
+  version is not offered again; a newer commit gets a new DM.
+
+### update_request.json (monitor -> update hook)
+
+`{"commit": "<upstream commit id>", "requested_at": <epoch seconds>,
+"by": "<owner user id>"}`, written atomically on **Update now**.
+`hooks/update-watch.sh` wakes the owner's Muse in its main chat once
+per request (it re-wakes only if the file is still there 6 hours
+later). The Muse updates by following UPDATING.md, then deletes the
+file, also when it stops early. The hook never runs git and holds no
+secrets.

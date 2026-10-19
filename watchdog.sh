@@ -305,6 +305,12 @@ fi
 # line per new upstream version. Never pulls: applying an update is the
 # owner's call, and their Muse does it by following UPDATING.md. Skipped
 # quietly for installs that are not a git clone with an upstream.
+# Each check also records the version in update_check.json for the
+# monitor, which DMs the owners once per new version with [Update now]
+# / [Later] buttons (PROTOCOL.md, "Update notices"): upstream (commit
+# id), behind (commit count), entries (headings of the CHANGELOG
+# entries new upstream, newest first) and action_needed (true when one
+# of them lists something to do). They are cleared when nothing is new.
 UPDATE_STATE="$DIR/update_check.json"
 upd_get() {
   python3 - "$UPDATE_STATE" "$1" <<'PYEOF' 2>/dev/null || echo ""
@@ -312,11 +318,64 @@ import json, sys
 print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))
 PYEOF
 }
+# upd_set CHECKED ANNOUNCED [UPSTREAM BEHIND]: rewrite update_check.json
+# atomically. With UPSTREAM, also record what is new there (read from
+# the fetched upstream CHANGELOG.md, compared with the local one by
+# heading). With UPSTREAM empty, clear the version fields. With no
+# third argument (the fetch failed), keep them as they are.
 upd_set() {
-  python3 - "$UPDATE_STATE" "$1" "$2" <<'PYEOF' 2>/dev/null
-import json, sys
-json.dump({"checked": int(sys.argv[2]), "announced": sys.argv[3]},
-          open(sys.argv[1], "w"))
+  python3 - "$UPDATE_STATE" "$DIR" "$@" <<'PYEOF' 2>/dev/null
+import json, os, re, subprocess, sys, tempfile
+path, d, checked, announced = sys.argv[1:5]
+try:
+    with open(path) as f:
+        cur = json.load(f)
+    if not isinstance(cur, dict):
+        cur = {}
+except Exception:
+    cur = {}
+cur.update(checked=int(checked), announced=announced)
+
+
+def entries(text):
+    out = []
+    for line in text.splitlines():
+        if line.startswith("## "):
+            out.append((line[3:].strip(), []))
+        elif out:
+            out[-1][1].append(line)
+    return out
+
+
+def action_needed(body):
+    m = re.search(r"\*\*Action needed:?\*\*:?[ \t]*\n(.*)", "\n".join(body),
+                  re.S)
+    items = [ln.strip()[2:] for ln in (m.group(1) if m else "").splitlines()
+             if ln.strip().startswith("- ")]
+    return any(not i.lower().startswith("none") for i in items)
+
+
+if len(sys.argv) > 6:
+    upstream, behind = sys.argv[5], int(sys.argv[6] or 0)
+    new = []
+    if upstream:
+        try:
+            with open(os.path.join(d, "CHANGELOG.md")) as f:
+                local = {t for t, _ in entries(f.read())}
+        except OSError:
+            local = set()
+        up = subprocess.run(["git", "-C", d, "show",
+                             upstream + ":CHANGELOG.md"],
+                            capture_output=True, text=True, timeout=30)
+        new = [(t, b) for t, b in entries(up.stdout) if t not in local]
+    cur.update(upstream=upstream, behind=behind if upstream else 0,
+               entries=[t for t, _ in new],
+               action_needed=any(action_needed(b) for _, b in new))
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path),
+                           prefix=".update_check.json.", suffix=".tmp")
+with os.fdopen(fd, "w") as f:
+    json.dump(cur, f)
+os.replace(tmp, path)
 PYEOF
 }
 if [ "$(cfg_get updates.check true)" = "true" ] \
@@ -335,9 +394,11 @@ if [ "$(cfg_get updates.check true)" = "true" ] \
         echo "UPDATE: muse-discord has $behind new commit(s) upstream. Ask your Muse to update it by following UPDATING.md."
         announced="$upstream_head"
       fi
+      [ "${behind:-0}" -gt 0 ] || upstream_head=""
+      upd_set "$now" "$announced" "$upstream_head" "${behind:-0}"
     else
       log "update check: git fetch failed; retrying tomorrow"
+      upd_set "$now" "$announced"
     fi
-    upd_set "$now" "$announced"
   fi
 fi

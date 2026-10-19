@@ -33,6 +33,10 @@ Update muse-discord by following UPDATING.md
 It asks before touching anything you customized. See
 [CHANGELOG.md](CHANGELOG.md) for what changed.
 
+When a new version ships, the bot DMs you what is new, with **Update now** and
+**Later** buttons. **Update now** has your Muse do the update in its main chat.
+To turn the check off, set `updates.check: false` in `config.yaml`.
+
 ## 🤝 Join the community
 
 <a href="https://discord.gg/sxjhCPdEG6"><img align="right" src="https://invidget.switchblade.xyz/sxjhCPdEG6" alt="Join the Muse Discord server"></a>

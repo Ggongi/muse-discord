@@ -15,6 +15,7 @@ monitor.pid
 monitor.heartbeat
 watchdog_state.json
 update_check.json
+update_request.json
 
 # Logs (the previous run's log is kept as <name>.log.1)
 *.log

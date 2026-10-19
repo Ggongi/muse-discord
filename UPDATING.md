@@ -105,6 +105,11 @@ that.
   inside the seams (persona, generation policy, judgment tweaks).
 - **Wake hook**: if `hooks/mention-watch.sh` changed and the runtime
   registered a copy rather than the file itself, update the copy.
+- **Update hook**: if the runtime has no hook for
+  `hooks/update-watch.sh` yet, register it as SETUP.md step 10
+  describes (main chat, ~60 s poll, its wake prompt). From then on
+  the owner can start an update from the bot's update DM. If the
+  script changed and the runtime registered a copy, update the copy.
 
 ## Step 5: Restart
 
@@ -124,6 +129,10 @@ bash watchdog.sh
    (`git log -1 --format='%h %cs'`), what changed in a few sentences,
    which Action needed items were done, and anything still waiting
    on them.
+
+If `update_request.json` exists (the owner started this update from
+the bot's update DM), delete it now. Delete it too if you stop at an
+earlier step.
 
 If the new version misbehaves and the owner wants to roll back:
 `git reset --keep "$OLD"`, then restart as in step 5.
