@@ -22,12 +22,16 @@ transcripts, logs) as a workflow artifact. Fork PRs get no secrets,
 so the workflow skips them; without secrets, `run.py` reports
 "skipped" and passes.
 
-The offline unit tests (`e2e/tests/`, no network) run in the regular
-CI job:
+The harness's own offline unit tests (`e2e/tests/`, no network) run
+in the regular CI job:
 
 ```bash
 python3 -m unittest discover -s e2e/tests -t .
 ```
+
+The package's offline suites (`tests/`, also no network, also in CI)
+test `monitor.py`, the watchdog, the hooks and the settings code
+directly; see `tests/README.md`.
 
 ## One-time setup [owner]
 
@@ -148,14 +152,16 @@ What the settings scenarios cannot cover on Discord:
 - The follow-up window's expiry. It is a 120 s constant in
   `monitor.py` (`FOLLOW_UP_WINDOW_SECS`), not a setting, so testing it
   would take a 2-minute wait per run;
-  `tests/test_settings_layout.py` covers it offline.
+  `e2e/tests/test_settings_layout.py` covers it offline.
 - `role:<id>` entries in `who.allow` / `who.ignore`: the drivers hold
   no roles in the test server.
 - `/settings` itself. Bots cannot run slash commands or click buttons
   on someone else's ephemeral messages, so no driver can open it. The
-  offline suites cover its routing and pages; on Discord it is tested
-  by hand with the checklist below. What it does to the bot is
-  covered live: a scenario's `settings` step writes
+  offline suites in `tests/` cover it: `tests/settingsplumb`
+  (registration, routing, the 3 s deadline, writes and undo) and
+  `tests/settingsui` (every page, for owners, admins and strangers);
+  on Discord it is tested by hand with the checklist below. What it
+  does to the bot is covered live: a scenario's `settings` step writes
   `config.discord.yaml` through the same `muse_settings` calls (see
   "Adding a scenario").
 

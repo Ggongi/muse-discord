@@ -1,0 +1,1 @@
+~1.5 min: watchdog.sh scenarios (test_watchdog.py, ~60 s) and main() runs (test_main.py, ~20 s).
