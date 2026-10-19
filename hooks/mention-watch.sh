@@ -227,9 +227,10 @@ leases=$(jq -cn --argjson ids "$queued" --argjson due "$due" \
         + ($due | map({key: .message_id, value: $now}) | from_entries))}')
 hook_state_set "$leases"
 
-# The persona text (persona.file in config.yaml, relative to the package
-# dir; default persona.md), so the worker need not read it. null when
-# unreadable: the worker then reads the file itself.
+# The persona text (persona in config.yaml, old layout persona.file,
+# relative to the package dir; default persona.md), so the worker need
+# not read it. null when unreadable: the worker then reads the file
+# itself.
 CONFIG="${MUSE_DISCORD_CONFIG:-$PKG_DIR/config.yaml}"
 persona_file=$(python3 - "$CONFIG" "$PKG_DIR" 2>/dev/null <<'PY'
 import os
@@ -237,7 +238,11 @@ import sys
 try:
     import yaml
     with open(sys.argv[1]) as f:
-        name = ((yaml.safe_load(f) or {}).get("persona") or {}).get("file")
+        name = (yaml.safe_load(f) or {}).get("persona")
+    if isinstance(name, dict):
+        name = name.get("file")
+    if not isinstance(name, str):
+        name = None
 except Exception:
     name = None
 print(os.path.join(sys.argv[2], os.path.expanduser(name or "persona.md")))
@@ -249,5 +254,5 @@ else
     persona_args=(--argjson persona null)
 fi
 
-payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, welcome, welcome_prompt, reply_to, burst, burst_fragments, from_bot, bot_turns, participants}]}')
+payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, welcome, welcome_prompt, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings}]}')
 wake "muse-discord mentions pending" "$payload"

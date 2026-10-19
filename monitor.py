@@ -17,24 +17,28 @@ Security model:
 - Discord message content is UNTRUSTED input.
   1. Injection-pattern pre-filter: suspicious messages are quarantined
      for the owner's review instead of being queued for auto-reply
-     (config: safety.injection_quarantine).
-  2. Rate limits: configurable global daily and per-user daily reply
-     caps bound the token budget an attacker could burn by spamming
-     mentions (config: safety.*).
+     (privacy.suspicious).
+  2. Rate limits: daily reply caps, per scope and per person, bound the
+     token budget an attacker could burn by spamming mentions
+     (limits.*). Who is answered at all is enforced too (who.*).
   3. Output validation: worker-drafted replies are length-capped and
      mass mentions (@everyone/@here) are neutralized before sending;
      sends only ever ping users (allowed_mentions), never roles.
   4. Send dedup: never send two replies to the same message (protects
      against overlapping worker runs).
-  5. The bot token is read from the configured token file (or env var)
-     at startup and is never written to any state file. The worker never
-     holds the token; it only reads and writes the queue/outbox files.
+  5. The bot token is read from where token_from points (a file or an
+     env var) at startup and is never written to any state file. The
+     worker never holds the token; it only reads and writes the
+     queue/outbox files.
+  6. never_share: a reply containing one of the owner's listed phrases
+     is held for the owners instead of posted (see hold_reply).
 
 Configuration: config.yaml next to this file (or --config PATH, or the
-MUSE_DISCORD_CONFIG env var). See config.example.yaml for the schema.
+MUSE_DISCORD_CONFIG env var), plus config.discord.yaml (changes made
+from Discord), both read through muse_settings.py. See
+config.example.yaml for the schema; an old-layout file still works.
 """
 import contextlib
-import copy
 import fcntl
 import hashlib
 import importlib.util
@@ -44,6 +48,7 @@ import os
 import queue as pyqueue
 import random
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -56,7 +61,7 @@ import urllib.parse
 from datetime import datetime, timezone
 
 try:
-    import yaml
+    import yaml  # noqa: F401 (muse_settings needs it)
 except ImportError:
     print("PyYAML is required: pip install -r requirements.txt",
           file=sys.stderr)
@@ -86,40 +91,6 @@ MEDIA_DIR = os.path.join(BASE_DIR, "media")
 GENERATED_DIR = os.path.join(BASE_DIR, "generated")
 PLUGINS_DIR = os.path.join(BASE_DIR, "plugins")
 
-DEFAULT_CONFIG = {
-    "bot": {"token_file": "~/.config/muse-discord/bot_token",
-            "token_env": None, "guild_ids": []},
-    "owners": {"user_ids": []},
-    "behavior": {"respond_to": ["mention", "reply_to_bot"],
-                 "active_guild_ids": [],
-                 "bots": "direct",
-                 "dm_policy": "owner_only", "coalesce_seconds": 5,
-                 "max_reply_chars": 1800},
-    "safety": {"injection_quarantine": True, "daily_reply_cap": None,
-               "per_user_daily_cap": None},
-    "engine": {"rest_poll_seconds": 30, "discovery_refresh_minutes": 30,
-               "sweep": {"every_cycles": 6, "grace_seconds": 240,
-                         "max_age_hours": 6, "max_recoveries": 2},
-               "backoff": {"initial_seconds": 60, "max_seconds": 900}},
-    "presence": {"enabled": True, "status_text": "",
-                 "status_kind": "watching"},
-    "persona": {"file": "persona.md"},
-    "updates": {"check": True},
-    "plugins": {"welcome": {"enabled": False},
-                "media_generation": {"enabled": False}},
-}
-
-
-def _deep_merge(base, over):
-    out = dict(base)
-    for k, v in (over or {}).items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k] = _deep_merge(out[k], v)
-        else:
-            out[k] = v
-    return out
-
-
 def _config_path():
     if len(sys.argv) > 2 and sys.argv[1] == "--config":
         return sys.argv[2]
@@ -127,17 +98,75 @@ def _config_path():
         BASE_DIR, "config.yaml")
 
 
-def load_config():
-    cfg = copy.deepcopy(DEFAULT_CONFIG)
-    path = _config_path()
-    if os.path.exists(path):
-        with open(path) as f:
-            user_cfg = yaml.safe_load(f) or {}
-        cfg = _deep_merge(cfg, user_cfg)
-    return cfg
+def _import_settings_module():
+    """muse_settings.py from this package (next to monitor.py); a copy
+    elsewhere on sys.path otherwise."""
+    here = os.path.join(BASE_DIR, "muse_settings.py")
+    if os.path.isfile(here):
+        cached = sys.modules.get("muse_settings")
+        if cached is not None and os.path.abspath(
+                getattr(cached, "__file__", "") or "") == here:
+            return cached
+        spec = importlib.util.spec_from_file_location("muse_settings", here)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["muse_settings"] = mod
+        spec.loader.exec_module(mod)
+        return mod
+    import muse_settings
+    return muse_settings
 
 
-CFG = load_config()
+# ---------------------------------------------------------------------------
+# Settings (muse_settings.py): config.yaml in the new layout or the old
+# one (mapped, with a one-line notice), plus config.discord.yaml, the
+# overlay of changes made from Discord. User-facing behavior is resolved
+# per scope (DM / server / category / channel) through settings(), which
+# re-reads either file when it changes (an mtime check, no restart).
+# Engine internals (timings, the reply size ceiling, guild_ids) are read
+# once here, from engine: (or their old locations).
+# ---------------------------------------------------------------------------
+MS = _import_settings_module()
+try:
+    _SETTINGS = MS.Watcher(_config_path(), PLUGINS_DIR)
+except MS.SettingsError as e:
+    print(f"CONFIG ERROR: config.yaml is invalid; not starting.\n{e}",
+          file=sys.stderr, flush=True)
+    sys.exit(1)
+_S0 = _SETTINGS.current
+# The raw file (test-only keys such as testing: live here).
+CFG = _S0.raw
+if _S0.notice:
+    print(_S0.notice, flush=True)
+
+
+def settings():
+    """The current settings, reloaded when config.yaml or
+    config.discord.yaml changed since the last call (a stat per call; an
+    invalid edit keeps the previous settings and is logged once)."""
+    prev = _SETTINGS.current
+    changed, err = _SETTINGS.poll()
+    if err:
+        print(f"Config re-read failed; keeping the previous settings:\n"
+              f"{err}", flush=True)
+    if changed:
+        _on_settings_changed(prev, _SETTINGS.current)
+    return _SETTINGS.current
+
+
+def _on_settings_changed(prev, cur):
+    global OWNER_USER_IDS
+    print("Settings reloaded (config.yaml or config.discord.yaml "
+          "changed).", flush=True)
+    if cur.notice and not prev.notice:
+        print(cur.notice, flush=True)
+    if sorted(cur.owners) != sorted(prev.owners):
+        OWNER_USER_IDS = set(cur.owners)
+        print(f"Owners are now: {', '.join(sorted(OWNER_USER_IDS)) or 'none'}",
+              flush=True)
+    try:
+        load_plugins()  # a plugin turned on somewhere for the first time
+    except Exception as e:
+        print(f"Plugin load after reload failed: {e}", flush=True)
 
 
 def _cfg_num(section, key, default, cast, name, minimum=None,
@@ -168,25 +197,33 @@ def _cfg_num(section, key, default, cast, name, minimum=None,
     return val
 
 
-# --- Resolved settings (read once at import) ---
-BOT_CFG = CFG.get("bot") or {}
-OWNER_USER_IDS = {str(u) for u in
-                  (CFG.get("owners") or {}).get("user_ids") or []}
-GUILD_ALLOWLIST = {str(g) for g in BOT_CFG.get("guild_ids") or []}
-_BEHAVIOR = CFG.get("behavior") or {}
-RESPOND_TO = set(_BEHAVIOR.get("respond_to") or ["mention", "reply_to_bot"])
-if "name" in RESPOND_TO or _BEHAVIOR.get("call_names"):
+# --- Read once at import: identity and engine internals ---
+OWNER_USER_IDS = set(_S0.owners)
+GUILD_ALLOWLIST = set(_S0.guild_ids())
+_OLD_BEHAVIOR = (CFG.get("behavior") or {}) if _S0.layout == "old" else {}
+# An @mention and a reply to the bot always count; an old config could
+# narrow that (behavior.respond_to), and still does.
+RESPOND_TO = set(_S0.respond_to)
+if "name" in (_OLD_BEHAVIOR.get("respond_to") or []) \
+        or _OLD_BEHAVIOR.get("call_names"):
     print("WARNING: the bare-name trigger was removed; \"name\" in "
           "behavior.respond_to and behavior.call_names are ignored.",
           flush=True)
-# Other bots: "direct" = a bot that @mentions or replies to this bot gets
-# an answer, like a human would (never welcomes); "off" = bots are
-# ignored entirely.
-BOTS_POLICY = str(_BEHAVIOR.get("bots") or "direct").lower()
-if _BEHAVIOR.get("max_bot_turns") is not None:
+if _OLD_BEHAVIOR.get("max_bot_turns") is not None:
     print("WARNING: behavior.max_bot_turns was removed and is ignored; "
           "the worker ends bot conversations by judgment.", flush=True)
-DM_POLICY = str(_BEHAVIOR.get("dm_policy") or "owner_only").lower()
+# Informational (the resolved everywhere / DM values at import); the
+# pipeline resolves the settings per scope through settings().
+_E0 = _S0.resolve(MS.Scope.everywhere())
+_D0 = _S0.resolve(MS.Scope.dm())
+BOTS_POLICY = "direct" if _E0["who.bots"] == "when-addressed" else "off"
+DM_POLICY = "off" if _D0["who.replies"] == "off" else (
+    "owner_only" if _D0["who.dms_from"] == "owners" else "open")
+INJECTION_QUARANTINE = _E0["privacy.suspicious"] != "answer"
+DAILY_REPLY_CAP = _E0["limits.per_day"]                  # None = off
+PER_USER_DAILY_CAP = _E0["limits.per_person_per_day"]    # None = off
+# The conversational follow-up window (who.replies: conversational).
+FOLLOW_UP_WINDOW_SECS = 120
 # Test-only (the e2e harness's driver bots stand in for people): these
 # author ids count as human everywhere the monitor checks author.bot
 # (see is_bot_author). Absent or empty = no effect.
@@ -207,22 +244,19 @@ def is_bot_author(author):
 
 
 # 0 = no coalescing: every trigger is queued on the next tick.
-COALESCE_SECS = _cfg_num(_BEHAVIOR, "coalesce_seconds", 5, float,
-                         "behavior.coalesce_seconds", minimum=0)
+_ENGINE = _S0.engine or {}
+_ENG = "behavior" if _S0.layout == "old" else "engine"
+COALESCE_SECS = _cfg_num(_ENGINE, "coalesce_seconds", 5, float,
+                         f"{_ENG}.coalesce_seconds", minimum=0)
 # Bots running this package send long replies as 2-4 parts with a 2-4s
 # typing beat between them, so a bot's burst gets a longer window to
 # arrive whole before its trigger is queued.
 BOT_COALESCE_SECS = max(COALESCE_SECS, 15.0)
 # Every part is cut to this length too, so it may not exceed Discord's
 # 2000-character message limit; 0 would blank every reply.
-MAX_REPLY_CHARS = _cfg_num(_BEHAVIOR, "max_reply_chars", 1800, int,
-                           "behavior.max_reply_chars", minimum=1,
+MAX_REPLY_CHARS = _cfg_num(_ENGINE, "max_reply_chars", 1800, int,
+                           f"{_ENG}.max_reply_chars", minimum=1,
                            maximum=2000)
-_SAFETY = CFG.get("safety") or {}
-INJECTION_QUARANTINE = bool(_SAFETY.get("injection_quarantine", True))
-DAILY_REPLY_CAP = _SAFETY.get("daily_reply_cap")        # None = off
-PER_USER_DAILY_CAP = _SAFETY.get("per_user_daily_cap")  # None = off
-_ENGINE = CFG.get("engine") or {}
 # Each full poll is a request per channel: 0 would busy-loop the main
 # loop and hammer Discord's per-IP rate limit.
 POLL_INTERVAL = _cfg_num(_ENGINE, "rest_poll_seconds", 30, int,
@@ -255,26 +289,30 @@ CHANNEL_REFRESH_CYCLES = max(
 
 
 def _load_token():
-    # argv (manual/transient use) wins; then the configured env var; then
-    # the configured token file. The watchdog never passes a token.
+    # argv (manual/transient use) wins; then token_from in order: an
+    # env:NAME source when that variable is set, a file when readable.
+    # (An old config's bot.token_env + bot.token_file map to both, the
+    # variable first.) The watchdog never passes a token.
     if len(sys.argv) > 1 and sys.argv[1] != "--config":
         return sys.argv[1]
-    env_name = BOT_CFG.get("token_env")
-    if env_name and os.environ.get(env_name):
-        return os.environ[env_name].strip()
-    token_file = BOT_CFG.get("token_file") \
-        or "~/.config/muse-discord/bot_token"
-    try:
-        with open(os.path.expanduser(token_file)) as f:
-            return f.read().strip()
-    except OSError:
-        return None
+    for kind, where in _S0.token_sources():
+        if kind == "env":
+            if where and os.environ.get(where):
+                return os.environ[where].strip()
+            continue
+        try:
+            with open(os.path.expanduser(where)) as f:
+                return f.read().strip()
+        except OSError:
+            continue
+    return None
 
 
 TOKEN = _load_token()
 if not TOKEN:
-    print("No bot token: pass one as argv[1], set bot.token_env, or store "
-          "it in the configured bot.token_file (mode 600).",
+    print("No bot token: pass one as argv[1], or point token_from (old "
+          "layout: bot.token_env / bot.token_file) at an environment "
+          "variable or a file holding it (mode 600).",
           file=sys.stderr)
     sys.exit(1)
 
@@ -547,6 +585,9 @@ def discover_channels_iter(previous=None):
         finally:
             yield
         names_by_id = {ch["id"]: ch.get("name", "?") for ch in channels}
+        for ch in channels:
+            if ch.get("parent_id"):
+                CHANNEL_CATEGORY[ch["id"]] = ch["parent_id"]
         perms_by_id = {}
         for ch in channels:
             ctype = ch.get("type")
@@ -1100,13 +1141,19 @@ def _snowflake_ts(mid):
         return 0.0
 
 
-def rate_allows(state, user_id, channel_id=None):
-    """Enforce the configured reply caps (safety.daily_reply_cap and
-    safety.per_user_daily_cap; either may be null = off). Owners are
-    never capped: these limits bound abuse and token spend from
-    strangers, not the owner's own use of the bot."""
+def rate_allows(state, user_id, channel_id=None, scope=None):
+    """Enforce limits.per_day and limits.per_person_per_day (none = off).
+    Each cap counts what happens in the scope WHERE IT IS SET (everywhere
+    = one total across DMs and every server, a server = that server, dms
+    = all DMs), and every cap set along the message's scope applies.
+    Owners are never capped or counted: these limits bound abuse and
+    token spend from strangers, not the owner's own use of the bot.
+    Counted at queue time, one per burst."""
     if user_id in OWNER_USER_IDS:
         return True
+    if scope is None:
+        scope = scope_of_channel(channel_id)
+    st = settings()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     rate = state["rate"]
 
@@ -1114,30 +1161,47 @@ def rate_allows(state, user_id, channel_id=None):
         rate["day"] = today
         rate["day_count"] = 0
         rate["users"] = {}
+        rate["scopes"] = {}
+    scopes = rate.setdefault("scopes", {})
 
-    if DAILY_REPLY_CAP is not None and rate["day_count"] >= DAILY_REPLY_CAP:
-        print(f"Rate limit: daily cap ({DAILY_REPLY_CAP}) reached, "
-              f"skipping.", flush=True)
-        return False
+    for cid, cap in st.cap_layers("limits.per_day", scope):
+        n = rate["day_count"] if cid == "everywhere" \
+            else (scopes.get(cid) or {}).get("count", 0)
+        if n >= cap:
+            where = "" if cid == "everywhere" else f" for {cid}"
+            print(f"Rate limit: daily cap ({cap}){where} reached, "
+                  f"skipping.", flush=True)
+            return False
 
-    if PER_USER_DAILY_CAP is not None:
-        day_start = datetime.now(timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0).timestamp()
-        user_hits = [t for t in rate["users"].get(user_id, [])
-                     if t >= day_start]
-        rate["users"][user_id] = user_hits
-        if len(user_hits) >= PER_USER_DAILY_CAP:
-            print(f"Rate limit: user {user_id} hit per-user daily cap, "
+    day_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0).timestamp()
+    for cid, cap in st.cap_layers("limits.per_person_per_day", scope):
+        users = rate["users"] if cid == "everywhere" \
+            else scopes.setdefault(cid, {}).setdefault("users", {})
+        user_hits = [t for t in users.get(user_id, []) if t >= day_start]
+        users[user_id] = user_hits
+        if len(user_hits) >= cap:
+            print(f"Rate limit: user {user_id} hit per-user daily cap"
+                  f"{'' if cid == 'everywhere' else ' for ' + cid}, "
                   f"skipping.", flush=True)
             return False
 
     return True
 
 
-def rate_record(state, user_id):
+def rate_record(state, user_id, scope=None):
+    """Count one queued item against every counter of its scope (see
+    rate_allows). Owners are not counted."""
+    if user_id in OWNER_USER_IDS:
+        return
     rate = state["rate"]
+    now = time.time()
     rate["day_count"] += 1
-    rate["users"].setdefault(user_id, []).append(time.time())
+    rate["users"].setdefault(user_id, []).append(now)
+    for cid in MS.Settings.counter_ids(scope or MS.Scope.everywhere())[1:]:
+        c = rate.setdefault("scopes", {}).setdefault(cid, {})
+        c["count"] = c.get("count", 0) + 1
+        c.setdefault("users", {}).setdefault(user_id, []).append(now)
 
 
 def _iso_ts(iso):
@@ -1185,49 +1249,242 @@ def predates_join(state, msg, gid):
 
 
 # ---------------------------------------------------------------------------
-# Observe mode. Every server starts in observe mode: direct @mentions,
-# replies to the bot, and DMs work, while ambient behavior (welcomes)
-# stays off until the owner lists the server in
-# behavior.active_guild_ids. That list is re-read whenever config.yaml
-# changes, so activating a server needs no restart. When the bot joins a
-# new server, the owners get a DM summary.
+# Scopes and who gets answered. Every decision about a message resolves
+# the settings for where it happened: a DM, or a server channel (a thread
+# uses its parent channel; a channel its category). A new server has no
+# entry of its own and resolves through all_servers, which ships careful
+# (plugins not marked safe_in_new_servers, such as welcomes, stay off).
+# When the bot joins a new server, the owners get a DM summary.
 # ---------------------------------------------------------------------------
-_active_guilds = {"mtime": None,
-                  "ids": {str(g) for g in
-                          _BEHAVIOR.get("active_guild_ids") or []}}
 _FORCE_DISCOVERY = False  # set when the gateway reports a new guild
+# channel id -> its category id (from discovery), for category settings.
+CHANNEL_CATEGORY = {}
 
 
-def active_guild_ids():
-    path = _config_path()
+def scope_for(guild_id=None, channel_id=None, dm=False):
+    """The settings scope of a message or event."""
+    if dm:
+        return MS.Scope.dm()
+    info = CHANNELS.get(channel_id) or {}
+    gid = guild_id or info.get("guild_id")
+    chan = channel_id
+    if info.get("thread") and info.get("parent_id"):
+        chan = info["parent_id"]  # threads and forum posts: the parent
+    cat = CHANNEL_CATEGORY.get(chan) \
+        or (CHANNELS.get(chan) or {}).get("category_id")
+    gname = (GUILDS.get(gid) or {}).get("name") or info.get("guild_name")
+    return MS.Scope.server(gid, gname, chan, cat)
+
+
+def scope_of_channel(channel_id):
+    """The scope of a channel a reply goes to: a monitored server
+    channel, else a DM."""
+    if channel_id in CHANNELS:
+        return scope_for(None, channel_id)
+    return MS.Scope.dm()
+
+
+# (guild, user) -> (role ids, fetched at): roles of authors whose messages
+# carry no member object (the REST poll), for role entries in who.allow /
+# who.ignore. Only fetched when such a list names a role.
+_MEMBER_ROLES = {}
+MEMBER_ROLES_TTL_SECS = 600
+
+
+def member_roles(guild_id, user_id):
+    if not guild_id or not user_id:
+        return set()
+    key = (str(guild_id), str(user_id))
+    hit = _MEMBER_ROLES.get(key)
+    if hit and time.time() - hit[1] < MEMBER_ROLES_TTL_SECS:
+        return hit[0]
+    if rest_backing_off():
+        return hit[0] if hit else set()
     try:
-        mtime = os.path.getmtime(path)
-    except OSError:
-        return _active_guilds["ids"]
-    if mtime == _active_guilds["mtime"]:
-        return _active_guilds["ids"]
-    try:
-        with open(path) as f:
-            cfg = yaml.safe_load(f) or {}
-        ids = {str(g) for g in
-               (cfg.get("behavior") or {}).get("active_guild_ids") or []}
-    except Exception as e:
-        print(f"Config re-read failed ({e}); active servers unchanged.",
-              flush=True)
-        _active_guilds["mtime"] = mtime  # retry on the next save only
-        return _active_guilds["ids"]
-    if _active_guilds["mtime"] is not None and ids != _active_guilds["ids"]:
-        for gid in sorted(ids ^ _active_guilds["ids"]):
-            name = (GUILDS.get(gid) or {}).get("name", gid)
-            print(f"Server {name} ({gid}) is now "
-                  f"{'active' if gid in ids else 'in observe mode'}.",
-                  flush=True)
-    _active_guilds.update(mtime=mtime, ids=ids)
-    return ids
+        roles = set((api_get(f"/guilds/{guild_id}/members/{user_id}")
+                     or {}).get("roles") or [])
+    except Exception:
+        roles = hit[0] if hit else set()
+    _MEMBER_ROLES[key] = (roles, time.time())
+    if len(_MEMBER_ROLES) > 2000:
+        for k in sorted(_MEMBER_ROLES,
+                        key=lambda k: _MEMBER_ROLES[k][1])[:500]:
+            del _MEMBER_ROLES[k]
+    return roles
 
 
-def guild_active(gid):
-    return bool(gid) and str(gid) in active_guild_ids()
+def people_match(value, user_id, roles=lambda: set()):
+    """True when user_id is in a people value: "everyone", "owners", or
+    a list of user ids and "role:<id>" entries (roles() is only called
+    when the list names a role)."""
+    user_id = str(user_id or "")
+    if value == "everyone":
+        return True
+    if value == "owners":
+        return user_id in OWNER_USER_IDS
+    if not isinstance(value, list) or not value:
+        return False
+    if user_id in value:
+        return True
+    want = {v[5:] for v in value if v.startswith("role:")}
+    return bool(want and want & set(roles()))
+
+
+def who_allows(msg, guild_id, resolved):
+    """who.allow / who.ignore for a message's author (owners always
+    pass; ignore wins over allow)."""
+    author = msg.get("author", {}) or {}
+    uid = str(author.get("id") or "")
+    if uid in OWNER_USER_IDS:
+        return True
+
+    def roles():
+        member = msg.get("member") or {}
+        if "roles" in member:
+            return set(member.get("roles") or [])
+        return member_roles(guild_id, uid)
+    if people_match(resolved["who.ignore"], uid, roles):
+        return False
+    return people_match(resolved["who.allow"], uid, roles)
+
+
+# user id -> (shares a server with the bot?, checked at), for
+# who.dms_from: shared-servers. Positive answers last an hour, negative
+# ones ten minutes.
+_SHARED_SERVER = {}
+
+
+def shares_server(user_id):
+    user_id = str(user_id)
+    hit = _SHARED_SERVER.get(user_id)
+    now = time.time()
+    if hit and now - hit[1] < (3600 if hit[0] else 600):
+        return hit[0]
+    if rest_backing_off():
+        return bool(hit and hit[0])
+    for gid in list(GUILDS):
+        try:
+            api_get(f"/guilds/{gid}/members/{user_id}")
+        except Exception as e:
+            if getattr(e, "code", None) in (403, 404):
+                continue  # not a member there
+            return bool(hit and hit[0])  # transient: decide later
+        _SHARED_SERVER[user_id] = (True, now)
+        return True
+    _SHARED_SERVER[user_id] = (False, now)
+    return False
+
+
+def dm_sender_allowed(author):
+    """Whether a DM from author is read and answered: who.replies (off =
+    no DMs at all), who.dms_from (owners | shared-servers | anyone),
+    who.bots, and who.allow / who.ignore at the DM scope."""
+    res = settings().resolve(MS.Scope.dm())
+    if res["who.replies"] == "off":
+        return False
+    uid = str((author or {}).get("id") or "")
+    bot = is_bot_author(author)
+    if uid in OWNER_USER_IDS and not bot:
+        return True
+    if bot and res["who.bots"] == "ignore":
+        return False
+    policy = res["who.dms_from"]
+    if policy == "owners":
+        return False
+    if people_match(res["who.ignore"], uid) \
+            or not people_match(res["who.allow"], uid):
+        return False
+    return policy == "anyone" or shares_server(uid)
+
+
+def retire_overlay_changes():
+    """Discord-side settings changes that config.yaml has overtaken (the
+    file was edited at that spot afterwards) or that no longer validate:
+    move them to the overlay's history, one owner DM each (the conflict
+    rule: the newest intent wins). Waits out a REST backoff so the DMs
+    can land."""
+    current = settings()
+    if not current.retire or rest_backing_off():
+        return 0
+    notes = current.commit_retirements()
+    for note in notes:
+        print(note, flush=True)
+        notify_owners(note)
+    return len(notes)
+
+
+def dms_enabled():
+    return settings().get("who.replies", MS.Scope.dm()) != "off"
+
+
+# ---------------------------------------------------------------------------
+# Conversational follow-ups (who.replies: conversational, the default).
+# After the bot's reply to a HUMAN is actually sent in a channel, that
+# person's next messages there within FOLLOW_UP_WINDOW_SECS count as
+# addressed, without an @mention or a Discord reply. Only that person;
+# only the bot's own replies (re)open the window, so it cannot run on
+# without the bot; a message that addresses someone else (a reply to
+# another person's message, or an @mention of another user or a role)
+# closes it and is not a follow-up. Threads are their own channels here.
+# Follow-ups are coalesced, gated and ledgered like mentions, and the
+# queue item says follow_up: true; the reconciliation sweep never
+# requeues them (a missed follow-up is not a dropped mention).
+# state["follow_up"]: {"<channel>:<user>": time the window opened}
+# ---------------------------------------------------------------------------
+def open_follow_up(state, channel_id, user_id):
+    fu = state.setdefault("follow_up", {})
+    now = time.time()
+    fu[f"{channel_id}:{user_id}"] = now
+    for k in [k for k, t in fu.items()
+              if now - t > FOLLOW_UP_WINDOW_SECS]:
+        del fu[k]
+
+
+def addresses_someone_else(msg):
+    """A Discord reply to someone else's message, or an @mention of
+    another user or a role (the bot's own mention is direct address)."""
+    if msg.get("message_reference"):
+        rm = msg.get("referenced_message") or {}
+        if (rm.get("author", {}) or {}).get("id") != BOT_ID:
+            return True
+    if any((m or {}).get("id") != BOT_ID for m in msg.get("mentions") or []):
+        return True
+    return bool(msg.get("mention_roles") or msg.get("mention_everyone"))
+
+
+def follow_up_open(state, msg):
+    """True when msg falls in its author's open follow-up window in its
+    channel (and does not address someone else, which closes it)."""
+    fu = (state or {}).get("follow_up") or {}
+    author = msg.get("author", {}) or {}
+    key = f"{msg.get('channel_id')}:{author.get('id')}"
+    opened = fu.get(key)
+    if opened is None or is_bot_author(author):
+        return False
+    ts = _snowflake_ts(msg.get("id")) or time.time()
+    if ts > opened + FOLLOW_UP_WINDOW_SECS:
+        fu.pop(key, None)
+        return False
+    if ts < opened - 2:
+        return False  # written before the bot's reply landed
+    if addresses_someone_else(msg):
+        fu.pop(key, None)
+        return False
+    return True
+
+
+def own_replies_in_run(history, msg):
+    """How many of the bot's own messages are in the run of bot messages
+    that ends just before msg (since a human last spoke in the channel):
+    the bot's consecutive replies in a bot-to-bot exchange."""
+    n = 0
+    for h in reversed([h for h in history
+                       if int(h["id"]) < int(msg["id"])]):
+        if not h.get("bot"):
+            break
+        if h.get("author_id") == BOT_ID:
+            n += 1
+    return n
 
 
 def notify_owners(text):
@@ -1266,14 +1523,25 @@ def _join_summary(gid, ginfo, channels):
                       for n, s in visible[:40])
     if len(visible) > 40:
         shown += f", and {len(visible) - 40} more"
+    st = settings()
+    res = st.resolve(MS.Scope.server(gid, name))
+    replies = {"off": "I stay quiet there",
+               "when-addressed": "I answer @mentions and replies to my "
+                                 "messages there",
+               "conversational": "I answer @mentions and replies to my "
+                                 "messages there, and the follow-ups of "
+                                 "someone I just answered"}
+    on = [pid for pid in sorted(st.manifests)
+          if res.get(f"plugins.{pid}.enabled")]
+    how = (f"set servers.\"{gid}\" in config.yaml (no restart needed)"
+           if st.layout == "new" else
+           f"add \"{gid}\" to behavior.active_guild_ids in config.yaml "
+           f"(no restart needed)")
     return (f"I just joined **{name}** (server ID {gid}).\n"
-            f"Mode: **observe**. I answer @mentions, replies to my "
-            f"messages, and DMs there. Ambient behavior (welcomes) "
-            f"stays off.\n"
+            f"{replies.get(res['who.replies'], replies['when-addressed'])}"
+            f". Plugins on there: {', '.join(on) or 'none'}.\n"
             f"Channels I can see ({len(visible)}): {shown or 'none'}\n"
-            f"To activate that server, add \"{gid}\" to "
-            f"behavior.active_guild_ids in config.yaml. No restart "
-            f"needed.")
+            f"To change what I do there (welcomes, for one), {how}.")
 
 
 def sync_guilds(state, guilds, channels):
@@ -1290,11 +1558,34 @@ def sync_guilds(state, guilds, channels):
         is_new = gid not in known
         known[gid] = ginfo.get("name") or gid
         if is_new and not first_run:
-            print(f"Joined server {known[gid]} ({gid}): observe mode until "
-                  f"activated.", flush=True)
+            print(f"Joined server {known[gid]} ({gid}): its settings "
+                  f"come from all_servers until it has its own.",
+                  flush=True)
             if gid not in notices:
                 notices.append(gid)
     flush_join_notices(state, guilds, channels)
+    try:
+        warn_stale_labels()
+    except Exception as e:
+        print(f"Label check failed: {e}", flush=True)
+
+
+_stale_labels = set()
+
+
+def warn_stale_labels():
+    """A `name:` label in config.yaml is only for people; say so once
+    when Discord calls that server or channel something else now."""
+    for sid, label in settings().labels.items():
+        now = (GUILDS.get(sid) or {}).get("name") \
+            or (CHANNELS.get(sid) or {}).get("name")
+        if not now or not label or str(label).lstrip("#") == now \
+                or (sid, label) in _stale_labels:
+            continue
+        _stale_labels.add((sid, label))
+        print(f"Note: config.yaml labels {sid} \"{label}\", but Discord "
+              f"calls it \"{now}\" now (the label is only for you; "
+              f"the id is what counts).", flush=True)
 
 
 def flush_join_notices(state, guilds, channels):
@@ -1352,27 +1643,26 @@ UPDATE_DM_TRIES = 10  # owed DMs retried once per cycle, then given up
 # The newest announced version, mirrored from state.json for the
 # interaction thread (only the main loop touches state).
 _update_announced = {"version": None}
-_updates_cfg = {"mtime": None,
-                "check": (CFG.get("updates") or {}).get("check") is not False}
+_updates_cfg = {"mtime": None, "check": _S0.updates_notify}
 
 
 def updates_enabled():
-    """updates.check from config.yaml, re-read when the file changes, so
-    turning it off stops the DMs without a restart."""
+    """updates.notify (old layout: updates.check), re-read when
+    config.yaml or the overlay changes, so turning it off stops the DMs
+    without a restart."""
     path = _config_path()
     try:
         mtime = os.path.getmtime(path)
     except OSError:
         return _updates_cfg["check"]
+    try:
+        mtime = (mtime, os.path.getmtime(_SETTINGS.overlay_path))
+    except OSError:
+        pass  # no overlay: the file's mtime alone
     if mtime != _updates_cfg["mtime"]:
         _updates_cfg["mtime"] = mtime
-        try:
-            with open(path) as f:
-                cfg = yaml.safe_load(f) or {}
-            _updates_cfg["check"] = \
-                (cfg.get("updates") or {}).get("check") is not False
-        except Exception:
-            pass  # unreadable mid-edit: keep the last known value
+        # An invalid edit keeps the last known settings.
+        _updates_cfg["check"] = settings().updates_notify
     return _updates_cfg["check"]
 
 
@@ -1498,6 +1788,27 @@ def apply_record(state, rec):
         print(f"Owner {rec.get('by')} chose "
               f"{'Update now' if rec.get('action') == 'now' else 'Later'} "
               f"for update {rec.get('version')}.", flush=True)
+    elif rec.get("kind") == "hold_choice":
+        hid = rec.get("hold")
+        hold = state.get("holds", {}).pop(hid, None)
+        _holds_live.pop(hid, None)
+        if not hold:
+            return  # expired meanwhile
+        where = hold.get("where") or "?"
+        if rec.get("action") == "send":
+            # Sent through the outbox like any reply (retries, the
+            # attachment pipeline, settling); the hold id lets this one
+            # item past the never_share check.
+            state.setdefault("hold_released", {})[hid] = time.time()
+            state.setdefault("released", []).append(
+                dict(hold["item"], _hold=hid))
+            print(f"Owner {rec.get('by')} chose Send anyway for the held "
+                  f"reply in {where}.", flush=True)
+        else:
+            _settle(state, hold["item"], "skipped",
+                    "never_share hold discarded by an owner")
+            print(f"Owner {rec.get('by')} discarded the held reply in "
+                  f"{where}.", flush=True)
 
 
 # Interaction dispatch: one handler per key, the custom_id prefix (the
@@ -1618,6 +1929,118 @@ def on_update_button(ix, rest, uid, record):
 register_interaction("mdupd", on_update_button)
 
 
+# ---------------------------------------------------------------------------
+# never_share backstop. Before a reply goes anywhere but an owner's own
+# DM, its text is checked against privacy.never_share (case-insensitive,
+# whole phrases). A hit is not sent: the draft is held in
+# state["holds"] and the owners get it in a DM with [Send anyway] /
+# [Discard] (owners only). Holding settles the queue item (it leaves the
+# queue, so the wake hook never hands it to a worker again, and is
+# ledgered as skipped, so the sweep leaves it alone). Send anyway puts
+# it back through the outbox as the original reply; Discard and the
+# 24-hour expiry drop it. The phrase list is never logged.
+# ---------------------------------------------------------------------------
+HOLD_TTL_SECS = 24 * 3600
+# hold id -> held at, mirrored from state.json for the interaction thread
+# (only the main loop touches state).
+_holds_live = {}
+
+
+def never_share_hit(state, item, qid, parts):
+    """True when this reply must be held (see above)."""
+    phrases = settings().get("privacy.never_share", MS.Scope.everywhere())
+    if not phrases or not parts:
+        return False
+    hid = item.get("_hold")
+    if hid and hid in state.get("hold_released", {}):
+        return False  # an owner chose Send anyway
+    meta = state.get("item_meta", {}).get(qid) if qid else None
+    if meta:
+        owner_dm = bool(meta.get("dm")) \
+            and str(meta.get("author_id")) in OWNER_USER_IDS
+    else:
+        owner_dm = item.get("channel_id") in DM_CHANNELS
+    if owner_dm:
+        return False
+    text = "\n".join(parts)
+    return any(re.search(r"(?<!\w)" + re.escape(str(p)) + r"(?!\w)", text,
+                         re.IGNORECASE) for p in phrases if str(p).strip())
+
+
+def hold_buttons(hid):
+    return [{"type": 1, "components": [
+        {"type": 2, "style": 4, "label": "Send anyway",
+         "custom_id": f"mdhold:send:{hid}"},
+        {"type": 2, "style": 2, "label": "Discard",
+         "custom_id": f"mdhold:discard:{hid}"}]}]
+
+
+def hold_reply(state, item, qid, parts):
+    """Hold a reply that hit never_share and DM the owners about it."""
+    hid = secrets.token_hex(6)
+    where = item.get("channel_name") or item.get("channel_id")
+    to = item.get("author") or "someone"
+    state.setdefault("holds", {})[hid] = {
+        "item": {k: v for k, v in item.items() if k != "_retry"},
+        "at": time.time(), "qid": qid, "where": where, "to": to}
+    _holds_live[hid] = time.time()
+    _settle(state, item, "skipped", "held for owner review (never_share)")
+    head = (f"**Held a reply** to {to} in {where}: it contains a phrase "
+            f"from your never_share list, so nothing was posted.\n")
+    tail = ("\n**Send anyway** posts it as written; **Discard** drops "
+            "it. Undecided holds are discarded after 24 hours.")
+    body = "> " + "\n".join(parts).replace("\n", "\n> ")
+    room = 1990 - len(head) - len(tail)
+    if len(body) > room:
+        body = body[:room - 1] + "\u2026"
+    payload = {"content": head + body + tail,
+               "allowed_mentions": {"parse": []},
+               "components": hold_buttons(hid)}
+    delivered = [uid for uid in sorted(OWNER_USER_IDS)
+                 if dm_owner(uid, payload)]
+    print(f"Held a reply to {to} in {where}: it contains a never_share "
+          f"phrase; {'owners DMed' if delivered else 'no owner reachable'}"
+          f" (hold {hid}).", flush=True)
+
+
+def expire_holds(state):
+    now = time.time()
+    holds = state.get("holds") or {}
+    for hid, hold in list(holds.items()):
+        if now - hold.get("at", 0) >= HOLD_TTL_SECS:
+            del holds[hid]
+            _holds_live.pop(hid, None)
+            _settle(state, hold["item"], "skipped",
+                    "never_share hold expired (24 h)")
+            print(f"Held reply in {hold.get('where')} expired undecided; "
+                  f"discarded.", flush=True)
+    released = state.get("hold_released") or {}
+    for hid in [h for h, t in released.items() if now - t > 2 * 86400]:
+        del released[hid]
+
+
+def on_hold_button(ix, rest, uid, record):
+    action, _, hid = rest.partition(":")
+    at = _holds_live.get(hid)
+    if action not in ("send", "discard") or at is None \
+            or time.time() - at >= HOLD_TTL_SECS:
+        return ephemeral("That held reply is no longer waiting (already "
+                         "sent or discarded, or it expired after 24 "
+                         "hours).")
+    _holds_live.pop(hid, None)  # one decision per hold
+    record({"kind": "hold_choice", "hold": hid, "action": action,
+            "by": uid, "at": int(time.time())})
+    line = ("**Send anyway** chosen: posting it now." if action == "send"
+            else "**Discarded**: it will not be posted.")
+    original = (ix.get("message") or {}).get("content") or ""
+    return {"type": 7, "data": {
+        "content": original[:1990 - len(line)] + "\n\n" + line,
+        "components": [], "allowed_mentions": {"parse": []}}}
+
+
+register_interaction("mdhold", on_hold_button)
+
+
 def is_mention(msg):
     """True when the message @mentions the bot on the platform. Plain
     text containing the bot's name is NOT a mention: in a server whose
@@ -1629,21 +2052,47 @@ def is_mention(msg):
     return any(m.get("id") == BOT_ID for m in msg.get("mentions", []))
 
 
-def trigger_kind(msg):
-    """Classify how a message addresses the bot, per behavior.respond_to:
-    "mention" (a platform @mention or a reply to the bot: direct address)
-    or None. The bot's own messages never trigger. Other bots trigger by
-    direct address only, and only under behavior.bots: direct."""
+def trigger_kind(msg, guild_id=None, state=None):
+    """Classify how a server message addresses the bot, with the settings
+    of its scope: "mention" (a platform @mention or a Discord reply to
+    the bot: direct address), "follow_up" (only when state is given: the
+    author's conversational follow-up window in this channel is open), or
+    None. who.replies: off answers nobody; other bots trigger by direct
+    address only, and never under who.bots: ignore; who.allow /
+    who.ignore apply to everyone but the owners. The bot's own messages
+    never trigger."""
     author = msg.get("author", {}) or {}
     if author.get("id") == BOT_ID:
         return None
-    if is_bot_author(author) and BOTS_POLICY != "direct":
+    gid = guild_id or msg.get("guild_id") \
+        or (CHANNELS.get(msg.get("channel_id")) or {}).get("guild_id")
+    here = settings().resolve(scope_for(gid, msg.get("channel_id")))
+    replies = here["who.replies"]
+    if replies == "off":
         return None
-    if "mention" in RESPOND_TO and is_mention(msg):
-        return "mention"
-    if "reply_to_bot" in RESPOND_TO and is_reply_to_bot(msg):
-        return "mention"
-    return None
+    if is_bot_author(author) and here["who.bots"] == "ignore":
+        return None
+    direct = ("mention" in RESPOND_TO and is_mention(msg)) \
+        or ("reply_to_bot" in RESPOND_TO and is_reply_to_bot(msg))
+    if not direct and not (state is not None
+                           and replies == "conversational"
+                           and follow_up_open(state, msg)):
+        return None
+    if not who_allows(msg, gid, here):
+        return None
+    return "mention" if direct else "follow_up"
+
+
+def join_enabled(guild_id, channel_id):
+    """True when a plugin with a member_join hook (welcomes) is on where
+    the join message appeared."""
+    scope = scope_for(guild_id, channel_id)
+    st = settings()
+    for fn in PLUGIN_HOOKS.get("member_join", []):
+        pid = _HOOK_OWNER.get(id(fn))
+        if pid is None or st.plugin_enabled(pid, scope):
+            return True
+    return False
 
 
 def is_reply_to_bot(msg):
@@ -1716,6 +2165,8 @@ def stage_trigger(state, msg, cname, guild_id, kind, dm=False):
         if msg["id"] == entry["first_id"] or any(
                 f["id"] == msg["id"] for f in entry["fragments"]):
             return  # already in this burst (staged twice): nothing to add
+        if kind == "mention" and entry.get("kind") == "follow_up":
+            entry["kind"] = "mention"  # direct address beats a follow-up
         entry["fragments"].append(msg)
         print(f"Additional trigger from "
               f"{(msg.get('author', {}) or {}).get('username')} folded into "
@@ -1727,7 +2178,7 @@ def stage_trigger(state, msg, cname, guild_id, kind, dm=False):
         "channel_name": cname,
         "guild_id": guild_id,
         "author_id": author_id,
-        "kind": kind,  # "mention" | "dm"
+        "kind": kind,  # "mention" | "follow_up" | "dm"
         "dm": dm,
         "first_seen": time.time(),
         "window": BOT_COALESCE_SECS
@@ -1872,7 +2323,8 @@ def flush_pending(state, queue, force=False):
             ok = enqueue_message(trigger, entry["channel_name"], state,
                                  queue, dm=entry["kind"] == "dm",
                                  fragments=entry["fragments"],
-                                 guild_id=entry["guild_id"])
+                                 guild_id=entry["guild_id"],
+                                 follow_up=entry["kind"] == "follow_up")
             n_frag = len(entry["fragments"])
             why = " (author stopped typing)" if early and not force else ""
             print(f"Flushed {entry['kind']} burst "
@@ -2954,24 +3406,27 @@ def classify_message(state, msg, channel_name, guild_id=None):
     """Classify a single message exactly the way check_channel's loop does.
 
     Shared by the REST poll path and the gateway fast path so both ingest
-    routes behave identically. Returns "mention", "join", or None
-    (folded into a burst, skipped, or not actionable).
+    routes behave identically. Returns "mention", "follow_up", "join",
+    or None (folded into a burst, skipped, or not actionable).
     """
     if predates_join(state, msg, guild_id):
         # Older than the bot's arrival in this guild: never a trigger,
         # never a fragment. It can still reach the worker as history.
         return None
     if is_join_message(msg):
-        # Welcomes are ambient: off while the server is in observe mode.
-        return "join" if guild_active(guild_id) else None
+        # Welcomes are a plugin, on per scope (off in new servers).
+        return "join" if join_enabled(guild_id, msg.get("channel_id")) \
+            else None
     author = msg.get("author", {}) or {}
     if author.get("id") == BOT_ID:
         return None  # the bot's own messages: never triggers or fragments
-    if is_bot_author(author) and BOTS_POLICY != "direct":
+    if is_bot_author(author) and settings().get(
+            "who.bots", scope_for(guild_id, msg.get("channel_id"))) \
+            == "ignore":
         return None
     if hold_fragment(state, msg.get("channel_id"), msg):
         return None  # folded into a burst already being coalesced
-    return trigger_kind(msg)
+    return trigger_kind(msg, guild_id, state)
 
 
 def is_join_message(msg):
@@ -2993,16 +3448,16 @@ def is_join_message(msg):
 # existing channel if there is one, creates an empty one otherwise, and never
 # sends a message).
 #
-# Which users get resolved for REST polling follows behavior.dm_policy:
-# "owner_only" (the default) resolves only the owners' DM channels, so
-# anyone else who DMs the bot is silently ignored: the bot never sees their
-# messages, so there is nothing to decline or deflect. "open" cannot be
-# enumerated (there is no DM list endpoint for bots), so DMs then arrive
-# via the gateway only. "off" disables DM polling entirely.
+# The owners' DM channels are resolved for REST polling (gap repair and
+# the sweep) unless DMs are off (dms.who.replies: off). Anyone else's DMs
+# cannot be enumerated (there is no DM list endpoint for bots), so they
+# arrive via the gateway only, and only as who.dms_from allows: under the
+# default (owners) the bot never even records a stranger's DM, so there
+# is nothing to decline or deflect.
 def dm_poll_user_ids():
-    if DM_POLICY == "owner_only":
-        return sorted(OWNER_USER_IDS)
-    return []
+    if not dms_enabled():
+        return []
+    return sorted(OWNER_USER_IDS)
 
 
 # The DM channels the poll has resolved, {channel_id: recipient name}:
@@ -3062,6 +3517,7 @@ def check_dm_channel(dm_id, dm_name, state):
     return [m for m in sorted(new, key=lambda m: int(m["id"]))
             if m.get("author", {}).get("id") != BOT_USER_ID
             and m["id"] not in gw_done
+            and dm_sender_allowed(m.get("author"))
             and not hold_fragment(state, dm_id, m)]
 
 
@@ -3129,11 +3585,49 @@ def link_mentions(text, channel_id, state):
     return pattern.sub(lambda m: f"<@{names[m.group(1).lower()]}>", text)
 
 
+def settings_card(scope, here, author_id, from_bot, channel_id,
+                  exchange=0):
+    """The per-message settings card for the worker (item "settings"):
+    where it is, who is speaking, who can read the reply, and the style
+    and privacy settings that steer it. In an owner's DM, memory is
+    always "everything"."""
+    dm = scope.is_dm
+    owner = str(author_id) in OWNER_USER_IDS
+    card = {"where": "dm" if dm else "server"}
+    if not dm:
+        info = CHANNELS.get(channel_id) or {}
+        card["server"] = (GUILDS.get(scope.guild_id) or {}).get("name") \
+            or info.get("guild_name") or scope.guild_id
+        card["channel"] = info.get("name") or channel_id
+    card["speaker"] = "owner" if owner else ("bot" if from_bot
+                                             else "member")
+    card["audience"] = "private" if dm else "public"
+    card["memory"] = "everything" if (dm and owner) \
+        else here["privacy.memory"]
+    card["length"] = here["style.length"]
+    card["notes"] = here["style.notes"]
+    if from_bot:
+        card["bot_exchange"] = {"count": exchange + 1,
+                                "limit": here["who.bot_exchange_limit"]}
+    return card
+
+
+def note_item_meta(state, mid, **meta):
+    """Remember who a queued item answers (bounded): the send path opens
+    follow-up windows and applies the never_share backstop from it."""
+    m = state.setdefault("item_meta", {})
+    m[mid] = meta
+    for old in list(m)[:-300]:
+        del m[old]
+
+
 def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
-                    guild_id=None):
+                    guild_id=None, follow_up=False):
     """Run one message (plus any burst fragments coalesced with it) through
     the quarantine/rate-limit/media pipeline and append a SINGLE item to
-    the queue. Returns True if queued."""
+    the queue. follow_up: staged from a conversational follow-up window
+    (the item says follow_up: true unless some message of the burst
+    addresses the bot directly). Returns True if queued."""
     fragments = [f for f in (fragments or []) if f["id"] != msg["id"]]
     if any(q["message_id"] == msg["id"] for q in queue):
         return False
@@ -3154,24 +3648,51 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     chan_hist = state.get("history", {}).get(msg["channel_id"], [])
     from_bot = is_bot_author(msg.get("author"))
     bot_turns = bot_run_length(chan_hist, msg)
+    scope = scope_for(guild_id, msg["channel_id"], dm)
+    here = settings().resolve(scope)
+    # who.bot_exchange_limit: the bot's consecutive replies to bots in
+    # this channel since a human spoke.
+    exchange = own_replies_in_run(chan_hist, msg) if from_bot else 0
+    limit = here["who.bot_exchange_limit"]
+    if from_bot and limit is not None and exchange >= limit:
+        ledger_record_many(burst_ids, "skipped",
+                           f"bot exchange limit ({limit}) reached",
+                           channel_id=msg.get("channel_id"),
+                           author=author_name)
+        print(f"Not answering bot {author_name} in {cname}: the bot "
+              f"exchange limit ({limit}) is reached.", flush=True)
+        return False
+    suspicious = here["privacy.suspicious"]
+
+    def hold_suspicious(matched):
+        if suspicious == "ignore":
+            ledger_record_many(burst_ids, "skipped",
+                               f"suspicious, ignored: {matched}",
+                               channel_id=msg.get("channel_id"),
+                               author=author_name)
+            print(f"Ignored a suspicious message from {author_name} in "
+                  f"{cname} (privacy.suspicious: ignore).", flush=True)
+        else:
+            quarantine(msg, cname, matched, fragments)
     # The worker sees the whole burst as one message: fragments joined in
     # order under the trigger's text.
     parts = [msg.get("content", "")]
     parts += [f.get("content", "") for f in fragments]
     content = "\n".join(p for p in parts if p)
 
-    # 1. Injection pre-filter -> quarantine, no auto-reply (combined text).
-    if INJECTION_QUARANTINE:
+    # 1. Injection pre-filter -> quarantine (privacy.suspicious:
+    #    hold-for-review) or drop (ignore), no auto-reply (combined text).
+    if suspicious != "answer":
         matched = is_suspicious(content)
         if matched:
-            quarantine(msg, cname, matched, fragments)
+            hold_suspicious(matched)
             return False
 
     # 2. Rate limits (also bound token spend). One charge per burst, not
     #    per fragment.
-    if not rate_allows(state, author_id, msg["channel_id"]):
+    if not rate_allows(state, author_id, msg["channel_id"], scope):
         return False
-    rate_record(state, author_id)
+    rate_record(state, author_id, scope)
 
     # 3. Download viewable media so the worker can see it, and extract
     #    document text so the worker can read attachments (trigger + every
@@ -3193,7 +3714,7 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     #     injection pre-filter. The bot's own replied-to message is
     #     skipped: everyday phrasing in it ("you are now set up") would
     #     quarantine every reply to it.
-    if INJECTION_QUARANTINE:
+    if suspicious != "answer":
         extra_texts = [(f"document {d.get('name')}", d.get("text") or "")
                        for d in documents]
         if reply_ctx and not reply_ctx.get("is_bot"):
@@ -3202,8 +3723,7 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         for where, text in extra_texts:
             matched = is_suspicious(text)
             if matched:
-                quarantine(msg, cname, f"{matched} (in {where})",
-                           fragments)
+                hold_suspicious(f"{matched} (in {where})")
                 return False
 
     # 4. Attach recent conversation history (excluding the trigger and its
@@ -3221,9 +3741,16 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     #    worker's outbox item does not carry the flag); it must not claim
     #    anywhere that generation is starting.
     extra = {}
+
+    def author_matches(who):
+        return people_match(who, author_id, lambda: (
+            set((msg.get("member") or {}).get("roles") or [])
+            if "roles" in (msg.get("member") or {})
+            else member_roles(guild_id, author_id)))
     for res in call_hook("gate_message",
-                         {"state": state, "owners": OWNER_USER_IDS},
-                         msg, guild_id):
+                         {"state": state, "owners": OWNER_USER_IDS,
+                          "author_matches": author_matches},
+                         msg, guild_id, scope=scope):
         if isinstance(res, dict):
             extra.update(res)
     may_generate = bool(extra.pop("may_generate", False))
@@ -3236,7 +3763,8 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     # 6. Owner commands: stamped for the owners' messages only, from the
     #    verified user ID in code. The worker decides with natural-language
     #    understanding whether the message asks the bot to DO something.
-    owner_command = author_id in OWNER_USER_IDS
+    owner_command = author_id in OWNER_USER_IDS \
+        and bool(here["abilities.owner_commands"])
     # The worker replies under the LAST fragment, but the ledger and the
     # sweep track the trigger: remember which trigger each fragment
     # belongs to so a reply (or a silent pass) settles the whole burst.
@@ -3273,11 +3801,20 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         # When the monitor queued it: the typing cap and the latency log
         # measure from here.
         "queued_at": note_queued(state, msg["id"]),
+        # Triggered only by the conversational follow-up window.
+        "follow_up": follow_up and not any(
+            is_mention(m) or is_reply_to_bot(m) for m in [msg] + fragments),
+        "settings": settings_card(scope, here, author_id, from_bot,
+                                  msg["channel_id"], exchange),
     }
     item.update(extra)
     queue.append(item)
     burst_note = f" (+{len(fragments)} fragment(s))" if fragments else ""
-    print(f"Queued {item['kind']} from {msg['author'].get('username')} in "
+    note_item_meta(state, msg["id"], author_id=author_id,
+                   channel_id=msg["channel_id"], bot=from_bot, dm=dm,
+                   kind=item["kind"])
+    print(f"Queued {item['kind']}{' (follow-up)' if item['follow_up'] else ''}"
+          f" from {msg['author'].get('username')} in "
           f"{cname}{burst_note}: {content[:80]}", flush=True)
     # (Typing comes from the typing thread, via typing_refresh.)
     ledger_record_many(burst_ids, "queued",
@@ -3494,14 +4031,17 @@ def process_outbox(state):
         idle = True
     except (OSError, ValueError):
         idle = False  # unreadable: _outbox_load sets it aside
-    if idle and not os.path.exists(OUTBOX_PROCESSING_FILE):
+    if idle and not os.path.exists(OUTBOX_PROCESSING_FILE) \
+            and not state.get("released"):
         return
     picked = time.time()
     with shared_lock():
         fresh = _outbox_load(OUTBOX_FILE)
         if fresh is None:
             return  # mid-write; the next pass gets it
-        outbox = (_outbox_load(OUTBOX_PROCESSING_FILE) or []) + fresh
+        # Held replies an owner chose to send ride along (see hold_reply).
+        outbox = (_outbox_load(OUTBOX_PROCESSING_FILE) or []) + fresh \
+            + state.pop("released", [])
         atomic_write(OUTBOX_PROCESSING_FILE, outbox)
         atomic_write(OUTBOX_FILE, [])
 
@@ -3558,6 +4098,11 @@ def process_outbox(state):
         retry = item.get("_retry") or {}
         if retry.get("next", 0) > time.time():
             remaining.append(item)  # waiting out the gap after a failure
+            continue
+        if never_share_hit(state, item, qid, parts):
+            hold_reply(state, item, qid, parts)
+            typing_clear(typing_keys)
+            settled.append(item)
             continue
         # Attachments: only generated files bound to the queue item this
         # reply answers (generated/<its message_id>/), under the
@@ -3637,8 +4182,20 @@ def process_outbox(state):
                 # here, at send time, never at queue time).
                 state.setdefault("gen_sent", []).extend(
                     rp for _, rp in gen_files)
-                call_hook("generation_sent", {"state": state}, item)
+                call_hook("generation_sent", {"state": state}, item,
+                          scope=scope_of_channel(item["channel_id"]),
+                          only_where_on=False)
             _settle(state, item, "replied", replied=True)
+            if item.get("_hold"):
+                state.get("hold_released", {}).pop(item["_hold"], None)
+            meta = state.get("item_meta", {}).get(qid) if qid else None
+            if parts and meta and not meta.get("bot") \
+                    and not meta.get("dm") \
+                    and meta.get("channel_id") == item["channel_id"]:
+                # A reply to a human actually went out: (re)open their
+                # conversational follow-up window here.
+                open_follow_up(state, item["channel_id"],
+                               meta.get("author_id"))
             settled.append(item)
             typing_clear([], sent_in=item["channel_id"] if parts else None)
             if qid:
@@ -4041,6 +4598,8 @@ def drain_gateway(state, inbox, channels):
                         "can_send": None,
                         "thread": ch.get("type") in (10, 11, 12),
                         "parent_id": ch.get("parent_id")}
+                if not info["thread"] and ch.get("parent_id"):
+                    CHANNEL_CATEGORY[cid] = ch["parent_id"]
                 channels[cid] = info
             cname = channel_display(info)
             record_history(state, cid, [m])
@@ -4052,20 +4611,16 @@ def drain_gateway(state, inbox, channels):
                 stage_found(state, m, cname, gid, kind)
                 mentions.append((m, cname, gid, kind))
         else:
-            # DM event (no guild_id). The configured DM policy decides
-            # whose DMs are even read: "owner_only" (default) drops
-            # everyone else's DMs unread and unrecorded; "off" disables
-            # DM handling; "open" accepts any human's DM.
+            # DM event (no guild_id). The DM settings decide whose DMs
+            # are even read (dm_sender_allowed): under the default
+            # (dms_from: owners) everyone else's DMs are dropped unread
+            # and unrecorded; dms.who.replies: off drops all of them.
             author = m.get("author", {}) or {}
-            if is_bot_author(author):
-                if author.get("id") == BOT_ID:
-                    record_history(state, cid, [m])
-                    note_gateway_seen(state, cid, m["id"])
-                continue  # own messages are context only; other bots, ignore
-            if DM_POLICY == "off":
-                continue
-            if DM_POLICY == "owner_only" \
-                    and author.get("id") not in OWNER_USER_IDS:
+            if author.get("id") == BOT_ID:
+                record_history(state, cid, [m])
+                note_gateway_seen(state, cid, m["id"])
+                continue  # own messages are context only
+            if not dm_sender_allowed(author):
                 continue
             record_history(state, cid, [m])
             note_gateway_seen(state, cid, m["id"])
@@ -4147,8 +4702,8 @@ def sweep_mentions(state, queue, channels, dms=True):
                 if is_bot_author(author) \
                         or author.get("id") not in OWNER_USER_IDS:
                     continue
-            # Direct address only.
-            elif trigger_kind(m) != "mention":
+            # Direct address only: follow-ups are never requeued.
+            elif trigger_kind(m, info.get("guild_id")) != "mention":
                 continue
             if predates_join(state, m, info.get("guild_id")):
                 continue
@@ -4207,32 +4762,41 @@ def sweep_mentions(state, queue, channels, dms=True):
 
 # ---------------------------------------------------------------------------
 # Plugins. A plugin is a folder under plugins/ with a plugin.py exposing
-# register(api) -> {hook_name: callable}, plus a plugin.yaml describing
-# its params. A plugin is loaded only when enabled in config
-# (plugins.<name>.enabled: true). The core calls these hooks:
+# register(api) -> {hook_name: callable}, plus a plugin.yaml whose
+# `settings:` manifest declares its settings (type, default, scopes; see
+# muse_settings.load_manifests; an old `params:` list still works). A
+# plugin is loaded once some scope turns it on (plugins.<id>.enabled),
+# and its hooks run only where it is on. The core calls these hooks:
 #
 #   gate_message(ctx, msg, guild_id) -> dict | None
 #       During enqueue: returned dicts are merged into the queue item.
 #       The media_generation plugin uses this to set may_generate.
 #   member_join(ctx, msg, guild_id) -> queue item dict | None
 #       A member joined (Discord system message, type 7). The welcome
-#       plugin resolves its target channel from its params and returns a
-#       "welcome" queue item for the worker to draft.
+#       plugin resolves its target channel from its settings and
+#       returns a "welcome" queue item for the worker to draft.
 #   generation_sent(ctx, outbox_item)
 #       A generated attachment was actually sent for an outbox item.
 #
-# ctx carries {"state", "channels", "guilds"} (subset per hook). Plugins
-# receive their params (the config's plugins.<name> block) via the api
-# object at register time; api.param(key, guild_id, guild_name) resolves
-# one param for one guild (see param_for).
+# ctx carries {"state", "channels", "guilds", "owners"} (subset per hook)
+# plus, for the event's scope: "scope", "settings" (the plugin's own
+# resolved values there, nothing else), "cap_layers" (key -> [(counter
+# id, cap)]: the caps set along the scope, each counting in its own
+# scope), "counter_ids" (the counters an event there adds to) and, for
+# gate_message, "author_matches" (people value -> bool). api.param(key,
+# guild_id, guild_name) still resolves one value for one server (old
+# param names too, see Manifest.spec_for).
 # ---------------------------------------------------------------------------
 PLUGIN_HOOKS = {}
+_HOOK_OWNER = {}        # id(hook fn) -> plugin id
+_LOADED_PLUGINS = set()  # plugin folders already imported
 GEN_PLUGIN_ENABLED = False  # set when the media_generation plugin loads
 
 
 def param_for(params, key, guild_id=None, guild_name=None):
-    """Resolve one plugin param for one guild, following the package's
-    global + per_guild override pattern. Two shapes are supported:
+    """Resolve one plugin param for one guild, following the old global
+    + per_guild override pattern (for a plugin the settings know nothing
+    about). Two shapes are supported:
 
     1. The param itself is {"default": value, "per_guild": {gid-or-name:
        value}}: a per_guild hit wins, else the default.
@@ -4261,6 +4825,8 @@ def param_for(params, key, guild_id=None, guild_name=None):
 class PluginAPI:
     """The facade handed to a plugin's register() at load time."""
 
+    _pid = None
+
     def __init__(self, name, params):
         self.name = name
         self.params = params or {}
@@ -4269,79 +4835,94 @@ class PluginAPI:
         print(*args, flush=True)
 
     def param(self, key, guild_id=None, guild_name=None):
-        return param_for(self.params, key, guild_id, guild_name)
+        """One setting for one server (guild_id None = everywhere). Old
+        param names map to their settings (allowed_user_ids -> who, as
+        a list: [] = the owners; daily_cap -> per_day)."""
+        st = settings()
+        man = st.manifests.get(self._pid or self.name)
+        if man is None:
+            return param_for(self.params, key, guild_id, guild_name)
+        skey, spec = man.spec_for(key)
+        if spec is None:
+            return None
+        scope = MS.Scope.server(guild_id, guild_name) if guild_id \
+            else MS.Scope.everywhere()
+        value = st.get(f"plugins.{man.id}.{skey}", scope)
+        if skey != key and spec.type == "people":
+            return [] if value == "owners" else value
+        return value
 
-
-def _plugin_param_defaults(name):
-    """The param defaults a plugin declares in its plugin.yaml, shaped
-    as a config block so the user's block can be merged over them: a
-    param declared with per_guild keeps the {default, per_guild} shape
-    param_for resolves, any other param becomes its plain default. This
-    is what makes a documented default (welcome's daily_cap: 10) real
-    when the user's config never repeats it."""
-    path = os.path.join(PLUGINS_DIR, name, "plugin.yaml")
-    if not os.path.isfile(path):
-        return {}
-    try:
-        with open(path) as f:
-            meta = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError) as e:
-        print(f"Plugin {name}: plugin.yaml unreadable ({e}); using the "
-              f"config block alone.", flush=True)
-        return {}
-    out = {}
-    for key, spec in (meta.get("params") or {}).items():
-        if not isinstance(spec, dict) or "default" not in spec:
-            continue
-        if "per_guild" in spec:
-            out[key] = {"default": copy.deepcopy(spec["default"]),
-                        "per_guild": copy.deepcopy(spec["per_guild"] or {})}
-        else:
-            out[key] = copy.deepcopy(spec["default"])
-    return out
+    def setting(self, key, scope):
+        """One of this plugin's settings at a scope (ctx["scope"])."""
+        return settings().get(f"plugins.{self._pid or self.name}.{key}",
+                              scope)
 
 
 def load_plugins():
-    """Import every enabled plugin under plugins/ and collect its hooks."""
-    global GEN_PLUGIN_ENABLED
-    plugins_cfg = CFG.get("plugins") or {}
+    """Import every plugin under plugins/ that some scope turns on, once,
+    and collect its hooks. Called at startup and after a settings
+    reload."""
+    global GEN_PLUGIN_ENABLED, _SETTINGS
     if not os.path.isdir(PLUGINS_DIR):
         return
+    if os.path.abspath(_SETTINGS.plugins_dir or "") \
+            != os.path.abspath(PLUGINS_DIR):
+        _SETTINGS = MS.Watcher(_config_path(), PLUGINS_DIR)
+    st = _SETTINGS.current
+    by_folder = {m.folder: m for m in st.manifests.values()}
     for name in sorted(os.listdir(PLUGINS_DIR)):
         pfile = os.path.join(PLUGINS_DIR, name, "plugin.py")
-        if not os.path.isfile(pfile):
+        if not os.path.isfile(pfile) or name in _LOADED_PLUGINS:
             continue
-        pcfg = plugins_cfg.get(name) or {}
-        if not pcfg.get("enabled"):
+        man = by_folder.get(name)
+        pid = man.id if man else name
+        if not st.plugin_enabled_anywhere(pid):
             continue
-        # User config wins key by key (an explicit null, e.g. daily_cap:
-        # null = no cap, still overrides the declared default).
-        pcfg = _deep_merge(_plugin_param_defaults(name), pcfg)
+        params = {k: MS.display(man.specs.get(k), v) for k, v in
+                  st.plugin_values(pid, MS.Scope.everywhere()).items()} \
+            if man else {}
+        api = PluginAPI(name, params)
+        api._pid = pid
         try:
             spec = importlib.util.spec_from_file_location(
                 f"muse_discord_plugin_{name}", pfile)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
-            hooks = mod.register(PluginAPI(name, pcfg)) or {}
+            hooks = mod.register(api) or {}
         except Exception as e:
             print(f"Plugin {name} failed to load: {e}", flush=True)
             continue
+        _LOADED_PLUGINS.add(name)
         for hook_name, fn in hooks.items():
             if callable(fn):
                 PLUGIN_HOOKS.setdefault(hook_name, []).append(fn)
+                _HOOK_OWNER[id(fn)] = pid
         if name == "media_generation":
             GEN_PLUGIN_ENABLED = True
         print(f"Plugin loaded: {name} "
               f"(hooks: {', '.join(sorted(hooks))})", flush=True)
 
 
-def call_hook(name, ctx, *args):
+def call_hook(name, ctx, *args, scope=None, only_where_on=True):
     """Run every plugin's callable for a hook; returns their results.
-    A failing plugin never breaks the pipeline."""
+    With scope, a plugin's hook runs only where the plugin is on (unless
+    only_where_on is False) and its ctx carries its settings there. A
+    failing plugin never breaks the pipeline."""
     out = []
+    st = settings() if scope is not None else None
     for fn in PLUGIN_HOOKS.get(name, []):
+        pid = _HOOK_OWNER.get(id(fn))
+        c = ctx
+        if pid is not None and st is not None:
+            if only_where_on and not st.plugin_enabled(pid, scope):
+                continue
+            c = dict(ctx, scope=scope,
+                     settings=st.plugin_values(pid, scope),
+                     cap_layers=lambda key, pid=pid: st.cap_layers(
+                         f"plugins.{pid}.{key}", scope),
+                     counter_ids=MS.Settings.counter_ids(scope))
         try:
-            out.append(fn(ctx, *args))
+            out.append(fn(c, *args))
         except Exception as e:
             print(f"Plugin hook {name} failed: {e}", flush=True)
     return out
@@ -4561,6 +5142,9 @@ def thread_refresh_iter(state):
         finally:
             yield
         names_by_id = {c["id"]: c.get("name", "?") for c in chans}
+        for c in chans:
+            if c.get("parent_id"):
+                CHANNEL_CATEGORY[c["id"]] = c["parent_id"]
         new_threads = yield from discover_threads_iter(
             gid, gname, names_by_id, CHANNELS)
         for tid, info in new_threads.items():
@@ -4695,6 +5279,8 @@ def main():
     # the gateway thread: the 3s acknowledgement deadline never waits on
     # the main loop. What they change in state comes back through the
     # gateway inbox ("_record", applied by drain_gateway).
+    _holds_live.update({hid: h.get("at", 0) for hid, h in
+                        (state.get("holds") or {}).items()})
     _update_announced["version"] = \
         (state.get("update_notice") or {}).get("version")
     threading.Thread(
@@ -4772,6 +5358,11 @@ def main():
         except Exception as e:
             print(f"Gateway drain error: {e}", flush=True)
 
+        try:
+            retire_overlay_changes()
+        except Exception as e:
+            print(f"Settings overlay error: {e}", flush=True)
+
         # One REST slice per tick (see "Sliced REST work"): the poll's,
         # or the background job's, alternating when both are due.
         rest_spent = 0.0
@@ -4812,10 +5403,18 @@ def main():
                         "member_join",
                         {"state": state, "channels": CHANNELS,
                          "guilds": GUILDS},
-                        msg, gid):
+                        msg, gid,
+                        scope=scope_for(gid, msg.get("channel_id"))):
                     if item:
                         item.setdefault("queued_at", note_queued(
                             state, item.get("message_id")))
+                        where = scope_for(item.get("guild_id") or gid,
+                                          item.get("channel_id"))
+                        item.setdefault("follow_up", False)
+                        item.setdefault("settings", settings_card(
+                            where, settings().resolve(where),
+                            item.get("author_id"), False,
+                            item.get("channel_id")))
                         queue.append(item)
                         dirty = True
             for msg, cname in dm_items:
@@ -4917,6 +5516,7 @@ def main():
             if cycle_done:
                 flush_join_notices(state, GUILDS, CHANNELS)
                 announce_update(state)
+                expire_holds(state)
                 sweep_media()
                 sweep_generated()
                 sweep_gen_state(state)

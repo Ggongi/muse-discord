@@ -7,20 +7,21 @@ only an active gateway session does.
 
 - Identifies with intents=0 (no message events; detection happens in
   monitor.py, not here).
-- Shows ONE static status from config (presence.status_text /
-  presence.status_kind). There is deliberately no rotation, scheduling,
-  or profile/banner management: the status is set once at identify and
-  left alone.
+- Shows ONE static status from config (presence.status /
+  presence.kind; old layout presence.status_text / status_kind). There
+  is deliberately no rotation, scheduling, or profile/banner management:
+  the status is set once at identify and left alone.
 - Sends heartbeats on Discord's interval; auto-reconnects with backoff
   and resumes the session when Discord allows it. Exits instead when
   Discord rejects the token (printing "TOKEN REJECTED" for the
   watchdog) or closes with a code reconnecting cannot fix.
-- If presence.enabled is false in config, exits immediately (the
+- If presence.enabled is off in config, exits immediately (the
   watchdog checks the same flag and won't try to restart it).
 
-Token resolution matches monitor.py: argv[1], else the configured
-bot.token_env env var, else the configured bot.token_file. The token is
-never printed or written anywhere.
+Settings are read through muse_settings.py (both config layouts).
+Token resolution matches monitor.py: argv[1], else token_from in order
+(an env:NAME variable when set, a readable file). The token is never
+printed or written anywhere.
 
 Usage: python3 presence.py [bot-token]
 """
@@ -48,42 +49,44 @@ ACTIVITY_TYPES = {"playing": 0, "streaming": 1, "listening": 2,
                   "watching": 3, "custom": 4, "competing": 5}
 
 
-def load_config():
+def load_settings():
     try:
-        import yaml
+        import yaml  # noqa: F401 (muse_settings needs it)
     except ImportError:
         print("PyYAML is required: pip install -r requirements.txt",
               file=sys.stderr)
         sys.exit(1)
+    sys.path.insert(0, BASE_DIR)
+    import muse_settings
     path = os.environ.get("MUSE_DISCORD_CONFIG") or os.path.join(
         BASE_DIR, "config.yaml")
     if len(sys.argv) > 2 and sys.argv[1] == "--config":
         path = sys.argv[2]
-    cfg = {}
-    if os.path.exists(path):
-        with open(path) as f:
-            cfg = yaml.safe_load(f) or {}
-    return cfg
+    try:
+        return muse_settings.load(path, os.path.join(BASE_DIR, "plugins"))
+    except muse_settings.SettingsError as e:
+        print(f"CONFIG ERROR: config.yaml is invalid; not starting.\n{e}",
+              flush=True)
+        sys.exit(1)
 
 
-CFG = load_config()
-BOT_CFG = CFG.get("bot") or {}
-PRESENCE_CFG = CFG.get("presence") or {}
+SETTINGS = load_settings()
 
 
 def _load_token():
     if len(sys.argv) > 1 and sys.argv[1] != "--config":
         return sys.argv[1]
-    env_name = BOT_CFG.get("token_env")
-    if env_name and os.environ.get(env_name):
-        return os.environ[env_name].strip()
-    token_file = BOT_CFG.get("token_file") \
-        or "~/.config/muse-discord/bot_token"
-    try:
-        with open(os.path.expanduser(token_file)) as f:
-            return f.read().strip()
-    except OSError:
-        return ""
+    for kind, where in SETTINGS.token_sources():
+        if kind == "env":
+            if where and os.environ.get(where):
+                return os.environ[where].strip()
+            continue
+        try:
+            with open(os.path.expanduser(where)) as f:
+                return f.read().strip()
+        except OSError:
+            continue
+    return ""
 
 
 TOKEN = _load_token()
@@ -91,10 +94,10 @@ TOKEN = _load_token()
 
 def build_activity():
     """The single static activity from config, or None for no activity."""
-    text = str(PRESENCE_CFG.get("status_text") or "").strip()
+    text = str(SETTINGS.presence_status or "").strip()
     if not text:
         return None
-    kind = str(PRESENCE_CFG.get("status_kind") or "watching").lower()
+    kind = str(SETTINGS.presence_kind or "watching").lower()
     atype = ACTIVITY_TYPES.get(kind, 3)
     if atype == 4:
         return {"name": "Custom Status", "type": 4, "state": text}
@@ -222,11 +225,11 @@ async def run():
 
 
 if __name__ == "__main__":
-    if PRESENCE_CFG.get("enabled") is False:
+    if not SETTINGS.presence_enabled:
         print("presence.enabled is false in config; not starting.",
               flush=True)
         sys.exit(0)
     if not TOKEN:
-        sys.exit("usage: presence.py <bot-token> (or configure "
-                 "bot.token_file / bot.token_env)")
+        sys.exit("usage: presence.py <bot-token> (or point token_from in "
+                 "config.yaml at the token)")
     asyncio.run(run())

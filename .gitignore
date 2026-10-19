@@ -1,5 +1,8 @@
-# Your filled-in config (the example stays tracked)
+# Your filled-in config (the example stays tracked), the settings changed
+# from Discord, and the backups bin/settings.py migrate / fold keep
 config.yaml
+config.discord.yaml
+config.yaml.bak-*
 
 # Runtime state and queues (created by the monitor)
 state.json

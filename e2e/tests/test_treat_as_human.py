@@ -32,6 +32,7 @@ def load_monitor(tmp, testing=None, name="monitor_under_test", extra=None):
     the top-level keys in `extra`). Returns (module, stdout printed at
     import)."""
     shutil.copy(os.path.join(REPO, "monitor.py"), tmp)
+    shutil.copy(os.path.join(REPO, "muse_settings.py"), tmp)
     token = os.path.join(tmp, "token")
     with open(token, "w") as f:
         f.write("not-a-real-token\n")
@@ -278,6 +279,7 @@ class GatewayOffStub(unittest.TestCase):
             with open(os.path.join(stub, "__init__.py"), "w") as f:
                 f.write(sut.STUB_WEBSOCKETS)
             shutil.copy(os.path.join(REPO, "monitor.py"), tmp)
+            shutil.copy(os.path.join(REPO, "muse_settings.py"), tmp)
             with open(os.path.join(tmp, "token"), "w") as f:
                 f.write("x\n")
             with open(os.path.join(tmp, "config.yaml"), "w") as f:
