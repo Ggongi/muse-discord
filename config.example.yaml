@@ -1,166 +1,125 @@
-# muse-discord configuration.
-# Copy this file to config.yaml and fill it in (SETUP.md walks through
-# every value). config.yaml is yours: it is never overwritten by updates
-# to this package, and it must never contain the bot token itself, only
-# a pointer to where the token lives.
+# muse-discord settings.
+#
+# Copy this file to config.yaml. Setup fills in the first three
+# settings; everything else already has a careful default, so change
+# only what you want different. Saved edits apply without a restart.
+#
+#   Check your edits:          python3 bin/settings.py validate
+#   What does the bot do here: python3 bin/settings.py show --explain
+#
+# Servers, channels, people and roles are Discord ids, in quotes. To
+# copy one, turn on Developer Mode in Discord (Settings > Advanced),
+# then right-click the server, channel or person and pick Copy ID.
 
-bot:
-  # File holding the Discord bot token (plain text, one line, mode 600).
-  token_file: "~/.config/muse-discord/bot_token"
-  # Alternative to token_file: name of an environment variable holding
-  # the token. Leave null to use token_file. The env var wins when both
-  # are set. watchdog.sh only checks token_file and will not restart a
-  # process without it, so token_env suits running the monitor and
-  # presence under your own supervisor instead.
-  token_env: null
-  # Restrict the bot to these guild (server) IDs. Empty = every server
-  # the bot belongs to. Reading and replying are permission-driven (the
-  # bot reads channels it can read and replies where it can send), so
-  # most installs leave this empty.
-  guild_ids: []
+version: 1                # VERIFY: confirm the loader expects this key
 
-owners:
-  # Discord user IDs of the owners (you). Owner messages are exempt
-  # from rate caps, may carry owner_command (the worker may then run
-  # the allowlisted bin/discord-api.py tool), and are the only DMs the
-  # bot reads under the default dm_policy. SETUP.md explains how to
-  # find your user ID.
-  user_ids: []
+# --- Set during setup ---------------------------------------------
+owners: []                # your Discord user id, in quotes:
+                          #   owners: ["123456789012345678"]
+persona: persona.md       # the file that gives the bot its personality
+token_from: ~/.config/muse-discord/bot_token
+                          # where the bot's token is kept: a file, or
+                          # env:NAME for an environment variable. Never
+                          # put the token itself in this file.
 
-behavior:
-  # What counts as "addressed to the bot" in server channels.
-  # Options:
-  #   mention      = a Discord @mention of the bot
-  #   reply_to_bot = a Discord reply to one of the bot's messages
-  respond_to: [mention, reply_to_bot]
-  # Servers (guild IDs, as quoted strings) where ambient behavior
-  # (welcomes) is on. Every other server is in observe mode:
-  # @mentions, replies to the bot, and DMs still work.
-  # When the bot joins a server it DMs the owners a summary with the ID
-  # to add here. Re-read when this file changes; no restart needed.
-  active_guild_ids: []
-  # Other bots (including other people's Muses):
-  #   direct = a bot that @mentions this bot or replies to one of its
-  #            messages gets an answer, the same as a human (default).
-  #            Bots never trigger welcomes. The worker ends bot
-  #            conversations the way a person would.
-  #   off    = messages from bots are ignored entirely
-  bots: direct
-  # Whose DMs the bot reads and answers:
-  #   owner_only = only the owners' DMs are ever read (default; anyone
-  #                else's DMs are ignored so completely the bot never
-  #                sees them)
-  #   open       = any human's DM (delivered via the gateway; Discord
-  #                gives bots no way to enumerate DM channels)
-  #   off        = DMs are never read or answered
-  dm_policy: owner_only
-  # Burst coalescing: rapid follow-up messages from the same author
-  # fold into one reply. This is the MAXIMUM wait, in seconds, from the
-  # first message (bots get at least 15). With the realtime gateway up,
-  # a burst goes out as soon as its author has stopped: about 1.5s (0.5s
-  # in a DM, 5s for a bot) after their last message with no typing from
-  # them since.
-  # Without the gateway, every burst waits the full window. 0 = no
-  # coalescing.
-  coalesce_seconds: 5
-  # Max total characters of one reply (across all its message parts).
-  # 1-2000 (Discord's per-message limit); out-of-range values are
-  # clamped with a warning in monitor.log.
-  max_reply_chars: 1800
-
-safety:
-  # Hold messages matching prompt-injection / exfiltration patterns in
-  # quarantine.json for your review instead of queueing them.
-  injection_quarantine: true
-  # Max items queued for the worker per day across all servers, to
-  # bound token spend. Counted at queue time, so items the worker
-  # leaves unanswered and sweep re-queues count too. Owners' messages
-  # are exempt. null = off (the default); 0 = strangers never queue.
-  daily_reply_cap: null
-  # Max items queued per user per day (counted the same way). null =
-  # off (the default).
-  per_user_daily_cap: null
-
-engine:
-  # The REST poll is gap repair for the realtime gateway ingest, and
-  # the cadence for discovery refreshes and the sweep. Each channel is
-  # read about once per interval; the reads are spread across it in
-  # short slices, so a slow poll never delays realtime messages. Values
-  # below a floor (10 here, 1 for the other cadences and backoff) are
-  # raised to it with a warning in monitor.log; 0 is honored where it
-  # means something (coalesce, grace, max_age, max_recoveries).
-  rest_poll_seconds: 30
-  # How often channel/thread discovery re-runs (permission changes and
-  # new channels take effect without a restart). Minutes.
-  discovery_refresh_minutes: 30
-  # Reconciliation sweep: re-reads recent channel history and requeues
-  # any mention that no durable record (ledger, queue, outbox,
-  # quarantine) accounts for. This is the silent-drop backstop.
-  sweep:
-    every_cycles: 6        # in poll cycles (6 x 30s = ~3 min)
-    grace_seconds: 240     # never touch mentions younger than this
-    max_age_hours: 6       # ...or older than this (0 = sweep off)
-    max_recoveries: 2      # requeue a lost mention at most this often
-  # Discord 429 (rate limit) handling: any 429 records a backoff window
-  # (Discord's Retry-After is honored when present); REST work pauses
-  # while the gateway ingest, coalesce flushes, and outbox sends keep
-  # running.
-  backoff:
-    initial_seconds: 60
-    max_seconds: 900
-
+# --- The bot itself -----------------------------------------------
 presence:
-  # The presence client keeps the bot visibly online, optionally with
-  # ONE static status line under its name in the member list. No
-  # rotation, no scheduling. Empty status_text = no status line
-  # (default).
-  enabled: true
-  status_text: ""
-  # watching | playing | listening | streaming | competing | custom
-  status_kind: watching
-
+  status: ""              # a line shown under the bot's name; "" = none
 updates:
-  # The watchdog checks for a new release (a version tag such as
-  # v1.2.0, listed with `git ls-remote`) at most once a day and prints
-  # one "UPDATE:" line per new version, and the bot DMs the owners about
-  # it once, with [Update now] / [Later] buttons. Nothing is applied
-  # without an owner's say-so (see UPDATING.md).
-  # false = never check, and no DMs.
-  check: true
+  notify: on              # DM you when a new version is out: on or off
 
-persona:
-  # The file the worker reads for the bot's personality. Generated
-  # during setup by interviewing you (see SETUP.md); edit it any time.
-  file: "persona.md"
+# --- Everywhere: DMs and every server, unless set more narrowly ----
+everywhere:
+  who:
+    allow: everyone       # everyone, or a list of user ids and
+                          # roles: ["<user id>", "role:<role id>"]
+    ignore: []            # people or roles it never answers (wins
+                          # over allow)
+    bots: when-addressed  # other bots and Muses: when-addressed or ignore
+    bot_exchange_limit: none
+                          # most replies in a row to bots in one channel
+                          # before a person speaks: 1-50, or none
+  style:
+    length: normal        # brief, normal, or detailed
+    notes: ""             # house rules for your Muse, such as
+                          # "No swearing." (up to 500 characters)
+  abilities:
+    owner_commands: on    # owners may ask it to pin, post, react,
+                          # or start threads: on or off
+  privacy:
+    memory: public-only   # how much of what your Muse knows about you a
+                          # reply may use: everything, public-only, or
+                          # nothing. public-only = your name, interests,
+                          # public projects and opinions; never your job,
+                          # location, money, health, relationships or
+                          # schedule. Your own DMs always use everything.
+    never_share: []       # words or phrases; a reply containing one is
+                          # held until an owner says Send or Discard
+    suspicious: hold-for-review
+                          # likely prompt-injection: hold-for-review (you
+                          # decide) or ignore (dropped)
+  limits:
+    per_day: none         # replies per day: a number, or none. Each
+                          # server counts on its own; DMs count
+                          # together.
+    per_person_per_day: none
+                          # replies per day to any one person. Owners are
+                          # never limited.
+  plugins:
+    media:                # images and video, if your Muse can make
+                          # them. VERIFY: plugin id media, off by default
+      enabled: off
+      who: owners         # owners, everyone, or a list like allow
+      per_day: none       # generated replies per day: a number, or none
 
-plugins:
-  # New-member welcomes, in active servers only (behavior.
-  # active_guild_ids). Params follow the global + per_guild pattern:
-  # a param shaped {default: ..., per_guild: {...}} resolves per_guild
-  # first (keyed by guild ID or server name), then the default. A param
-  # left out takes its default from plugins/<name>/plugin.yaml (the
-  # values shown here); set it to null to turn a cap off.
-  welcome:
-    enabled: false
-    channel:
-      # system = the server's Discord system channel | a channel name
-      # (resolved inside that server) | a channel ID | off
-      default: system
-      per_guild: {}
-    prompt:
-      default: >-
-        Welcome {user} to {server}! Write a short, warm welcome. Point
-        them to this server's rules and getting-started channels if it
-        has them. Do not invite them to talk to the bot.
-      per_guild: {}
-    daily_cap: 10        # per server per day; null = no cap
-    max_age_hours: 24    # skip joins older than this
-  # Image/video generation gate for allowed users. Requires the
-  # worker's runtime to have media generation tools; without them the
-  # worker will simply say it can't (and must never claim it started).
-  media_generation:
-    enabled: false
-    allowed_user_ids: []   # empty = owners only
-    # Replies actually sent with generated files attached, per day
-    # (a reply carrying two files counts once). null = no cap.
-    daily_cap: null
+# --- Direct messages ----------------------------------------------
+dms:
+  who:
+    dms_from: owners      # whose DMs it answers: owners, shared-servers
+                          # (people in a server with the bot), or anyone
+    replies: conversational
+                          # off = never answer DMs. Every DM counts as
+                          # addressed, so the other values act the same.
+
+# --- All servers, including ones it joins later -------------------
+all_servers:
+  who:
+    replies: conversational
+                          # when-addressed: answers an @mention or a
+                          #   reply to the bot.
+                          # conversational: also answers the person it
+                          #   just replied to when they keep talking
+                          #   within ~2 minutes without @mentioning it.
+                          # off: stays quiet.
+  plugins:
+    welcome:
+      enabled: off        # greet new members; turn it on per server
+
+# --- One server at a time (example: remove the # marks to use) ----
+# servers:
+#   "200000000000000001":         # the server's id
+#     name: Muse Lounge           # a label for you; the bot ignores it
+#     style:
+#       notes: "Friendly community. Playful is fine."
+#     limits:
+#       per_day: 200
+#     plugins:
+#       welcome:
+#         enabled: on
+#         channel: "300000000000000001"   # or system: the server's
+#                                         # system channel
+#         notes: "Point newcomers to #rules."
+#     channels:                   # a channel or a whole category
+#       "300000000000000002":
+#         name: "#announcements"
+#         replies: off
+#       "300000000000000003":     # a category: its channels follow it
+#         name: "Staff"
+#         replies: off
+#       "300000000000000004":
+#         name: "#muse-chat"
+#         notes: "Longer answers are welcome here."
+
+# Advanced engine settings (polling, timing, the reply size ceiling)
+# are listed in PROTOCOL.md under "Engine settings". Most installs
+# never need them.

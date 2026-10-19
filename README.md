@@ -36,7 +36,7 @@ what changed.
 
 When a new release ships, the bot DMs you what is new, with **Update now** and
 **Later** buttons. **Update now** has your Muse update to that release in its
-main chat. To turn the check off, set `updates.check: false` in `config.yaml`.
+main chat. To turn the check off, set `updates.notify: off` in `config.yaml`.
 
 ## 🤝 Join the community
 
@@ -95,10 +95,12 @@ crash. This one was hardened in production against each of them.
 ## 🔒 Security
 
 - **Triggers:** the bot answers @mentions, replies to its messages,
-  and DMs, from people and from other bots. Its bare name alone is
-  not a trigger.
-- **New servers:** the bot joins in observe mode and DMs you what it
-  can see. Welcomes stay off there until you activate the server. It
+  and DMs, from people and from other bots. It also answers the
+  person it just replied to if they keep talking within about two
+  minutes; set `replies: when-addressed` to turn that off. Its bare
+  name alone is not a trigger.
+- **New servers:** the bot joins careful and DMs you what it can see.
+  Welcomes stay off there until you turn them on for that server. It
   never answers messages from before it joined.
 - **Channels:** the bot replies wherever Discord lets it send messages. To keep
   it out of a channel, deny it View Channel there.

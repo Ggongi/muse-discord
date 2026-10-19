@@ -79,10 +79,14 @@ fields:
 | `reply_to`                 | When the trigger used Discord's reply feature: `{author, author_id, content, is_bot}`, else null                                                                        |
 | `welcome`                  | True on welcome items                                                                                                                                                   |
 | `welcome_prompt`           | Welcome items only: the plugin's rendered prompt for this join                                                                                                          |
-| `from_bot`                 | True when the trigger's author is another bot (behavior.bots: direct)                                                                                                   |
+| `from_bot`                 | True when the trigger's author is another bot (allowed by `who.bots: when-addressed`)                                                                                   |
 | `bot_turns`                | Consecutive bot messages in the channel's rolling history (last 12), ending at the trigger, since a human last spoke (0 for humans)                                     |
 | `participants`             | People and agents in the conversation: `[{name, display?, id, bot, you?}]`. Address them as `<@id>`                                                                     |
 | `queued_at`                | When the monitor queued the item (epoch seconds): the typing indicator stops 3 minutes after it, and the latency log measures from it                                   |
+| `follow_up`                | True when only the conversational follow-up window queued it: no @mention, reply, or DM (see Follow-ups under Server safety)                                            |
+| `settings`                 | The settings card for the item's place: where, who is speaking, audience, memory, length, house rules (see The settings card)                                           |
+
+<!-- VERIFY: follow_up field location (item.follow_up or item.settings.follow_up) -->
 
 ### reply_outbox.json (worker -> monitor)
 
@@ -122,12 +126,13 @@ Monitor-side guarantees on send:
 - **Dedup**: a `reply_to` (or `item`) already in the monitor's
   `replied_to` record is never sent twice (protects against
   overlapping worker runs); the suppression is recorded in the ledger.
-- **Guardrails**: text is trimmed to `behavior.max_reply_chars` total
-  (across parts), `@everyone`/`@here` are neutralized, parts are capped
-  at 4 (overflow folds into the last part), and each part is clamped to
-  Discord's 2000-character limit after every rewrite. Sends allow only
-  user mentions and the reply ping (`allowed_mentions`): role,
-  `@everyone` and `@here` pings never go out.
+- **Guardrails**: text is trimmed to `engine.max_reply_chars` total
+  (across parts; see Engine settings), `@everyone`/`@here` are
+  neutralized, parts are capped at 4 (overflow folds into the last
+  part), and each part is clamped to Discord's 2000-character limit
+  after every rewrite. Sends allow only user mentions and the reply
+  ping (`allowed_mentions`): role, `@everyone` and `@here` pings
+  never go out.
 - **Ids**: an item whose `channel_id` or `reply_to` is not a plain
   Discord id is dropped (they become API paths).
 - **Sends never duplicate**: every message part carries a nonce derived
@@ -140,6 +145,9 @@ Monitor-side guarantees on send:
   item; leave it alone.
 - **403 drops**: a permanent permission failure drops the item and is
   recorded in the ledger as skipped.
+- **Secret phrases**: a reply containing a `privacy.never_share`
+  phrase is not sent unless it goes to an owner in their own DM; it
+  is held for the owners (see never_share holds).
 
 ### Attachment / generation rules
 
@@ -182,7 +190,11 @@ reconciliation sweep diffs the recent history of every monitored
 channel, and of the owners' DM channels, against this ledger (plus
 queue, outbox, quarantine, and replied records) and requeues any
 mention or owner DM unaccounted for. DMs that only the gateway sees
-(`dm_policy: open`) are not swept. The worker never touches this file.
+(`who.dms_from: shared-servers` or `anyone`) are not swept.
+Follow-ups (`follow_up: true`) are recorded like mentions, but the
+sweep never requeues one: a missed follow-up is not a dropped
+mention, so only direct address is recovered. The worker never
+touches this file.
 
 ### quarantine.json (monitor-internal)
 
@@ -191,7 +203,10 @@ in an extracted document, or in the (non-bot) message they replied to,
 with the matched pattern and where it matched, kept for the owner's
 review (last 100). A burst is held whole: its fragments are listed
 under the trigger's entry. Quarantined messages are never queued and
-never auto-replied.
+never auto-replied. This is `privacy.suspicious: hold-for-review`
+(the default); with `ignore`, such messages are dropped instead.
+
+<!-- VERIFY: whether `ignore` still records the message here -->
 
 ### state.json (monitor-internal)
 
@@ -223,16 +238,45 @@ from Discord at startup, and the known-server set re-seeds silently.
 Enforced by the monitor before anything reaches the queue:
 
 - **Strict triggers.** Only direct address queues work: a platform
-  @mention, a reply to the bot, or a DM. Other bots count as direct
-  address too (`behavior.bots: direct`), never for welcomes.
+  @mention, a reply to the bot, or a DM, plus follow-ups where
+  `who.replies` is `conversational` (the default; see below). Other
+  bots count as direct address too (`who.bots: when-addressed`),
+  never for welcomes or follow-ups. Before queueing, these apply:
+  `who.replies: off`, `who.allow`, `who.ignore`,
+  `who.bot_exchange_limit`, the `limits`, and `privacy.suspicious`.
 - **Join watermark.** A message older than the bot's join time in its
   server is never a trigger, on any path (poll, gateway, restart
   catch-up, late channel discovery, sweep). It can still appear in a
   later trigger's `history`.
-- **Observe mode.** Servers not listed in `behavior.active_guild_ids`
-  get no ambient behavior: no welcomes. Direct address works
-  everywhere. On joining a new server the bot DMs the owners its
-  name, ID, visible channels, mode, and how to activate it.
+- **New servers.** Every server passes through `all_servers`, which
+  ships careful: replies only when addressed (or as a follow-up),
+  welcomes off. A server with no entry under `servers` gets exactly
+  that. On joining a new server the bot DMs the owners its name, ID,
+  and visible channels.
+
+### Follow-ups
+
+`who.replies: conversational` is `when-addressed` plus a follow-up
+window, so a person can keep talking to the bot without @mentioning
+it every time:
+
+- The window opens when the bot actually sends a reply to a human in
+  a channel (a `silent` item opens nothing). For the next 120 seconds
+  (a fixed engine constant, not a setting), that person's messages in
+  that same channel or thread count as addressed.
+- Only that person. Other people's messages never open or use it.
+- It closes when that person addresses someone else: a Discord reply
+  to another user's message, or a message that @mentions another
+  user or a role and not the bot. That message is not a follow-up.
+- Every bot reply to that person there restarts it; their own
+  messages never extend it.
+- Humans only: bots never get a window. Each thread has its own.
+- A follow-up goes through the same burst coalescing, gates, caps,
+  and typing as a mention, and is queued with `follow_up: true`. The
+  worker treats it as probably meant for the bot and answers with a
+  `silent` item when it is not. The sweep never requeues follow-ups.
+
+`when-addressed` turns the window off; `off` queues nothing there.
 
 ## Worker obligations (summary)
 
@@ -260,15 +304,196 @@ Enforced by the monitor before anything reaches the queue:
    monitor converts names it recognizes, as a safety net). End
    conversations that have run their course: silence, a reaction, or
    a `standalone` closing line, never a reply that asks for more.
+8. Follow each item's `settings` card: its length, house rules
+   (`notes`), audience, and above all `memory`. A `follow_up` item is
+   probably for you; answer it `silent` when it is not.
+
+## Settings
+
+The owner's settings live in `config.yaml` (`config.example.yaml`
+shows every one with its default). `muse_settings.py` loads them;
+the monitor and `bin/settings.py` both use it. The CLI:
+
+- `bin/settings.py validate`: check config.yaml and the overlay.
+- `bin/settings.py show`, with `--dms`, `--server <id>`, or
+  `--server <id> --channel <id>`: the effective settings for one
+  place; `--explain` adds where each value came from.
+- `bin/settings.py fold`: copy the overlay into config.yaml.
+- `bin/settings.py migrate`: convert an old-layout config.yaml.
+
+### Scopes
+
+Built-in default, then `everywhere`, then either `dms` (direct
+messages) or `all_servers`, then `servers."<id>"`, then a category,
+then a channel, under `servers."<id>".channels`. The most specific
+value wins. Threads and forum posts use their parent channel. Lists
+replace, never merge; only `style.notes` concatenates (the server's,
+then the channel's). Servers and channels are keyed by quoted
+Discord ids; a `name:` beside one is a label (the engine only warns
+when it is stale). A channel or category may set only `replies`,
+`notes`, and `plugins.<id>.enabled`. In an owner's own DM, memory is
+always `everything` and limits never apply; that is fixed, not a
+setting. Both files are re-read when they change; no restart.
+
+Invalid hand-written values stop the bot from starting, with an
+error naming the file, the key, and why. Old-layout keys never do:
+they map to their new names (below), with one notice line in
+monitor.log.
+
+### The settings card
+
+Every queue item carries `settings`, the resolved settings the Muse
+needs for that item's place, never the whole config:
+
+| field          | meaning                                                                                                                                       |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `where`        | `"dm"` or `"server"`                                                                                                                          |
+| `server`       | The server's name (none in DMs)                                                                                                               |
+| `channel`      | The channel's name; a thread or forum post shows its own name but uses its parent channel's settings                                          |
+| `speaker`      | `"owner"`, `"member"`, or `"bot"`                                                                                                             |
+| `audience`     | `"private"` (a DM: only the speaker reads the reply) or `"public"` (others can read it)                                                       |
+| `memory`       | `privacy.memory` here: `"everything"`, `"public-only"`, or `"nothing"`. Always `"everything"` in an owner's DM                                |
+| `length`       | `style.length` here: `"brief"`, `"normal"`, or `"detailed"`                                                                                   |
+| `notes`        | `style.notes`: the server's notes, then the channel's, joined (`""` when none)                                                                |
+| `bot_exchange` | Bot items only: `{count, limit}`, replies in a row to bots in this channel since a person spoke, and `who.bot_exchange_limit` (`null` = none) |
+
+The card carries only what shapes the words. Enforced settings (who
+is answered, limits, owner commands, plugins, `never_share`) are
+applied by the monitor before anything is queued, or on send.
+
+### config.discord.yaml (the overlay)
+
+Settings changed through the bot, rather than by editing the file,
+are written to `config.discord.yaml` next to config.yaml, never into
+config.yaml itself. Writes are atomic. The file is safe to delete:
+everything reverts to config.yaml.
+
+```yaml
+version: 1
+values:
+  servers."200000000000000001".who.replies:
+    value: when-addressed
+    base: conversational # what config.yaml said when this was set
+    by: "100000000000000001"
+    at: 2026-10-18T18:22:05Z
+  everywhere.style.length:
+    value: inherit # act as if this scope did not set it
+    base: brief
+    by: "100000000000000001"
+    at: 2026-10-18T18:30:00Z
+history: [] # the last 100 changes and retired entries
+```
+
+- Keys are one setting at one scope: `everywhere.style.length`,
+  `dms.who.dms_from`, `servers."<id>".who.replies`,
+  `servers."<id>".channels."<id>".replies`.
+- At its scope an overlay value replaces the file's value.
+- **Conflicts: the newest intent wins.** On every load, if
+  config.yaml still says `base` at that scope, the overlay wins. If
+  the file changed since, the owner edited it after the change, so
+  the file wins, the entry moves to `history`, and the owners get
+  one DM naming the setting (once per entry).
+- An overlay entry that is invalid, or names a setting that no
+  longer exists, also moves to `history` with a DM. It never stops
+  the bot from starting.
+- `bin/settings.py fold` copies every overlay value into config.yaml
+  and clears the overlay. It rewrites config.yaml, keeping the old
+  one as `config.yaml.bak`; comments in the file are lost, so it
+  warns first. Never automatic.
+
+<!-- VERIFY: fold backup name and whether it asks before writing -->
+
+### never_share holds
+
+`privacy.never_share` (a list of phrases, `everywhere` only) is an
+engine backstop for the owner's memory. Before sending any reply
+that is not to an owner in their own DM, the monitor checks it for a
+listed phrase (case-insensitive, whole phrase). On a match it does
+not send. It DMs every owner the draft and where it was going, with
+**Send anyway** and **Discard** buttons (owners only, through the
+same interaction dispatch as the update DM):
+
+- **Send anyway** posts it as the original reply.
+- **Discard** settles the item as skipped.
+- A hold nobody answers within 24 hours is discarded.
+
+The phrase list is never written to any log.
+
+<!-- VERIFY: hold custom-id prefix, where holds are stored, and the ledger status while held -->
+
+### Engine settings
+
+Internals, not owner settings: `config.example.yaml` does not list
+them, and most installs never set them. They are read from an
+`engine:` block in config.yaml, and still from their old locations.
+Values below a floor are raised with a warning in monitor.log (10
+for the poll, 1 for the other cadences and backoff); 0 is honored
+where it means something (coalesce, grace, max_age, max_recoveries).
+
+<!-- VERIFY: new names of the three moved keys (engine.coalesce_seconds, engine.max_reply_chars, engine.guild_ids) -->
+
+| setting                            | old location                | default | meaning                                                              |
+| ---------------------------------- | --------------------------- | ------- | -------------------------------------------------------------------- |
+| `engine.rest_poll_seconds`         | same                        | 30      | REST poll cadence (gap repair for the gateway); floor 10             |
+| `engine.discovery_refresh_minutes` | same                        | 30      | How often channel and thread discovery re-runs                       |
+| `engine.sweep.every_cycles`        | same                        | 6       | Reconciliation sweep, in poll cycles                                 |
+| `engine.sweep.grace_seconds`       | same                        | 240     | The sweep never touches mentions younger than this                   |
+| `engine.sweep.max_age_hours`       | same                        | 6       | ...or older than this (0 = sweep off)                                |
+| `engine.sweep.max_recoveries`      | same                        | 2       | Requeue a lost mention at most this often                            |
+| `engine.backoff.initial_seconds`   | same                        | 60      | First backoff after a Discord 429                                    |
+| `engine.backoff.max_seconds`       | same                        | 900     | Longest backoff                                                      |
+| `engine.coalesce_seconds`          | `behavior.coalesce_seconds` | 5       | Longest wait to fold a burst into one item (0 = none)                |
+| `engine.max_reply_chars`           | `behavior.max_reply_chars`  | 1800    | Hard ceiling on one reply's length, 1-2000 (out of range is clamped) |
+| `engine.guild_ids`                 | `bot.guild_ids`             | `[]`    | Restrict the bot to these server ids; empty = every server           |
+
+The follow-up window (120 seconds) is a fixed constant, not a
+setting.
+
+### Old settings and their new names
+
+An old-layout config.yaml keeps working: each old key maps to its
+new name. `bin/settings.py migrate` writes the new layout (keeping a
+timestamped backup), prints any difference in effective behavior,
+and refuses to write when there is one, except the new
+`conversational` replies default, which applies either way.
+
+| old setting                           | new setting                                                      |
+| ------------------------------------- | ---------------------------------------------------------------- |
+| `owners.user_ids`                     | `owners`                                                         |
+| `persona.file`                        | `persona`                                                        |
+| `bot.token_file`, `bot.token_env`     | `token_from`: the path, or `env:NAME`                            |
+| `bot.guild_ids`                       | `engine.guild_ids`                                               |
+| `behavior.respond_to`                 | none: @mentions and replies to the bot always count              |
+| `behavior.active_guild_ids`           | each listed server gets `servers."<id>".plugins.welcome.enabled` |
+| `behavior.bots`: `direct` / `off`     | `who.bots`: `when-addressed` / `ignore`                          |
+| `behavior.dm_policy`: `owner_only`    | `dms.who.dms_from: owners`                                       |
+| `behavior.dm_policy`: `open`          | `dms.who.dms_from: anyone`                                       |
+| `behavior.dm_policy`: `off`           | `dms.who.replies: off`                                           |
+| `behavior.coalesce_seconds`           | `engine.coalesce_seconds`                                        |
+| `behavior.max_reply_chars`            | `engine.max_reply_chars`                                         |
+| `safety.injection_quarantine`         | `privacy.suspicious` (`true` = `hold-for-review`)                |
+| `safety.daily_reply_cap`              | `limits.per_day` (`null` = `none`)                               |
+| `safety.per_user_daily_cap`           | `limits.per_person_per_day` (`null` = `none`)                    |
+| `presence.status_text`, `status_kind` | `presence.status`, `presence.kind`                               |
+| `updates.check`                       | `updates.notify`                                                 |
+| `plugins.welcome.channel`, `prompt`   | `plugins.welcome.channel`, `notes`, per server                   |
+| `plugins.media_generation`            | `plugins.media`                                                  |
+| `media_generation.allowed_user_ids`   | `plugins.media.who` (empty = `owners`)                           |
+| `media_generation.daily_cap`          | `plugins.media.per_day` (`null` = `none`)                        |
+
+<!-- VERIFY: mapping of `safety.injection_quarantine: false` and `presence.enabled: false`; where welcome `daily_cap` / `max_age_hours` live now -->
 
 ## Plugin hooks
 
 Plugins live in `plugins/<name>/` with `plugin.py` (exposing
 `register(api) -> {hook: callable}`) and `plugin.yaml` (declaring its
-params). A plugin loads only when `plugins.<name>.enabled` is true in
-config. The `api` object passed to `register` carries the plugin's
-params (its config block) and `api.param(key, guild_id, guild_name)`
-plus `api.log(...)`.
+settings manifest). A plugin's hooks run only for events in places
+where `plugins.<id>.enabled` resolves to `on` (it scopes like any
+setting, down to a channel). The `api` object passed to `register`
+gives the plugin its own resolved settings for the event's place,
+never core settings or other plugins', plus `api.log(...)`.
+
+<!-- VERIFY: plugin api for resolved values (api.param or a new name) -->
 
 Hooks the core calls:
 
@@ -281,23 +506,38 @@ Hooks the core calls:
 A failing plugin hook is caught and logged; it never breaks the
 pipeline.
 
-### Plugin params: global + per_guild
+### Plugin settings
 
-Params come from the plugin's block under `plugins:` in config.yaml,
-merged over the param defaults its `plugin.yaml` declares (the config
-wins key by key; an explicit `null` overrides a default too).
-Resolution for a param `key` for one guild (implemented by the core's
-`param_for`, used via `api.param`):
+`plugin.yaml` declares the plugin's settings under `settings:`, so
+they validate and scope like core settings:
 
-1. If the param is itself a map with `default` and/or `per_guild`
-   keys: look up `per_guild[guild_id]`, then `per_guild[guild_name]`,
-   then `default`.
-2. Else if the whole params block has a `per_guild` map:
-   `per_guild[guild_id][key]`, then `per_guild[guild_name][key]`,
-   then the block's plain `key`.
+```yaml
+# a media plugin's plugin.yaml (excerpt)
+settings:
+  who:
+    type: people
+    default: owners
+    scopes: [everywhere, server]
+    risky: true
+  per_day:
+    type: number
+    min: 0
+    max: 1000
+    default: none
+    scopes: [everywhere, server]
+safe_in_new_servers: false # if false, all_servers ships it off
+```
 
-per_guild keys may be guild IDs (preferred, names can collide) or
-server names.
+Per key: `type` (`on-off`, `choice` with `values`, `number` with
+`min`/`max`, `text`, `channel`, `people`), `default`, `scopes`, and
+optionally `steers_muse` (passed to the Muse rather than enforced),
+`risky`, and `discord_editable`. Every plugin also has `enabled`. A
+key in config.yaml that the manifest does not declare is a load
+error naming the plugin and its valid keys.
+
+The older `params:` shape, a value or `{default, per_guild}` keyed
+by guild id or server name, keeps working: it maps onto the same
+settings per server.
 
 ## Update notices
 
@@ -316,7 +556,7 @@ history.
 
 ### update_check.json (watchdog -> monitor)
 
-Written by `watchdog.sh` at most once a day (`updates.check: false`
+Written by `watchdog.sh` at most once a day (`updates.notify: off`
 turns the check, and the DMs, off). It lists origin's tags with
 `git ls-remote --tags origin` (never the GitHub API, whose
 unauthenticated rate limit is per IP), takes the highest release, and

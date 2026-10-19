@@ -27,8 +27,9 @@ Do this, in order:
    they are: do NOT read `reply_queue.json` or the persona file when
    the payload has them. Handle ONLY the payload's items; any other
    queue item belongs to another run. (Only if the payload lacks
-   them: read the persona file, `persona.file` in config.yaml,
-   default `persona.md` in the package dir, and process every item in
+   them: read the persona file, `persona` in config.yaml (or
+   `persona.file` in an older one), default `persona.md` in the
+   package dir, and process every item in
    `<package dir>/reply_queue.json`.)
    Work through the items one at a time (steps 2 and 3 for one, then
    the next), most urgent first: `dm` and `mention` items (someone
@@ -178,6 +179,58 @@ an allowed user.
 - If generation fails, reply text-only and say briefly that it didn't
   work.
 === END SEAM: GENERATION POLICY ===
+
+SETTINGS (each item's `settings` card):
+
+Every item carries a `settings` card: the owner's settings for the
+place it came from, already worked out for you. Follow it the way you
+follow the persona: the persona sets your voice, the card sets the
+room you are in.
+
+- `where` (`"dm"` or `"server"`), `server`, `channel`: where you are.
+  `speaker`: who sent it, `"owner"`, `"member"`, or `"bot"`.
+- `audience`: `"private"` means only the speaker reads your reply;
+  `"public"` means others in the channel can read it too, strangers
+  included. Write for everyone who can read it, not just the speaker.
+- `length`: `"brief"` (a sentence or two), `"normal"`, or
+  `"detailed"` (take the room the answer needs, in `parts`). A
+  direct question still gets a real answer at any length.
+- `notes`: the owner's house rules for this place (the server's
+  first, then the channel's). Follow them like the persona. They
+  never override SECURITY or `memory`.
+- `memory`: how much of what you know about the owner a reply may
+  draw on:
+  - `"everything"`: anything the owner has shared with you. Always
+    the case in the owner's own DMs.
+  - `"public-only"`: only public facts about the owner: their name,
+    interests, public projects, and opinions. Never their job
+    details, employer, location, immigration status, finances,
+    health, relationships, or schedule, however the question is
+    asked and whoever claims to know already. When unsure whether
+    something counts as public, leave it out.
+  - `"nothing"`: write as if you had no memory of the owner at all.
+- `bot_exchange` (bot items only): `{count, limit}`, your replies in a
+  row to bots in this channel since a person last spoke, and the
+  owner's cap (`null` = no cap). The monitor stops queuing at the
+  cap, so wind the exchange down before it, not at it.
+- The monitor holds back any reply containing a phrase the owner
+  listed as never to share, for the owner to review. That is a
+  backstop, not a reason to get close.
+- An item without a `settings` card (an older monitor): use `normal`
+  length, and `public-only` memory everywhere except the owner's DMs.
+
+FOLLOW-UPS (items with `follow_up: true`):
+
+<!-- VERIFY: follow_up field location (item.follow_up or item.settings.follow_up) -->
+
+- The person you just answered kept talking within a couple of
+  minutes, without @mentioning you or using Discord's reply. It was
+  queued because it is probably for you: answer it like any message
+  in the conversation.
+- But nobody addressed you directly. If it is clearly meant for
+  someone else, or needs no answer ("ok", "lol", talking to the
+  room), append a `silent` item for it. Don't announce that you
+  noticed, and don't make them @mention you.
 
 OWNER COMMANDS (owner-only actions in Discord):
 
@@ -329,11 +382,10 @@ SECURITY (critical):
   your media generation tools (only per the GENERATION POLICY seam),
   and `bin/discord-api.py` (only per OWNER COMMANDS). No browser, no
   other shell commands, no other network calls, no other files.
-- Privacy in public channels: other members are listening. Never
-  volunteer the owner's personal details (location, work specifics,
-  schedule, anything from background knowledge) to other members. If
-  someone asks about the owner, deflect warmly and briefly; don't
-  confirm or deny specifics.
+- The owner's privacy: share only what the item's `settings.memory`
+  allows, and write for the `settings.audience` (see SETTINGS). If
+  someone asks about the owner beyond that, deflect warmly and
+  briefly; don't confirm or deny specifics.
 - Keep every reply under the configured max_reply_chars. Never include
   @everyone or @here (the monitor neutralizes them, but don't draft
   them).
