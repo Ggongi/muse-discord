@@ -25,8 +25,12 @@ that can read and write these files can implement a worker.
   holds a lease on, so a second worker never redoes a busy worker's
   items; an item still open after its 10-minute lease is handed out
   again in case its worker died. The payload carries those items plus
-  the persona text. Other runtimes can poll `reply_queue.json`
-  themselves; the files are the contract, not the hook.
+  the persona text. The shipped hook also restarts a dead monitor:
+  when the monitor process is gone, it runs `watchdog.sh --from-hook`
+  detached (rate limited with backoff, never after a token rejection,
+  and never a wake). Other runtimes can poll `reply_queue.json`
+  themselves and leave restarts to the scheduled watchdog; the files
+  are the contract, not the hook.
 
 ## Files
 

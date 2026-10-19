@@ -22,6 +22,22 @@
 # happy path is one append per item: no reading the queue or persona
 # files.
 #
+# Monitor liveness: before the queue logic, each run checks that the
+# monitor process exists (its monitor.pid entry, else the same pgrep
+# watchdog.sh uses). When it is gone (say, the VM was replaced and every
+# process died), the script starts `watchdog.sh --from-hook` fully
+# detached and logs one line, so the bot is back within seconds instead
+# of at the next scheduled watchdog run. That never wakes anyone and
+# never touches the token: watchdog.sh does the restart and decides
+# everything else. Attempts are rate limited in hook state (at once,
+# then after 1, 2 and 5 minutes, then every 10 while the monitor stays
+# down; the backoff resets once the monitor stays up for the current
+# window), and none are made after a token rejection (TOKEN REJECTED at
+# the end of monitor.log, or the watchdog's alert saying so): the
+# scheduled watchdog run owns that case, so a reset token is not
+# retried every few seconds. A stuck monitor (alive, stale heartbeat),
+# presence, alerts and update checks stay with the scheduled run.
+#
 # This script targets Muse's hook runtime (it sources
 # $HATCH_HOOK_RUNTIME for the silent/wake/log/hook_state helpers and is
 # registered as a hook with a prompt like worker-prompt.template.md;
@@ -39,6 +55,119 @@ QUEUE="$PKG_DIR/reply_queue.json"
 OUTBOX="$PKG_DIR/reply_outbox.json"
 SENDING="$PKG_DIR/reply_outbox.processing.json"
 LEASE_SECS=600
+
+# Hook state (one JSON object): .woken holds the item leases, .restart
+# the monitor-restart backoff ({next, fails}).
+state=$(hook_state_get 2>/dev/null \
+    | jq -c 'if type == "object" then . else {} end' 2>/dev/null) \
+    || state='{}'
+[ -n "$state" ] || state='{}'
+printf -v now '%(%s)T' -1
+
+# ---- Monitor liveness (zero tokens; see the header) ----
+# Alive when monitor.pid names a live monitor.py (read without touching
+# its flock: probing the lock could make a monitor that is starting
+# right then think another one holds it), else when watchdog.sh's own
+# pgrep finds one.
+monitor_alive() {
+    local pid="" arg1=""
+    IFS= read -r pid < "$PKG_DIR/monitor.pid" 2>/dev/null || true
+    if [[ $pid =~ ^[0-9]+$ ]] \
+        && { IFS= read -r -d '' _ && IFS= read -r -d '' arg1; } \
+            2>/dev/null < "/proc/$pid/cmdline" \
+        && [[ $arg1 == *monitor.py ]]; then
+        return 0
+    fi
+    pgrep -f '^python3 [m]onitor.py' >/dev/null 2>&1
+}
+
+# True after a token rejection: the scheduled watchdog run handles that
+# (and alerts), so the hook never retries a refused token on its own.
+token_rejected() {
+    if tail -c 4096 "$PKG_DIR/monitor.log" 2>/dev/null \
+        | grep -q "TOKEN REJECTED"; then
+        return 0
+    fi
+    grep -qs "rejected the token" "$PKG_DIR/watchdog_state.json"
+}
+
+# Run watchdog.sh --from-hook fully detached (double fork, new session,
+# every inherited descriptor closed, stdio on /dev/null): this script
+# returns at once, never waits on it, and a hook-runtime timeout that
+# kills this script's process tree cannot take the restart down.
+start_watchdog() {
+    python3 - "$PKG_DIR" >/dev/null 2>&1 <<'PYEOF'
+import os
+import sys
+d = sys.argv[1]
+if os.fork() > 0:
+    os._exit(0)
+os.setsid()
+if os.fork() > 0:
+    os._exit(0)
+os.chdir(d)
+null = os.open(os.devnull, os.O_RDWR)
+for fd in (0, 1, 2):
+    os.dup2(null, fd)
+try:
+    fds = [int(x) for x in os.listdir("/proc/self/fd")]
+except OSError:
+    fds = range(3, 1024)
+for fd in fds:
+    if fd > 2:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+os.execvp("bash", ["bash", os.path.join(d, "watchdog.sh"), "--from-hook"])
+PYEOF
+}
+
+if [ -f "$PKG_DIR/watchdog.sh" ]; then
+    rs_next=0
+    rs_fails=0
+    if [[ $state == *'"restart"'* ]]; then
+        read -r rs_next rs_fails < <(printf '%s' "$state" \
+            | jq -r '.restart | "\(.next // 0) \(.fails // 0)"' \
+            2>/dev/null) || true
+        [[ $rs_next =~ ^[0-9]+$ ]] || rs_next=0
+        [[ $rs_fails =~ ^[0-9]+$ ]] || rs_fails=0
+    fi
+    restart=""
+    if monitor_alive; then
+        # Up for a whole backoff window: reset the backoff.
+        if [ "$rs_next" -gt 0 ] && [ "$now" -ge "$rs_next" ]; then
+            restart=null
+            log "monitor is running again" '{"attempts":"'"$rs_fails"'"}'
+        fi
+    elif [ "$now" -ge "$rs_next" ]; then
+        if token_rejected; then
+            restart="{\"next\":$((now + 600)),\"fails\":$rs_fails}"
+            log "monitor down after a token rejection; leaving it to the scheduled watchdog run" '{}'
+        else
+            rs_fails=$((rs_fails + 1))
+            case $rs_fails in
+                1) wait_secs=60 ;;
+                2) wait_secs=120 ;;
+                3) wait_secs=300 ;;
+                *) wait_secs=600 ;;
+            esac
+            restart="{\"next\":$((now + wait_secs)),\"fails\":$rs_fails}"
+            if start_watchdog; then
+                log "monitor not running; started watchdog.sh" \
+                    '{"attempt":"'"$rs_fails"'","retry_after_secs":"'"$wait_secs"'"}'
+            else
+                log "monitor not running; could not start watchdog.sh" \
+                    '{"attempt":"'"$rs_fails"'"}'
+            fi
+        fi
+    fi
+    if [ -n "$restart" ]; then
+        state=$(printf '%s' "$state" | jq -c --argjson r "$restart" \
+            'if $r == null then del(.restart) else .restart = $r end')
+        hook_state_set "$state"
+    fi
+fi
 
 # No queue file yet -> nothing to do
 if [ ! -f "$QUEUE" ]; then
@@ -68,8 +197,8 @@ if [ "$count" -eq 0 ]; then
     silent "queue empty" '{}'
 fi
 
-now=$(date +%s)
-woken=$(hook_state_get | jq -c '.woken // {}' 2>/dev/null) || woken='{}'
+woken=$(printf '%s' "$state" | jq -c '.woken // {}' 2>/dev/null) \
+    || woken='{}'
 
 # Due: open items with no live lease.
 due=$(printf '%s' "$open" | jq -c --argjson w "$woken" --argjson now "$now" \
@@ -88,13 +217,13 @@ fi
 
 # Leases: keep the ones of items still queued (answered ones too, in case
 # their outbox entry is briefly unreadable), stamp the items this wake
-# hands out.
+# hands out. The rest of the hook state (.restart) is kept as is.
 # hook_state_set is a no-op on dry runs, so testing never consumes a detection.
 queued=$(jq -c '[.[]? | objects | .message_id | strings]' "$QUEUE" \
     2>/dev/null) || queued='[]'
 leases=$(jq -cn --argjson ids "$queued" --argjson due "$due" \
-    --argjson w "$woken" --argjson now "$now" '
-    {woken: (($w | with_entries(select(.key as $k | $ids | index($k))))
+    --argjson w "$woken" --argjson now "$now" --argjson st "$state" '
+    $st + {woken: (($w | with_entries(select(.key as $k | $ids | index($k))))
         + ($due | map({key: .message_id, value: $now}) | from_entries))}')
 hook_state_set "$leases"
 
