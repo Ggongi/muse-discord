@@ -298,3 +298,80 @@ Resolution for a param `key` for one guild (implemented by the core's
 
 per_guild keys may be guild IDs (preferred, names can collide) or
 server names.
+
+## Update notices
+
+How an owner hears about a new release and starts the update from
+Discord. None of it involves the reply worker.
+
+### Versions
+
+A release is a semver tag `vMAJOR.MINOR.PATCH` on origin. Other tags,
+including pre-releases such as `v1.2.0-rc.1`, are ignored. The
+installed version is the newest release tag HEAD contains, or
+`unreleased` before an install has one. A release's CHANGELOG entry
+has the heading `## vX.Y.Z (YYYY-MM-DD): Short title`, newest first;
+the older dated headings (`## 2026-10-18: ...`) are pre-release
+history.
+
+### update_check.json (watchdog -> monitor)
+
+Written by `watchdog.sh` at most once a day (`updates.check: false`
+turns the check, and the DMs, off). It lists origin's tags with
+`git ls-remote --tags origin` (never the GitHub API, whose
+unauthenticated rate limit is per IP), takes the highest release, and
+fetches only that tag when it is newer than the installed version and
+HEAD does not already contain its commit. The fields the monitor
+reads:
+
+| Field           | Meaning                                             |
+| --------------- | --------------------------------------------------- |
+| `latest`        | the new release's tag; `""` when nothing is new     |
+| `installed`     | the installed version, or `unreleased`              |
+| `entries`       | headings of the release entries new to this install |
+| `action_needed` | true when one of those lists **Action needed**      |
+
+`entries` come from CHANGELOG.md at the `latest` tag, newest first:
+every version heading above `installed` up to `latest`, or only
+`latest`'s when `installed` is `unreleased`. `checked` (epoch seconds)
+and `announced` (the tag of the last `UPDATE:` line) are the
+watchdog's own.
+
+### The DM and its buttons
+
+For each new `latest` version, the monitor DMs every owner once:
+"**muse-discord vX.Y.Z is out**" with the installed version, the
+entries (up to 5, then "+N more"), a note when action is needed, and
+an action row with two buttons, custom ids `mdupd:now:<version>` and
+`mdupd:later:<version>`. Only a version newer than the last one
+announced is offered, and the DM is skipped when HEAD already contains
+the tag. In `state.json`, `update_notice` holds the announced
+`version`, the owners still owed the DM (retried each poll cycle, up
+to 10 times), and the owner's `choice`.
+
+A click reaches the monitor as a gateway `INTERACTION_CREATE` (no
+intent needed; the application must not have an Interactions Endpoint
+URL set, or Discord sends clicks there instead). A dedicated thread
+answers it at once, independent of the main loop, because Discord
+fails an interaction not acknowledged within 3 seconds. Interactions
+are dispatched by custom id prefix (`mdupd` here; a slash command
+would register as `/<name>`):
+
+- From a non-owner, for a version other than the newest announced one,
+  or for a version HEAD already contains: an ephemeral reply (only the
+  clicker sees it), nothing else.
+- **Update now**: writes `update_request.json`, then edits the DM to
+  show the choice and drop the buttons.
+- **Later**: records the choice and edits the DM the same way. That
+  version is not offered again; a newer version gets a new DM.
+
+### update_request.json (monitor -> update hook)
+
+`{"version": "<release tag>", "requested_at": <epoch seconds>,
+"by": "<owner user id>"}`, written atomically on **Update now**.
+`hooks/update-watch.sh` wakes the owner's Muse in its main chat once
+per request, keyed on `version` and `requested_at` (it re-wakes only
+if the file is still there 6 hours later). The Muse updates to exactly
+that tag by following UPDATING.md, then deletes the file, also when it
+stops early. The hook never runs git, holds no secrets, and hands on
+only a `vX.Y.Z` version.

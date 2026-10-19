@@ -104,6 +104,7 @@ DEFAULT_CONFIG = {
     "presence": {"enabled": True, "status_text": "",
                  "status_kind": "watching"},
     "persona": {"file": "persona.md"},
+    "updates": {"check": True},
     "plugins": {"welcome": {"enabled": False},
                 "media_generation": {"enabled": False}},
 }
@@ -1218,15 +1219,22 @@ def notify_owners(text):
         return True
     delivered = False
     for uid in sorted(OWNER_USER_IDS):
-        try:
-            c = api_post("/users/@me/channels", {"recipient_id": uid})
-            api_post(f"/channels/{c['id']}/messages",
-                     {"content": text[:1990],
-                      "allowed_mentions": {"parse": []}})
+        if dm_owner(uid, {"content": text[:1990],
+                          "allowed_mentions": {"parse": []}}):
             delivered = True
-        except Exception as e:
-            print(f"Owner DM to {uid} failed: {e}", flush=True)
     return delivered
+
+
+def dm_owner(uid, payload):
+    """Send one message payload (content, components, ...) to one
+    owner's DM channel. True when it landed. Never raises."""
+    try:
+        c = api_post("/users/@me/channels", {"recipient_id": uid})
+        api_post(f"/channels/{c['id']}/messages", payload)
+        return True
+    except Exception as e:
+        print(f"Owner DM to {uid} failed: {e}", flush=True)
+        return False
 
 
 def _join_summary(gid, ginfo, channels):
@@ -1303,6 +1311,292 @@ def on_guild_event(state, ev):
         state.get("guild_joined", {}).pop(gid, None)
         state.get("guild_first_seen", {}).pop(gid, None)
         print(f"Removed from server {name or gid}.", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Update notices and interactions. Versions are releases: semver tags
+# vX.Y.Z. watchdog.sh records a new release in update_check.json
+# (latest, installed, entries, action_needed; see PROTOCOL.md). The
+# monitor DMs each owner about it once, with [Update now] / [Later]
+# buttons. A click arrives as a gateway INTERACTION_CREATE and is
+# answered on its own thread, never behind the main loop's REST work:
+# Discord fails an interaction that is not acknowledged within 3 seconds.
+# "Update now" writes update_request.json, which hooks/update-watch.sh
+# turns into a wake of the owner's Muse in its main chat (it follows
+# UPDATING.md to that exact release). "Later" only declines: a version is
+# offered once, and a newer one is offered again.
+# ---------------------------------------------------------------------------
+UPDATE_CHECK_FILE = os.path.join(BASE_DIR, "update_check.json")
+UPDATE_REQUEST_FILE = os.path.join(BASE_DIR, "update_request.json")
+UPDATE_ENTRIES_SHOWN = 5
+UPDATE_DM_TRIES = 10  # owed DMs retried once per cycle, then given up
+# The newest announced version, mirrored from state.json for the
+# interaction thread (only the main loop touches state).
+_update_announced = {"version": None}
+_updates_cfg = {"mtime": None,
+                "check": (CFG.get("updates") or {}).get("check") is not False}
+
+
+def updates_enabled():
+    """updates.check from config.yaml, re-read when the file changes, so
+    turning it off stops the DMs without a restart."""
+    path = _config_path()
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return _updates_cfg["check"]
+    if mtime != _updates_cfg["mtime"]:
+        _updates_cfg["mtime"] = mtime
+        try:
+            with open(path) as f:
+                cfg = yaml.safe_load(f) or {}
+            _updates_cfg["check"] = \
+                (cfg.get("updates") or {}).get("check") is not False
+        except Exception:
+            pass  # unreadable mid-edit: keep the last known value
+    return _updates_cfg["check"]
+
+
+def release_version(value):
+    """(major, minor, patch) for a release tag "vX.Y.Z", else None
+    (pre-releases such as v1.2.0-rc.1 and other tags are not releases)."""
+    if not isinstance(value, str):
+        return None
+    m = re.fullmatch(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", value)
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def _read_json_dict(path):
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def _version_installed(tag, timeout=5):
+    """True when HEAD already contains the release tag (updated by hand
+    before the notice went out, or since). False when git cannot tell,
+    e.g. the tag was never fetched."""
+    try:
+        r = subprocess.run(["git", "-C", BASE_DIR, "merge-base",
+                            "--is-ancestor", f"refs/tags/{tag}", "HEAD"],
+                           capture_output=True, timeout=timeout)
+    except Exception:
+        return False
+    return r.returncode == 0
+
+
+def _entry_line(heading):
+    """A CHANGELOG release heading "vX.Y.Z (YYYY-MM-DD): Title" as
+    "vX.Y.Z: Title"; anything else as is."""
+    m = re.fullmatch(r"(v\S+)\s+\([^)]*\):\s*(.+)", heading)
+    return f"{m.group(1)}: {m.group(2)}" if m else heading
+
+
+def update_notice_text(info):
+    version = info["latest"]
+    installed = info.get("installed")
+    on = (f"you're on {installed}" if release_version(installed)
+          else "you're on an unreleased version")
+    lines = [f"**muse-discord {version} is out** ({on})."]
+    entries = [_entry_line(str(e))[:150]
+               for e in info.get("entries") or [] if e]
+    if entries:
+        lines.append("What's new:")
+        lines += ["- " + e for e in entries[:UPDATE_ENTRIES_SHOWN]]
+        if len(entries) > UPDATE_ENTRIES_SHOWN:
+            lines.append(f"- +{len(entries) - UPDATE_ENTRIES_SHOWN} more")
+    else:
+        lines.append("What's new is in CHANGELOG.md.")
+    if info.get("action_needed"):
+        lines.append("Some changes need a step from you; your Muse walks "
+                     "you through them.")
+    lines.append(f"**Update now**: your Muse updates to {version} in its "
+                 "main chat by following UPDATING.md, and asks before "
+                 "touching anything you customized. **Later**: skip "
+                 f"{version}; you are asked again when a newer version "
+                 "ships.")
+    return "\n".join(lines)[:1990]
+
+
+def update_buttons(version):
+    return [{"type": 1, "components": [
+        {"type": 2, "style": 1, "label": "Update now",
+         "custom_id": f"mdupd:now:{version}"},
+        {"type": 2, "style": 2, "label": "Later",
+         "custom_id": f"mdupd:later:{version}"}]}]
+
+
+def announce_update(state):
+    """DM the owners about the release in update_check.json, once per
+    version: only a version newer than the last one announced is
+    offered. Owners whose DM failed are retried each cycle."""
+    upd = state.setdefault("update_notice", {})
+    _update_announced["version"] = upd.get("version")
+    if not updates_enabled():
+        return
+    info = _read_json_dict(UPDATE_CHECK_FILE)
+    version = info.get("latest")
+    new = release_version(version)
+    last = release_version(upd.get("version"))
+    if new and (last is None or new > last):
+        upd.clear()
+        upd.update(version=version, at=int(time.time()), owed=[], tries=0)
+        if _version_installed(version):
+            print(f"Update {version} is already installed; no notice.",
+                  flush=True)
+        elif not OWNER_USER_IDS:
+            print(f"Update {version} available (no owners configured to "
+                  f"tell).", flush=True)
+        else:
+            upd.update(owed=sorted(OWNER_USER_IDS),
+                       text=update_notice_text(info))
+            print(f"Update {version} available: DMing the owners.",
+                  flush=True)
+        _update_announced["version"] = version
+    owed = upd.get("owed") or []
+    if not owed or rest_backing_off():
+        return
+    payload = {"content": upd.get("text") or "", "allowed_mentions":
+               {"parse": []}, "components": update_buttons(upd["version"])}
+    upd["owed"] = [uid for uid in owed if not dm_owner(uid, payload)]
+    upd["tries"] = upd.get("tries", 0) + 1
+    if upd["owed"] and upd["tries"] >= UPDATE_DM_TRIES:
+        print(f"Update notice undeliverable to {', '.join(upd['owed'])}; "
+              f"giving up.", flush=True)
+        upd["owed"] = []
+
+
+def apply_record(state, rec):
+    """Main-loop side of an interaction: persist what the interaction
+    thread decided (it never writes state.json itself)."""
+    if rec.get("kind") == "update_choice":
+        upd = state.setdefault("update_notice", {})
+        if rec.get("version") == upd.get("version"):
+            upd["choice"] = {k: rec.get(k) for k in ("action", "by", "at")}
+        print(f"Owner {rec.get('by')} chose "
+              f"{'Update now' if rec.get('action') == 'now' else 'Later'} "
+              f"for update {rec.get('version')}.", flush=True)
+
+
+# Interaction dispatch: one handler per key, the custom_id prefix (the
+# text before the first ":") for buttons and other components, or
+# "/<name>" for a slash command. A handler gets (interaction, the rest of
+# the custom_id, the clicking user's id, record) and returns the callback
+# response; record(dict) hands a state change to the main loop.
+INTERACTION_HANDLERS = {}  # key -> (handler, owner_only)
+INTERACTION_CALLBACK_TIMEOUT = 2.5  # inside Discord's 3s deadline
+
+
+def register_interaction(key, handler, owner_only=True):
+    INTERACTION_HANDLERS[key] = (handler, owner_only)
+
+
+def ephemeral(text):
+    """A callback response only the clicking user sees."""
+    return {"type": 4, "data": {"content": text, "flags": 64,
+                                "allowed_mentions": {"parse": []}}}
+
+
+def interaction_user_id(ix):
+    user = (ix.get("member") or {}).get("user") or ix.get("user") or {}
+    return str(user.get("id") or "")
+
+
+def dispatch_interaction(ix, record):
+    data = ix.get("data") or {}
+    if ix.get("type") == 3:      # MESSAGE_COMPONENT
+        key, _, rest = str(data.get("custom_id") or "").partition(":")
+    elif ix.get("type") == 2:    # APPLICATION_COMMAND
+        key, rest = "/" + str(data.get("name") or ""), ""
+    else:
+        return None              # nothing to answer (e.g. autocomplete)
+    entry = INTERACTION_HANDLERS.get(key)
+    if entry is None:
+        return ephemeral("That control is no longer active.")
+    handler, owner_only = entry
+    uid = interaction_user_id(ix)
+    if owner_only and uid not in OWNER_USER_IDS:
+        return ephemeral("Only this bot's owners can use that.")
+    return handler(ix, rest, uid, record)
+
+
+def interaction_callback(ix, response):
+    """POST the interaction response. Deliberately not api_post: the
+    interaction token authorizes this call (a 401 is an expired
+    interaction, not a revoked bot token), it is outside the REST
+    rate-limit backoff, and it answers 204 with no body."""
+    path = (f"/interactions/{urllib.parse.quote(str(ix['id']), safe='')}/"
+            f"{urllib.parse.quote(str(ix['token']), safe='')}/callback")
+    req = urllib.request.Request(
+        API + path, data=json.dumps(response).encode(),
+        headers={"User-Agent": "DiscordBot (muse-discord, 1.0)",
+                 "Content-Type": "application/json"})
+    with urllib.request.urlopen(req,
+                                timeout=INTERACTION_CALLBACK_TIMEOUT) as r:
+        r.read()
+
+
+def _interaction_thread_main(ix_inbox, record):
+    """Answer interactions as they arrive (fed by the gateway thread)."""
+    while True:
+        ix = ix_inbox.get()
+        try:
+            response = dispatch_interaction(ix, record)
+        except Exception as e:
+            print(f"Interaction handler error: {e}", flush=True)
+            response = ephemeral("Something went wrong; try again.")
+        if response is None:
+            continue
+        try:
+            interaction_callback(ix, response)
+        except Exception as e:
+            print(f"Interaction response failed: {e}", flush=True)
+
+
+def on_update_button(ix, rest, uid, record):
+    action, _, version = rest.partition(":")
+    if action not in ("now", "later") or not release_version(version):
+        return ephemeral("That control is no longer active.")
+    announced = _update_announced["version"]
+    if version != announced:
+        if release_version(announced) \
+                and release_version(version) < release_version(announced):
+            return ephemeral(f"That update prompt is out of date: "
+                             f"{announced} is out since. Use the newest "
+                             f"prompt.")
+        return ephemeral("That control is no longer active.")
+    # Short timeout: the whole answer must land within Discord's 3s.
+    if _version_installed(version, timeout=1):
+        return ephemeral(f"{version} is already installed; nothing to "
+                         f"do.")
+    now = int(time.time())
+    if action == "now":
+        if _read_json_dict(UPDATE_REQUEST_FILE).get("version") != version:
+            try:
+                atomic_write(UPDATE_REQUEST_FILE, {
+                    "version": version, "requested_at": now, "by": uid})
+            except OSError as e:
+                print(f"Could not write update_request.json: {e}",
+                      flush=True)
+                return ephemeral("I could not record the request; try "
+                                 "again in a moment.")
+        line = (f"**Update now** chosen. Your Muse is starting the update "
+                f"to {version} in its main chat.")
+    else:
+        line = (f"**Later** chosen. {version} will not be offered again; "
+                f"a newer version will be.")
+    record({"kind": "update_choice", "version": version, "action": action,
+            "by": uid, "at": now})
+    original = (ix.get("message") or {}).get("content") or ""
+    return {"type": 7, "data": {
+        "content": original[:1990 - len(line)] + "\n\n" + line,
+        "components": [], "allowed_mentions": {"parse": []}}}
+
+
+register_interaction("mdupd", on_update_button)
 
 
 def is_mention(msg):
@@ -3584,6 +3878,14 @@ async def _gateway_run(token, inbox, status):
                                 else "delete",
                                 "id": d.get("id"),
                                 "joined_at": d.get("joined_at")}})
+                        elif t == "INTERACTION_CREATE":
+                            # A button click (or command): answered by
+                            # the interaction thread at once, within
+                            # Discord's 3s deadline, whatever the main
+                            # loop is doing.
+                            ix_inbox = status.get("interactions")
+                            if ix_inbox is not None:
+                                ix_inbox.put(pkt["d"])
                         elif t == "TYPING_START":
                             # Someone is typing: lets a pending burst
                             # flush as soon as its author stops. Rides
@@ -3682,6 +3984,9 @@ def drain_gateway(state, inbox, channels):
         if "_typing" in m:
             note_activity(m["_typing"].get("channel_id"),
                           m["_typing"].get("user_id"))
+            continue
+        if "_record" in m:
+            apply_record(state, m["_record"])
             continue
         cid = m.get("channel_id")
         if not cid:
@@ -4356,7 +4661,9 @@ def main():
     # gateway degrades silently to the old 30s cadence.
     token = TOKEN
     _gateway_inbox = pyqueue.Queue()
-    _gateway_status = {"wake": threading.Event()}
+    _ix_inbox = pyqueue.Queue()  # interactions, see below
+    _gateway_status = {"wake": threading.Event(),
+                       "interactions": _ix_inbox}
     gw_thread = threading.Thread(
         target=_gateway_thread_main,
         args=(token, _gateway_inbox, _gateway_status),
@@ -4366,6 +4673,16 @@ def main():
     # Typing indicator on its own clock (see typing_refresh).
     threading.Thread(target=_typing_thread_main, daemon=True,
                      name="typing").start()
+    # Interactions (button clicks) on their own thread, fed straight by
+    # the gateway thread: the 3s acknowledgement deadline never waits on
+    # the main loop. What they change in state comes back through the
+    # gateway inbox ("_record", applied by drain_gateway).
+    _update_announced["version"] = \
+        (state.get("update_notice") or {}).get("version")
+    threading.Thread(
+        target=_interaction_thread_main,
+        args=(_ix_inbox, lambda rec: _gateway_inbox.put({"_record": rec})),
+        daemon=True, name="interactions").start()
 
     # A restart must not drop bursts staged before it: their messages are
     # already marked seen, so flush them immediately instead of waiting out
@@ -4581,6 +4898,7 @@ def main():
         try:
             if cycle_done:
                 flush_join_notices(state, GUILDS, CHANNELS)
+                announce_update(state)
                 sweep_media()
                 sweep_generated()
                 sweep_gen_state(state)

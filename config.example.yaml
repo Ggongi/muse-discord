@@ -120,9 +120,12 @@ presence:
   status_kind: watching
 
 updates:
-  # The watchdog checks upstream for a new version at most once a day
-  # and prints one "UPDATE:" line per new version. It never applies
-  # updates itself (see UPDATING.md). false = never check.
+  # The watchdog checks for a new release (a version tag such as
+  # v1.2.0, listed with `git ls-remote`) at most once a day and prints
+  # one "UPDATE:" line per new version, and the bot DMs the owners about
+  # it once, with [Update now] / [Later] buttons. Nothing is applied
+  # without an owner's say-so (see UPDATING.md).
+  # false = never check, and no DMs.
   check: true
 
 persona:

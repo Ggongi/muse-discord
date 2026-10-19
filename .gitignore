@@ -16,6 +16,7 @@ monitor.heartbeat
 watchdog_state.json
 watchdog.lock
 update_check.json
+update_request.json
 
 # Logs (the previous run's log is kept as <name>.log.1)
 *.log
