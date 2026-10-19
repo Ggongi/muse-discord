@@ -1,0 +1,55 @@
+# limits.per_person_per_day counts per person, and owners are exempt.
+# The cap is 1 on the test server (servers."<id>".limits; limits are
+# not settable per channel). A cap counts in the scope where it is set
+# ("server:<id>" in state.json's rate.scopes) for the UTC day, and
+# every non-owner message queued in that server today counts, cap or
+# no cap, in every scenario of the run (state.json is kept between
+# them). So the capped person must be someone no earlier scenario
+# could have counted: this scenario swaps the roles and makes B the
+# owner. A, the owner (never counted) everywhere else, is a stranger
+# here with a clean count: A's first mention is answered (q1), the
+# second is capped (q2: silence, no message to A, and the monitor
+# logs "hit per-user daily cap for server:<id>"). B, the owner here,
+# is answered twice in a row (q3, q4), past the cap of 1; q4 is the
+# liveness control. A capped message is dropped at once (ledgered
+# skipped, "daily cap reached"), so A's next message (q2b) is judged
+# on its own: capped too, with its own ledger entry, not folded into
+# a pending q2.
+# Catches: no per-person cap, a cap counted for everyone together
+# (B capped), owners counted or capped, a capped person told so, and
+# a capped burst left pending (retried, swallowing the person's next
+# messages, answered late after a restart).
+id: caps_per_person
+tier: 1
+title: "limits.per_person_per_day caps a person; owners are exempt"
+config:
+  owners: ["{{B_ID}}"]
+  servers:
+    "{{GUILD_ID}}":
+      limits:
+        per_person_per_day: 1
+steps:
+  - send: { as: a, text: "<@SUT> first question", label: q1 }
+  - wait_for: { sut_messages: 1, timeout: 60 }
+  - send: { as: a, text: "<@SUT> second question", label: q2 }
+  - wait: 10
+  - send: { as: a, text: "<@SUT> third question", label: q2b }
+  - wait: 10
+  - send: { as: b, text: "<@SUT> owner here, one", label: q3 }
+  - wait_for: { sut_messages: 2, timeout: 60 }
+  - send: { as: b, text: "<@SUT> owner here, two", label: q4 }
+  - wait_for: { sut_messages: 3, timeout: 60 }
+expect:
+  settle: 10
+  checks:
+    - no_sut_reply_to: q2
+    - no_sut_reply_to: q2b
+    - ledger_status: { label: q2, status: skipped }
+    - ledger_status: { label: q2b, status: skipped }
+    - sut_reply_count: { eq: 3 }
+    - replies_to_any: [q1, q3, q4]
+    - latency: { from: q1, max: 30 }
+    - latency: { from: q3, max: 30 }
+    - latency: { from: q4, max: 30 }
+    - content_matches: "^ack 1$"
+    - log_contains: "(?s)hit per-user daily cap for server:\\d+.*hit per-user daily cap for server:\\d+"

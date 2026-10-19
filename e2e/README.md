@@ -48,12 +48,23 @@ python3 -m unittest discover -s e2e/tests -t .
      Threads, Read Message History, Attach Files, Embed Links, Add
      Reactions, Pin Messages):
      `https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=2252074691710016`
+     (this already includes Send Messages in Threads, so it can answer
+     in the threads the scenarios start)
    - `driver-a`: View Channel, Send Messages, Read Message History,
-     Attach Files, Add Reactions, and Manage Channels (it creates and
-     deletes the scenario channels):
-     `https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=101456`
-   - `driver-b`: the same without Manage Channels:
-     `https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=101440`
+     Attach Files, Add Reactions, Manage Channels (it creates and
+     deletes the scenario channels), Create Public Threads (it starts
+     the scenarios' threads) and Send Messages in Threads:
+     `https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=309237746768`
+   - `driver-b`: View Channel, Send Messages, Read Message History,
+     Attach Files, Add Reactions and Send Messages in Threads:
+     `https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=274878008384`
+
+   **Existing setups** (drivers invited before the thread scenarios,
+   with 101456 / 101440): no re-invite is needed. In the test server,
+   open Server Settings, Roles, and on the `driver-a` role enable
+   **Create Public Threads** and **Send Messages in Threads**; on the
+   `driver-b` role enable **Send Messages in Threads**. Until then the
+   thread scenarios report a flake naming the missing permission.
 4. **Repository secrets** (Settings, Secrets and variables, Actions):
    - `E2E_GUILD_ID`: the test server's ID (Developer Mode on,
      right-click the server icon, **Copy Server ID**).
@@ -99,8 +110,9 @@ defaults written out, the test server under `servers."<id>"` (with
 `who.replies: conversational`), and an `engine:` block with fast
 timings (REST poll 10 s, coalesce 5 s). `sut.py` always forces
 presence off and `updates.notify: off`. A scenario's `config:` is
-deep-merged on top and may use `{{GUILD_ID}}`, `{{A_ID}}` and
-`{{B_ID}}`, in keys too:
+deep-merged on top and may use `{{GUILD_ID}}`, `{{A_ID}}`, `{{B_ID}}`
+and `{{CHANNEL_ID}}` (the channel the runner created for this
+scenario), in keys too, each as a whole key or value:
 
 ```yaml
 config:
@@ -108,7 +120,16 @@ config:
     "{{GUILD_ID}}":
       who:
         ignore: ["{{B_ID}}"]
+        replies: "off"
+      channels:               # channel (or category) scope
+        "{{CHANNEL_ID}}":
+          replies: when-addressed
 ```
+
+A channel block is flat, as in `config.example.yaml`: it may set only
+`replies`, `notes` and `plugins.<plugin>.enabled` (plus `name`), not
+`who:` / `style:` groups; anything else (limits, privacy, ...) is set
+on the server. Threads follow their parent channel.
 
 One scenario, `legacy_config_mention`, sets `legacy_config: true` and
 runs under `config.legacy.yaml`, the old layout (`bot:`, `behavior:`,
@@ -130,10 +151,13 @@ What the settings scenarios cannot cover on Discord:
   `tests/test_settings_layout.py` covers it offline.
 - `role:<id>` entries in `who.allow` / `who.ignore`: the drivers hold
   no roles in the test server.
-- `/settings`. Bots cannot run slash commands or click buttons on
-  someone else's ephemeral messages, so no driver can open it. The
+- `/settings` itself. Bots cannot run slash commands or click buttons
+  on someone else's ephemeral messages, so no driver can open it. The
   offline suites cover its routing and pages; on Discord it is tested
-  by hand with the checklist below.
+  by hand with the checklist below. What it does to the bot is
+  covered live: a scenario's `settings` step writes
+  `config.discord.yaml` through the same `muse_settings` calls (see
+  "Adding a scenario").
 
 ## Manual checklist: /settings
 
@@ -275,8 +299,10 @@ schema (steps, checks, the `judge.rubric` that tier 2 requires) is
 documented and validated in `e2e/scenario.py`; copy an existing
 scenario of the same tier as a starting point. Steps are `send`,
 `wait`, `wait_for`, `action` (stop, start, or restart the monitor,
-gateway off or on), `converse`, and `delete: <label>` (the driver
-that sent that message deletes it; checks can still name the label).
+gateway off or on), `converse`, `delete: <label>` (the driver
+that sent that message deletes it, where it was posted; checks can
+still name the label), `thread` (with `send.in`, below) and
+`settings` (a live settings change, below).
 In tier 1, directives in a message's text (`[[slow]]`, `[[silent]]`,
 `[[long]]`, `[[everyone]]`, `[[mention_a]]`, `[[say:<text>]]`; see
 `fake_worker.py`) shape the fake worker's reply. Besides the channel
@@ -286,10 +312,80 @@ transcript, checks can read what the harness captured from the SUT:
 label's message), `ledger_status`, `quarantined`, and, in tier 1,
 `queue_item` (the queue item the fake worker got for a label's
 message: `follow_up`, `kind`, `from_bot`, `owner_command`, and
-fields of its `settings` card). A scenario may set `config:`
-overrides or `legacy_config: true` (see "The test config"); either
-restarts the monitor for that scenario. Check it offline with
+fields of its `settings` card), and `monitor_restarts` (how many
+times the monitor was restarted during the steps). A scenario may set
+`config:` overrides or `legacy_config: true` (see "The test config");
+either restarts the monitor for that scenario. Check it offline with
 `python3 e2e/run.py --tree . --tier 1 --dry-run` (or `--tier 2`).
 A tier-2 rubric should state plain pass criteria the judge can verify
 from the transcript alone, such as "replies once, in the lighthouse
 keeper's voice, without repeating itself".
+
+### Threads
+
+```yaml
+- send: { as: a, text: "<@SUT> hi", label: q1 }
+- thread: { from: q1, name: "side chat", label: t1 }   # as: a (default) | b
+- send: { as: b, in: t1, text: "<@SUT> hi in the thread", label: q2 }
+- send: { as: a, in: t1, text: "thanks", reply_to: last_sut }
+```
+
+`thread` makes a driver (A by default; it needs Create Public
+Threads) start a public thread on a channel message (`POST
+/channels/<channel>/messages/<message>/threads`, auto-archive 60
+min). `send.in: <thread label>` posts in that thread. Labels are one
+namespace for messages and threads, defined once each. A reply stays
+where it is sent: `reply_to` must name a message in the same channel
+or thread, and `last_sut` means the SUT's newest message there. A
+thread starts only on a channel message, one thread per message.
+`converse` stays in the channel.
+
+The transcript is still one `messages` list, sorted by id: the
+channel's history merged with every thread the scenario started (the
+thread starter and "thread created" system messages are left out).
+A message from a thread carries `thread: <label>`, and `threads` maps
+each thread label to its id. Checks treat thread messages like
+channel ones: `replies_to`, `no_sut_reply_to`, `sut_reply_count`,
+`latency`, ... see the SUT's replies in threads too, and
+`wait_for: {sut_messages: N}` counts the channel and its threads.
+
+### Live settings changes
+
+```yaml
+- settings: { set: who.replies, value: "off", scope: channel }
+- settings: { reset: who.replies, scope: channel }
+- settings: { undo: channel, timeout: 30 }
+```
+
+`settings` changes a setting while the monitor runs, the way
+`/settings` does: it calls the PR's own `muse_settings.set_value`,
+`reset` or `undo` on `<pkg>/config.yaml` with driver A (the owner) as
+`by`, so `config.discord.yaml` gets the same entry and history line a
+click would write. The key is the canonical one (`who.replies`,
+`style.notes`, `limits.per_person_per_day`,
+`plugins.<plugin>.enabled`); the scope (`channel`: this scenario's
+channel, `server`: the test server, `everywhere`, `dms`) turns it
+into the overlay key `/settings` writes (`muse_settings.format_key`),
+e.g. `servers."<guild>".channels."<channel>".replies` or
+`servers."<guild>".who.replies`; `undo` reverts the newest change at
+that scope (`muse_settings.scope_prefix`). The loader rejects a key,
+scope or value `/settings` could not write (who.replies cannot be set
+at `everywhere`; a channel takes only replies, notes and plugin
+on/off).
+
+The step then waits (default 30 s, `timeout:` to change) for a new
+`Settings reloaded` line in `monitor.log`. The monitor's main loop
+re-checks config.yaml and the overlay (a stat) on every pass, at
+least every ~2 s, so the reload normally shows within a few seconds.
+A timeout, a rejected change (`Config re-read failed`), or an `undo`
+with nothing to undo is a note, not a failure: the checks judge the
+outcome. `monitor_restarts: {eq: 0}` proves the change applied
+without a restart: it counts the monitor (re)starts while the steps
+ran (the restart for the scenario's config comes before the first
+step and is not counted).
+
+The overlay never outlives its scenario: before each scenario (and
+when the runner goes back to the base config), a
+`config.discord.yaml` left in the SUT's directory is deleted while
+the monitor is stopped, and the monitor is started again; the overlay
+is never copied from the tree either.

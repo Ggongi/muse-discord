@@ -575,3 +575,47 @@ class QueueItem(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class MonitorRestarts(unittest.TestCase):
+    def test_pass_and_fail(self):
+        tr, *_ = basic()
+        tr["monitor_restarts"] = 0
+        self.assertTrue(run({"monitor_restarts": {"eq": 0}}, tr)["ok"])
+        tr["monitor_restarts"] = 2
+        r = run({"monitor_restarts": {"eq": 0}}, tr)
+        self.assertFalse(r["ok"])
+        self.assertIn("2 monitor (re)start(s)", r["detail"])
+        self.assertIn("expected 0", r["detail"])
+        self.assertTrue(run({"monitor_restarts": {"min": 1}}, tr)["ok"])
+
+    def test_fail_missing(self):
+        tr, *_ = basic()
+        r = run({"monitor_restarts": {"eq": 0}}, tr)
+        self.assertFalse(r["ok"])
+        self.assertIn("no monitor_restarts count", r["detail"])
+
+
+class ThreadMessages(unittest.TestCase):
+    """Messages merged from a thread (thread set) count like channel
+    messages for every check."""
+
+    def setUp(self):
+        q1 = msg("a", 0, "<@900> hi")
+        r1 = msg("sut", 3, "ack 1", reply_to=q1["id"])
+        q2 = msg("b", 5, "<@900> in the thread", thread="t1")
+        r2 = msg("sut", 8, "ack 1", reply_to=q2["id"], thread="t1")
+        q3 = msg("a", 9, "<@900> again", thread="t1")
+        self.tr = transcript([q1, r1, q2, r2, q3],
+                             {"q1": q1["id"], "q2": q2["id"],
+                              "q3": q3["id"]})
+
+    def test_reply_checks_see_thread_replies(self):
+        for chk in ({"sut_reply_count": {"eq": 2}},
+                    {"replies_to_any": ["q1", "q2"]},
+                    {"latency": {"from": "q2", "max": 5}},
+                    {"no_sut_reply_to": "q3"},
+                    {"no_duplicate_replies": True}):
+            with self.subTest(chk):
+                self.assertTrue(run(chk, self.tr)["ok"], run(chk, self.tr))
+        r = run({"replies_to": "q2"}, self.tr)
+        self.assertFalse(r["ok"])  # r1 replies to q1 in the channel

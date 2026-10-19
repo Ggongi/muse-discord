@@ -55,7 +55,8 @@ def effective(sc, tmp):
                        (persona, "You are a test bot.\n")):
         with open(path, "w") as f:
             f.write(text)
-    cfg = sut.scenario_config(sut.base_config(GUILD, A, B), sc, A, B)
+    cfg = sut.scenario_config(sut.base_config(GUILD, A, B), sc, A, B,
+                              channel_id=CHAN)
     stand_in = types.SimpleNamespace(token_file=token, persona_file=persona)
     return sut.SUT.effective_config(stand_in, cfg)
 
@@ -84,7 +85,13 @@ class ScenarioConfigsLoad(unittest.TestCase):
                     legacy = bool(sc.get("legacy_config"))
                     self.assertEqual(st.layout, "old" if legacy else "new")
                     self.assertEqual(bool(st.notice), legacy)
-                    self.assertEqual(st.owners, [A])
+                    # Driver A, unless the scenario names other owners
+                    # (caps_per_person makes B the owner).
+                    owners = sut.render_config(
+                        {"o": (sc.get("config") or {}).get(
+                            "owners", ["{{A_ID}}"])},
+                        {"A_ID": A, "B_ID": B})["o"]
+                    self.assertEqual(st.owners, owners)
                     self.assertFalse(st.updates_notify)
                     self.assertFalse(st.presence_enabled)
                     self.assertEqual(st.guild_ids(), [GUILD])

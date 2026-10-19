@@ -33,6 +33,12 @@ prove an old config.yaml still loads. effective_config() writes the
 forced fields in whichever layout the config uses (mixing the two is
 a startup error in the monitor).
 
+Overlay. <pkg>/config.discord.yaml is what /settings writes (and what
+a scenario's `settings` step writes, through the PR's own
+muse_settings.py). It is never copied from the tree, and run.py
+deletes it, with a monitor restart, before every scenario, so a live
+change never leaks into the next one.
+
 What the SUT never does. config.yaml always turns updates off
 (updates.notify off; old layout: updates.check false), so the monitor
 never DMs the owners (driver A) about a release; the pkg copy also
@@ -69,12 +75,16 @@ LEGACY_TEMPLATE = os.path.join(E2E_DIR, "config.legacy.yaml")
 # Top-level keys only the old config layout has.
 OLD_LAYOUT_KEYS = ("bot", "behavior", "safety")
 LOG_NAME = "monitor.log"
+# The overlay /settings writes (muse_settings.OVERLAY_NAME). Never
+# copied from the tree; the runner deletes it between scenarios.
+OVERLAY_NAME = "config.discord.yaml"
 # The REST poll floor in monitor.py; REST-only scenarios rely on it.
 REST_POLL_SECONDS = 10
 # Not copied from the tree: VCS data, the developer's own config and
 # runtime files, and harness output.
 COPY_IGNORE = shutil.ignore_patterns(
-    ".git", "__pycache__", "config.yaml", "state.json", "reply_queue.json",
+    ".git", "__pycache__", "config.yaml", OVERLAY_NAME, "config.yaml.bak-*",
+    "state.json", "reply_queue.json",
     "reply_outbox*.json", "reply.lock", ".*.tmp", "quarantine.json",
     "mention_ledger.json", "monitor.pid", "monitor.heartbeat",
     "watchdog_state.json", "watchdog.lock", "update_check.json",
@@ -184,21 +194,23 @@ def base_config(guild_id, a_id, b_id, template=None, legacy=False):
                                     "B_ID": b_id})
 
 
-def scenario_config(base, scenario, a_id, b_id, legacy_base=None):
+def scenario_config(base, scenario, a_id, b_id, legacy_base=None,
+                    channel_id=None):
     """The config one scenario runs under: its `config:` overrides
-    (placeholders {{GUILD_ID}}, {{A_ID}}, {{B_ID}} rendered)
-    deep-merged over base, and driver B left out of
-    testing.treat_as_human when the scenario sets b_is_bot (unless the
-    overrides set treat_as_human themselves). A scenario with
-    legacy_config: true starts from legacy_base instead (default: the
-    old-layout config.legacy.yaml rendered for base's server)."""
+    (placeholders {{GUILD_ID}}, {{A_ID}}, {{B_ID}} and {{CHANNEL_ID}},
+    the scenario's own channel, rendered) deep-merged over base, and
+    driver B left out of testing.treat_as_human when the scenario sets
+    b_is_bot (unless the overrides set treat_as_human themselves). A
+    scenario with legacy_config: true starts from legacy_base instead
+    (default: the old-layout config.legacy.yaml rendered for base's
+    server)."""
     guild_id = guild_of(base)
     if scenario.get("legacy_config"):
         base = legacy_base if legacy_base is not None else base_config(
             guild_id, a_id, b_id, legacy=True)
     over = render_config(scenario.get("config") or {},
                          {"GUILD_ID": guild_id, "A_ID": a_id,
-                          "B_ID": b_id})
+                          "B_ID": b_id, "CHANNEL_ID": channel_id})
     cfg = deep_merge(base, over)
     if "treat_as_human" not in (over.get("testing") or {}):
         humans = [str(a_id)]
