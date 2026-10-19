@@ -139,18 +139,40 @@ if _S0.notice:
     print(_S0.notice, flush=True)
 
 
+# The interaction thread (/settings) reads settings and writes the
+# overlay while the main loop reads them: the reload is serialized by
+# _SETTINGS_LOCK, and every read-modify-write of config.discord.yaml in
+# this process (a /settings change, an undo, the conflict rule retiring
+# entries) holds _OVERLAY_LOCK. A reload noticed off the main thread
+# leaves its follow-up work (owner list, plugin loading) to the main
+# loop's next settings() call.
+_SETTINGS_LOCK = threading.RLock()
+_OVERLAY_LOCK = threading.RLock()
+_SETTINGS_PENDING = []  # settings before reloads the main loop owes hooks
+
+
 def settings():
     """The current settings, reloaded when config.yaml or
     config.discord.yaml changed since the last call (a stat per call; an
-    invalid edit keeps the previous settings and is logged once)."""
-    prev = _SETTINGS.current
-    changed, err = _SETTINGS.poll()
+    invalid edit keeps the previous settings and is logged once).
+    Thread-safe."""
+    with _SETTINGS_LOCK:
+        prev = _SETTINGS.current
+        changed, err = _SETTINGS.poll()
+        cur = _SETTINGS.current
+        if changed:
+            _SETTINGS_PENDING.append(prev)
+        pending = None
+        if _SETTINGS_PENDING \
+                and threading.current_thread() is threading.main_thread():
+            pending = _SETTINGS_PENDING[0]
+            del _SETTINGS_PENDING[:]
     if err:
         print(f"Config re-read failed; keeping the previous settings:\n"
               f"{err}", flush=True)
-    if changed:
-        _on_settings_changed(prev, _SETTINGS.current)
-    return _SETTINGS.current
+    if pending is not None:
+        _on_settings_changed(pending, cur)
+    return cur
 
 
 def _on_settings_changed(prev, cur):
@@ -563,7 +585,8 @@ def discover_channels_iter(previous=None):
         return dict(previous), dict(GUILDS)
     for gid, gname in guild_list:
         try:
-            gobj = api_get(f"/guilds/{gid}")
+            # with_counts: approximate_member_count, for /settings.
+            gobj = api_get(f"/guilds/{gid}?with_counts=true")
         except Exception as e:
             print(f"Guild fetch failed for {gname}: {e}", flush=True)
             gobj = {}
@@ -575,15 +598,26 @@ def discover_channels_iter(previous=None):
             "system_channel_id": gobj.get("system_channel_id"),
             "joined_at": joined_at,
         }
+        count = gobj.get("approximate_member_count")
+        if isinstance(count, int):
+            _MEMBER_COUNTS[gid] = count
         try:
             channels = api_get(f"/guilds/{gid}/channels")
         except Exception as e:
             print(f"Channel list failed for {gname}: {e}", flush=True)
             found.update({c: i for c, i in previous.items()
                           if i.get("guild_id") == gid})
-            continue
+            continue  # (its _GUILD_CHANNELS entry stays as it was)
         finally:
             yield
+        # Every channel of the guild, categories included, for the
+        # /settings channel and category pickers (threads are not
+        # listed: they follow their parent).
+        _GUILD_CHANNELS[gid] = [
+            {"id": ch["id"], "name": ch.get("name") or ch["id"],
+             "type": ch.get("type"), "parent_id": ch.get("parent_id"),
+             "position": ch.get("position")}
+            for ch in channels if isinstance(ch, dict) and ch.get("id")]
         names_by_id = {ch["id"]: ch.get("name", "?") for ch in channels}
         for ch in channels:
             if ch.get("parent_id"):
@@ -1403,10 +1437,12 @@ def retire_overlay_changes():
     move them to the overlay's history, one owner DM each (the conflict
     rule: the newest intent wins). Waits out a REST backoff so the DMs
     can land."""
-    current = settings()
-    if not current.retire or rest_backing_off():
+    if not settings().retire or rest_backing_off():
         return 0
-    notes = current.commit_retirements()
+    with _OVERLAY_LOCK:
+        # Re-checked under the lock: a /settings change written since
+        # may have replaced a stale entry, which must not be retired.
+        notes = settings().commit_retirements()
     for note in notes:
         print(note, flush=True)
         notify_owners(note)
@@ -1487,16 +1523,19 @@ def own_replies_in_run(history, msg):
     return n
 
 
-def notify_owners(text):
-    """DM every owner. Returns True when at least one DM landed (or there
-    is nobody to tell). Never raises."""
+def notify_owners(text, components=None):
+    """DM every owner (with message components, e.g. buttons, when
+    given). Returns True when at least one DM landed (or there is nobody
+    to tell). Never raises."""
     if not OWNER_USER_IDS:
         print(f"Owner notice (no owners configured): {text}", flush=True)
         return True
+    payload = {"content": text[:1990], "allowed_mentions": {"parse": []}}
+    if components:
+        payload["components"] = components
     delivered = False
     for uid in sorted(OWNER_USER_IDS):
-        if dm_owner(uid, {"content": text[:1990],
-                          "allowed_mentions": {"parse": []}}):
+        if dm_owner(uid, payload):
             delivered = True
     return delivered
 
@@ -1541,7 +1580,16 @@ def _join_summary(gid, ginfo, channels):
             f"{replies.get(res['who.replies'], replies['when-addressed'])}"
             f". Plugins on there: {', '.join(on) or 'none'}.\n"
             f"Channels I can see ({len(visible)}): {shown or 'none'}\n"
-            f"To change what I do there (welcomes, for one), {how}.")
+            f"To change what I do there (welcomes, for one), press "
+            f"**Configure** (or use /settings), or {how}.")
+
+
+def configure_button(gid):
+    """The join notice's button: opens that server's /settings page
+    (handled by settings_ui, custom_id mdset:open:server:<id>)."""
+    return [{"type": 1, "components": [
+        {"type": 2, "style": 1, "label": "Configure",
+         "custom_id": f"{SETTINGS_PREFIX}:open:server:{gid}"}]}]
 
 
 def sync_guilds(state, guilds, channels):
@@ -1598,7 +1646,8 @@ def flush_join_notices(state, guilds, channels):
         if gid not in state.get("known_guilds", {}):
             continue  # removed again before the notice went out
         if not notify_owners(_join_summary(gid, guilds.get(gid) or {},
-                                           channels)):
+                                           channels),
+                             components=configure_button(gid)):
             left.append(gid)
     state["join_notices"] = left
 
@@ -1613,6 +1662,9 @@ def on_guild_event(state, ev):
         return
     if ev.get("op") == "create":
         note_guild_joined(state, gid, ev.get("joined_at"))
+        if isinstance(ev.get("member_count"), int):
+            _MEMBER_COUNTS[gid] = ev["member_count"]
+            publish_directory()
         known = state.get("known_guilds")
         if known is not None and gid not in known:
             _FORCE_DISCOVERY = True
@@ -1837,7 +1889,7 @@ def interaction_user_id(ix):
 
 def dispatch_interaction(ix, record):
     data = ix.get("data") or {}
-    if ix.get("type") == 3:      # MESSAGE_COMPONENT
+    if ix.get("type") in (3, 5):  # MESSAGE_COMPONENT, MODAL_SUBMIT
         key, _, rest = str(data.get("custom_id") or "").partition(":")
     elif ix.get("type") == 2:    # APPLICATION_COMMAND
         key, rest = "/" + str(data.get("name") or ""), ""
@@ -2039,6 +2091,341 @@ def on_hold_button(ix, rest, uid, record):
 
 
 register_interaction("mdhold", on_hold_button)
+
+
+# ---------------------------------------------------------------------------
+# /settings: the slash command and its pages. settings_ui.py (next to
+# this file) renders every page: settings_ui.handle(interaction, ctx)
+# returns the whole interaction callback body and never touches the
+# network. This side registers the command, routes the command and every
+# mdset:* component or modal to it on the interaction thread (inside
+# Discord's 3s deadline, whatever the main loop is doing), and gives it a
+# SettingsCtx: the current settings, the server and channel directory
+# from discovery, and overlay writes. Permissions (owner / server admin /
+# anyone else) are settings_ui's to check, on every interaction; so the
+# routes are not owner-only here.
+# ---------------------------------------------------------------------------
+SETTINGS_PREFIX = "mdset"
+SETTINGS_COMMAND = {
+    "name": "settings",
+    "type": 1,  # CHAT_INPUT
+    "description": "See or change this bot's settings (owners; server "
+                   "admins can make it quieter)",
+    # Interaction context types: 0 GUILD, 1 BOT_DM (not 2, group DMs).
+    "contexts": [0, 1],
+    # Installation contexts: 0 GUILD_INSTALL only (no user installs).
+    "integration_types": [0],
+    # Visible to every member: owners need it in any server, server
+    # admins in theirs; settings_ui refuses everyone else.
+    "default_member_permissions": None,
+}
+ADMIN_DIGEST_SECS = 60
+
+# Directory for SettingsCtx, built on the main loop from discovery and
+# the gateway, published as one immutable snapshot under _DIRECTORY_LOCK.
+_MEMBER_COUNTS = {}   # guild id -> member count (approximate)
+_GUILD_CHANNELS = {}  # guild id -> [{"id","name","type","parent_id",..}]
+_DIRECTORY = {"guilds": [], "channels": {}}
+_DIRECTORY_LOCK = threading.Lock()
+
+
+def publish_directory():
+    """Snapshot GUILDS, member counts and channel lists for /settings
+    (main loop only; the interaction thread reads the snapshot)."""
+    guilds = sorted(
+        ({"id": gid, "name": (info or {}).get("name") or gid,
+          "member_count": _MEMBER_COUNTS.get(gid)}
+         for gid, info in GUILDS.items()),
+        key=lambda g: (str(g["name"]).lower(), g["id"]))
+    channels = {gid: [dict(c) for c in _GUILD_CHANNELS.get(gid) or []]
+                for gid in GUILDS}
+    global _DIRECTORY
+    with _DIRECTORY_LOCK:
+        _DIRECTORY = {"guilds": guilds, "channels": channels}
+
+
+# Pending admin-change digests: guild id -> {"first": t, "changes": []}.
+_ADMIN_CHANGES = {}
+_ADMIN_LOCK = threading.Lock()
+
+
+class SettingsCtx:
+    """What settings_ui.handle gets: safe to use from the interaction
+    thread. write/reset/undo raise muse_settings.SettingsError for an
+    invalid key, value or scope."""
+
+    def __init__(self):
+        self.now = time.time()
+        self.bot_id = str(BOT_ID or "")
+        self.owners = set(str(o) for o in self.settings.owners)
+
+    @property
+    def settings(self):
+        """The current muse_settings.Settings (reloaded on change, so a
+        write made through this ctx is visible right away)."""
+        return settings()
+
+    def guilds(self):
+        with _DIRECTORY_LOCK:
+            return [dict(g) for g in _DIRECTORY["guilds"]]
+
+    def channels(self, guild_id):
+        with _DIRECTORY_LOCK:
+            return [dict(c) for c in
+                    _DIRECTORY["channels"].get(str(guild_id)) or []]
+
+    def write(self, key, value, by):
+        with _OVERLAY_LOCK:
+            MS.set_value(_SETTINGS.config_path, key, value, by, PLUGINS_DIR)
+        settings()
+
+    def reset(self, key, by):
+        with _OVERLAY_LOCK:
+            MS.reset(_SETTINGS.config_path, key, by, PLUGINS_DIR)
+        settings()
+
+    def undo(self, scope_prefix, by):
+        """muse_settings.undo: revert the newest change at one scope
+        (scope_prefix as muse_settings.scope_prefix gives it); the key
+        reverted, or None."""
+        fn = getattr(MS, "undo", None)
+        if fn is None:
+            raise MS.SettingsError("undo is not available in this version")
+        with _OVERLAY_LOCK:
+            out = fn(_SETTINGS.config_path, scope_prefix, by, PLUGINS_DIR)
+        settings()
+        return out
+
+    def reload(self):
+        """A fresh Settings through the monitor's own watcher, so the
+        pages and the main loop see the same state."""
+        return settings()
+
+    def notify_owners_admin_change(self, guild_id, user_id, key, old, new):
+        """Queue one line for the owners' digest of server-admin changes
+        in that server (sent by the main loop, one DM per server per
+        ADMIN_DIGEST_SECS)."""
+        gid = str(guild_id)
+        with _ADMIN_LOCK:
+            entry = _ADMIN_CHANGES.setdefault(
+                gid, {"first": time.time(), "changes": []})
+            entry["changes"].append({"user": str(user_id), "key": key,
+                                     "old": old, "new": new,
+                                     "at": time.time()})
+
+    def log(self, msg):
+        print(f"/settings: {msg}", flush=True)
+
+
+def _show_value(v):
+    if v is True:
+        return "on"
+    if v is False:
+        return "off"
+    if v is None:
+        return "none"
+    if isinstance(v, (list, tuple)):
+        return ", ".join(str(x) for x in v) or "(empty)"
+    return str(v)
+
+
+def admin_digest_text(gid, changes):
+    with _DIRECTORY_LOCK:
+        known = _DIRECTORY["guilds"]
+    name = next((g["name"] for g in known if g["id"] == gid), None) \
+        or (GUILDS.get(gid) or {}).get("name") or gid
+    head = (f"**Server admin changes in {name}** (server ID {gid}), made "
+            f"with /settings:\n")
+    tail = ("\nAdmins can only make me quieter there. To undo one, use "
+            "/settings (Undo last change) or edit config.yaml.")
+    lines = []
+    for c in changes:
+        when = datetime.fromtimestamp(c["at"], timezone.utc) \
+            .strftime("%H:%M UTC")
+        lines.append(f"- <@{c['user']}> set `{c['key']}` to "
+                     f"{_show_value(c['new'])} (was "
+                     f"{_show_value(c['old'])}), {when}")
+    kept = []
+    room = 1900 - len(head) - len(tail) - len("- and 9999 more")
+    for line in lines:
+        if sum(len(x) + 1 for x in kept) + len(line) > room:
+            kept.append(f"- and {len(lines) - len(kept)} more")
+            break
+        kept.append(line)
+    return head + "\n".join(kept) + tail
+
+
+def flush_admin_digests(force=False):
+    """Main loop: DM the owners one digest per server whose first queued
+    admin change is ADMIN_DIGEST_SECS old. Undelivered ones are kept and
+    retried. Returns how many went out."""
+    now = time.time()
+    with _ADMIN_LOCK:
+        due = {gid: e for gid, e in _ADMIN_CHANGES.items()
+               if force or now - e["first"] >= ADMIN_DIGEST_SECS}
+    if not due or rest_backing_off():
+        return 0
+    sent = 0
+    for gid, entry in due.items():
+        if notify_owners(admin_digest_text(gid, entry["changes"])):
+            sent += 1
+            with _ADMIN_LOCK:
+                cur = _ADMIN_CHANGES.get(gid)
+                if cur is entry:
+                    del _ADMIN_CHANGES[gid]
+        else:
+            print(f"Admin digest for server {gid} undelivered; retrying.",
+                  flush=True)
+    return sent
+
+
+_SETTINGS_UI = {"mod": None, "failed": None}
+
+
+def load_settings_ui():
+    """settings_ui.py next to monitor.py (else one on sys.path), imported
+    once; None (logged once per distinct error) when it is missing or
+    fails to import."""
+    if _SETTINGS_UI["mod"] is not None:
+        return _SETTINGS_UI["mod"]
+    try:
+        here = os.path.join(BASE_DIR, "settings_ui.py")
+        if os.path.isfile(here):
+            spec = importlib.util.spec_from_file_location("settings_ui",
+                                                          here)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        else:
+            import settings_ui as mod
+        if not callable(getattr(mod, "handle", None)):
+            raise ImportError("settings_ui has no handle()")
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+        if _SETTINGS_UI["failed"] != err:
+            _SETTINGS_UI["failed"] = err
+            print(f"/settings UI unavailable ({err}); /settings answers "
+                  f"\"Settings UI unavailable\".", flush=True)
+        return None
+    _SETTINGS_UI["mod"] = mod
+    _SETTINGS_UI["failed"] = None
+    return mod
+
+
+def on_settings_interaction(ix, rest, uid, record):
+    ui = load_settings_ui()
+    if ui is None:
+        return ephemeral("Settings UI unavailable.")
+    t0 = time.time()
+    try:
+        response = ui.handle(ix, SettingsCtx())
+    except Exception as e:
+        print(f"/settings handler error: {type(e).__name__}: {e}",
+              flush=True)
+        return ephemeral("Something went wrong; try again.")
+    spent = time.time() - t0
+    if spent > 1.5:
+        print(f"/settings took {spent:.1f}s to answer (Discord allows 3s).",
+              flush=True)
+    if not isinstance(response, dict) \
+            or not isinstance(response.get("type"), int):
+        print("/settings handler returned no callback body.", flush=True)
+        return ephemeral("Something went wrong; try again.")
+    return response
+
+
+register_interaction(SETTINGS_PREFIX, on_settings_interaction,
+                     owner_only=False)
+register_interaction("/" + SETTINGS_COMMAND["name"], on_settings_interaction,
+                     owner_only=False)
+
+
+# Registering the command: a global application command, checked once per
+# run (GET, then POST when missing or PATCH when it differs; never a bulk
+# PUT, which would delete any other command). A failure is retried on a
+# later cycle and never stops the monitor.
+_APP_ID = {"id": None}
+_COMMAND_REG = {"done": False, "next_try": 0.0, "last_error": None}
+COMMAND_RETRY_SECS = 60
+
+
+def api_patch(path, data):
+    body = json.dumps(data).encode()
+    req = urllib.request.Request(API + path, data=body, headers=headers(),
+                                 method="PATCH")
+
+    def _do():
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.load(r)
+    return _api_call(_do)
+
+
+def _command_differs(have, want):
+    for k, v in want.items():
+        got = have.get(k)
+        if isinstance(v, list):
+            got = sorted(got) if isinstance(got, list) else got
+            v = sorted(v)
+        if got != v:
+            return True
+    return bool(have.get("options"))
+
+
+def ensure_settings_command(app_id):
+    """Make the global /settings command match SETTINGS_COMMAND.
+    Returns "created", "updated" or "unchanged"; raises on failure."""
+    base = f"/applications/{urllib.parse.quote(str(app_id), safe='')}" \
+        "/commands"
+    have = api_get(base)
+    if not isinstance(have, list):
+        raise ValueError(f"unexpected command list: {str(have)[:80]}")
+    mine = [c for c in have if isinstance(c, dict)
+            and c.get("name") == SETTINGS_COMMAND["name"]
+            and c.get("type", 1) == SETTINGS_COMMAND["type"]]
+    if not mine:
+        api_post(base, SETTINGS_COMMAND)
+        return "created"
+    if not _command_differs(mine[0], SETTINGS_COMMAND):
+        return "unchanged"
+    cid = urllib.parse.quote(str(mine[0].get("id")), safe="")
+    api_patch(f"{base}/{cid}", SETTINGS_COMMAND)
+    return "updated"
+
+
+def register_commands(gateway_status=None):
+    """Main loop, every tick until it succeeds once (throttled to one
+    try per COMMAND_RETRY_SECS). Never raises."""
+    reg = _COMMAND_REG
+    now = time.time()
+    if reg["done"] or now < reg["next_try"] or BOT_USER_ID is None \
+            or rest_backing_off():
+        return None
+    reg["next_try"] = now + COMMAND_RETRY_SECS
+    try:
+        if not _APP_ID["id"]:
+            app = (gateway_status or {}).get("application") or {}
+            _APP_ID["id"] = app.get("id") if isinstance(app, dict) \
+                else None
+        if not _APP_ID["id"]:
+            _APP_ID["id"] = (api_get("/applications/@me") or {}).get("id")
+        if not _APP_ID["id"]:
+            raise ValueError("application id unknown")
+        result = ensure_settings_command(_APP_ID["id"])
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+        if err != reg["last_error"]:
+            hint = (" (the bot's invite may lack the applications.commands "
+                    "scope; see SETUP.md)"
+                    if getattr(e, "code", None) == 403 else "")
+            print(f"/settings command registration failed ({err}){hint}; "
+                  f"retrying in {COMMAND_RETRY_SECS}s.", flush=True)
+        reg["last_error"] = err
+        return None
+    reg["done"] = True
+    reg["last_error"] = None
+    if result != "unchanged":
+        print(f"/settings command {result} (global; it can take a moment "
+              f"to show up in Discord).", flush=True)
+    return result
 
 
 def is_mention(msg):
@@ -4437,6 +4824,10 @@ async def _gateway_run(token, inbox, status):
                             # REST rate-limit storm at boot), so mentions
                             # are recognized without waiting for REST.
                             status["user"] = pkt["d"].get("user")
+                            # The application id, for registering the
+                            # /settings command.
+                            status["application"] = \
+                                pkt["d"].get("application")
                             print("Gateway READY: realtime ingest live.",
                                   flush=True)
                         elif t == "RESUMED":
@@ -4452,7 +4843,8 @@ async def _gateway_run(token, inbox, status):
                                 "op": "create" if t == "GUILD_CREATE"
                                 else "delete",
                                 "id": d.get("id"),
-                                "joined_at": d.get("joined_at")}})
+                                "joined_at": d.get("joined_at"),
+                                "member_count": d.get("member_count")}})
                         elif t == "INTERACTION_CREATE":
                             # A button click (or command): answered by
                             # the interaction thread at once, within
@@ -5186,6 +5578,7 @@ def discovery_iter(state):
             print(f"Lost access to {', '.join(removed)}; "
                   f"unmonitoring.", flush=True)
         CHANNELS = fresh
+    publish_directory()
     sync_guilds(state, fresh_guilds, fresh)
     save_state(state)
 
@@ -5237,6 +5630,7 @@ def main():
         print(f"Bot identity pending: /users/@me failed at boot ({e}); "
               f"retrying in-loop.", flush=True)
     CHANNELS, GUILDS = discover_channels()
+    publish_directory()
     print(f"muse-discord monitor starting. Polling {len(CHANNELS)} "
           f"channels + DMs every {POLL_INTERVAL}s.", flush=True)
     if not CHANNELS:
@@ -5245,6 +5639,7 @@ def main():
               "keeps retrying on the refresh cadence.", flush=True)
     state = load_state()
     load_plugins()
+    load_settings_ui()  # imported now, not on the first /settings
     # Join watermarks for every guild, plus the owner summary for any
     # guild joined while the monitor was down.
     sync_guilds(state, GUILDS, CHANNELS)
@@ -5362,6 +5757,14 @@ def main():
             retire_overlay_changes()
         except Exception as e:
             print(f"Settings overlay error: {e}", flush=True)
+
+        try:
+            # /settings: the slash command (until registered once) and
+            # the owners' digest of server-admin changes.
+            register_commands(_gateway_status)
+            flush_admin_digests()
+        except Exception as e:
+            print(f"/settings upkeep error: {e}", flush=True)
 
         # One REST slice per tick (see "Sliced REST work"): the poll's,
         # or the background job's, alternating when both are due.

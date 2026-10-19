@@ -38,7 +38,10 @@ write it anywhere except the token file, and never commit config.yaml.
      as Discord's join system messages in the server's system channel.
 4. (Optional) Under **Bot**, set the bot's username/avatar as desired.
    Under **General Information**, note the **Application ID**; it is
-   the `client_id` for the invite URL in step 2.
+   the `client_id` for the invite URL in step 2, and leave
+   **Interactions Endpoint URL** empty: buttons and `/settings` reach
+   the bot over its gateway connection, and a URL there sends them
+   elsewhere.
 
 ## Step 2: Invite the bot to a server [owner]
 
@@ -55,6 +58,11 @@ since February 2026 Discord requires it to pin, and Manage Messages
 no longer suffices). No administrator, no moderation permissions.
 A bot invited with an older URL lacks Pin Messages: in Server
 Settings, Roles, enable **Pin Messages** on the bot's role.
+
+The `bot` scope is enough for `/settings` too: Discord includes the
+`applications.commands` scope with `bot` automatically, so there is
+no second scope to add, and a bot invited with an older `scope=bot`
+URL needs no new invite. The monitor registers the command itself.
 
 Open the URL, pick a server, authorize. The bot appears in the member
 list (offline until step 8). Per-channel overrides still apply: the
@@ -357,6 +365,33 @@ brief in the work server", "stay quiet in #announcements", "let my
 friend's DMs through"). Edit `config.yaml`; the bot re-reads it on
 save, no restart needed.
 
+The owner can also change most settings from Discord, without the
+Muse: type `/settings` in a DM with the bot, or in any server it is
+in. Only the owner sees the pages it opens.
+
+- In a DM it opens **Home**: pick Everywhere, DMs, All servers, or
+  one server, or pause the bot everywhere. In a server it opens that
+  server's page, with **This channel** for the channel it was typed
+  in.
+- Each page shows every value and where it comes from, a **Reset**
+  next to anything set at that level, **Why?** for the full chain,
+  and **Undo last change**. Changes that loosen privacy or open the
+  bot to more people ask for a confirmation first.
+- When the bot joins a new server, the owner's DM about it has a
+  **Configure** button that opens that server's page.
+- Server admins (Manage Server) can use `/settings` in their own
+  server to make the bot quieter there: replies off or only when
+  addressed, plugins off, people to ignore. They cannot loosen
+  anything or see privacy and limits. The owner gets one DM per
+  minute summing up what admins changed. Anyone else is told only
+  the owners can change settings.
+- Not editable from Discord: `owners`, `token_from`, `persona`, the
+  `never_share` phrases, and installing plugins. Those stay in
+  config.yaml.
+- Discord changes go to `config.discord.yaml`, never into
+  config.yaml. If the owner later edits the same setting in
+  config.yaml, the file wins and the owner gets a DM saying so.
+
 - Settings live in a few places, and the most specific one wins:
   `everywhere`, then `dms` for direct messages, or `all_servers`,
   then one server under `servers`, then a category, then one
@@ -398,6 +433,14 @@ rare install that needs them.
 
 ## Troubleshooting
 
+- **`/settings` does not show up in Discord**: the monitor registers
+  it once per start; monitor.log says `/settings command created`
+  (or `updated`) when it did, and a `registration failed` line (it
+  retries every minute) when it could not. A new command can take a
+  moment to appear; restarting the Discord app helps. In a server,
+  check Server Settings, Integrations, the bot: a server admin may
+  have hidden the command there. If the bot answers "Settings UI
+  unavailable", `settings_ui.py` is missing from the package dir.
 - **No welcomes in a server**: welcomes are off there. Set
   `plugins.welcome.enabled: on` under that server in `servers`
   (step 5), and check `show --server <id> --explain`.
