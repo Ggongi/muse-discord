@@ -452,5 +452,126 @@ class ConverseTurns(unittest.TestCase):
         self.assertIn("no converse_turns", r["detail"])
 
 
+class LogChecks(unittest.TestCase):
+    LOG = ("Note: config.yaml uses the old layout; it still works as is.\n"
+           "Queued mention (follow-up) from ua in #c: hi\n")
+
+    def test_contains_uses_the_scenario_log(self):
+        tr, *_ = basic()
+        tr["monitor_log"] = self.LOG
+        tr["monitor_log_tail"] = "something else entirely"
+        r = run({"log_contains": r"^Queued \w+ \(follow-up\) from "}, tr)
+        self.assertTrue(r["ok"], r)
+        self.assertIn("scenario's monitor.log", r["detail"])
+        self.assertIn("Queued mention (follow-up)", r["detail"])
+        r = run({"log_contains": "uses the old layout"}, tr)
+        self.assertTrue(r["ok"], r)
+        r = run({"log_contains": "something else"}, tr)
+        self.assertFalse(r["ok"])
+        self.assertIn("not found", r["detail"])
+
+    def test_contains_falls_back_to_the_tail(self):
+        tr, *_ = basic()
+        tr["monitor_log_tail"] = self.LOG
+        r = run({"log_contains": "old layout"}, tr)
+        self.assertTrue(r["ok"], r)
+        self.assertIn("tail", r["detail"])
+        tr["monitor_log_tail"] = ""
+        self.assertFalse(run({"log_contains": "x"}, tr)["ok"])
+
+    def test_lacks(self):
+        tr, *_ = basic()
+        tr["monitor_log"] = self.LOG
+        r = run({"log_lacks": r"\(follow-up\)"}, tr)
+        self.assertFalse(r["ok"])
+        self.assertIn("1 line(s)", r["detail"])
+        r = run({"log_lacks": "CONFIG ERROR"}, tr)
+        self.assertTrue(r["ok"], r)
+
+
+class Held(unittest.TestCase):
+    def tr(self, holds):
+        tr, q1, *_ = basic()
+        tr["sut_files"]["holds"] = holds
+        return tr, q1
+
+    def test_pass_by_item_or_reply_to(self):
+        tr, q1 = self.tr({"abc": {"item": {"item": "x", "reply_to": None}},
+                          "def": {"item": {"item": "7", "reply_to": "8"}}})
+        tr["labels"]["q1"] = "7"
+        r = run({"held": "q1"}, tr)
+        self.assertTrue(r["ok"], r)
+        self.assertIn("hold def", r["detail"])
+        tr["labels"]["q1"] = "8"
+        self.assertTrue(run({"held": "q1"}, tr)["ok"])
+
+    def test_fail(self):
+        tr, q1 = self.tr({"abc": {"item": {"item": "x", "text": "secret"}}})
+        r = run({"held": "q1"}, tr)
+        self.assertFalse(r["ok"])
+        self.assertIn("is not held", r["detail"])
+        self.assertNotIn("secret", r["detail"])  # never the held text
+        for holds in (None, {}, []):
+            tr, _ = self.tr(holds)
+            r = run({"held": "q1"}, tr)
+            self.assertFalse(r["ok"])
+            self.assertIn("no never_share holds", r["detail"])
+
+
+class QueueItem(unittest.TestCase):
+    def setUp(self):
+        self.t, self.q1, self.q2, _ = basic()
+
+    def with_items(self, items):
+        self.t["sut_files"]["worker_items"] = items
+        return self.t
+
+    def test_pass_trigger_and_fragment(self):
+        tr = self.with_items([
+            {"message_id": self.q1["id"], "fragment_ids": [],
+             "follow_up": False, "kind": "mention",
+             "settings": {"speaker": "owner", "where": "server"}},
+            {"message_id": "5", "fragment_ids": [self.q2["id"]],
+             "follow_up": True}])
+        r = run({"queue_item": {"label": "q1", "follow_up": False,
+                                "kind": "mention",
+                                "settings": {"speaker": "owner"}}}, tr)
+        self.assertTrue(r["ok"], r)
+        self.assertIn("settings.speaker 'owner'", r["detail"])
+        r = run({"queue_item": {"label": "q2", "follow_up": True}}, tr)
+        self.assertTrue(r["ok"], r)
+
+    def test_missing_field_is_false(self):
+        tr = self.with_items([{"message_id": self.q1["id"]}])
+        self.assertTrue(run({"queue_item": {"label": "q1",
+                                            "follow_up": False}}, tr)["ok"])
+        r = run({"queue_item": {"label": "q1", "follow_up": True}}, tr)
+        self.assertFalse(r["ok"])
+        self.assertIn("follow_up False (expected True)", r["detail"])
+
+    def test_newest_record_wins(self):
+        tr = self.with_items([
+            {"message_id": self.q1["id"], "follow_up": False},
+            {"message_id": self.q1["id"], "follow_up": True}])
+        self.assertTrue(run({"queue_item": {"label": "q1",
+                                            "follow_up": True}}, tr)["ok"])
+
+    def test_fail(self):
+        tr = self.with_items([{"message_id": self.q1["id"],
+                               "follow_up": True,
+                               "settings": {"speaker": "member"}}])
+        r = run({"queue_item": {"label": "q1",
+                                "settings": {"speaker": "owner"}}}, tr)
+        self.assertFalse(r["ok"])
+        self.assertIn("settings.speaker 'member' (expected 'owner')",
+                      r["detail"])
+        r = run({"queue_item": {"label": "q2", "follow_up": True}}, tr)
+        self.assertFalse(r["ok"])
+        self.assertIn("never queued", r["detail"])
+        tr = self.with_items(None)
+        r = run({"queue_item": {"label": "q1", "follow_up": True}}, tr)
+        self.assertFalse(r["ok"])
+        self.assertIn("no worker items", r["detail"])
+
 if __name__ == "__main__":
     unittest.main()

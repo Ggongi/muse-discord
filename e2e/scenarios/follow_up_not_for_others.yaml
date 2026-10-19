@@ -1,0 +1,25 @@
+# Only the person the bot answered gets a follow-up window: B's plain
+# message right after the bot's reply to A (c1) is not addressed to
+# the bot and gets nothing, and it does not close A's window either,
+# so A's own plain message (c2, still inside 120 s) is answered as a
+# follow-up (which also makes it the liveness control). Catches: the
+# window keyed by channel instead of (channel, person), or another
+# person's message closing it.
+id: follow_up_not_for_others
+tier: 1
+title: "Another person's plain message after the bot's reply gets no answer"
+steps:
+  - send: { as: a, text: "<@SUT> recommend me a podcast", label: q1 }
+  - wait_for: { sut_messages: 1, timeout: 60 }
+  - send: { as: b, text: "ooh I want one too", label: c1 }
+  - wait: 15
+  - send: { as: a, text: "something about history, ideally", label: c2 }
+  - wait_for: { sut_messages: 2, timeout: 60 }
+expect:
+  settle: 10
+  checks:
+    - no_sut_reply_to: c1
+    - sut_reply_count: { eq: 2 }
+    - replies_to_any: [q1, c2]
+    - latency: { from: c2, max: 30 }
+    - queue_item: { label: c2, follow_up: true }

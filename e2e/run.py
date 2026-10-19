@@ -61,6 +61,12 @@ OUTBOX_POLL_SECS = 0.02   # wait_for outbox_processing (spec: <= 50 ms)
 CONVERSE_SETTLE_SECS = 6  # quiet gap that ends a multi-part SUT turn
 STALE_CHANNEL_SECS = 6 * 3600
 LOG_TAIL_LINES = 200
+# The scenario's own monitor.log (since just before its config
+# restart), for log_contains / log_lacks; the last bytes when longer.
+SCENARIO_LOG_BYTES = 256 * 1024
+# What the fake worker records about every queue item it handles (the
+# queue_item check reads it; fake_worker.WORKER_ITEMS).
+WORKER_ITEMS = "e2e_worker_items.json"
 # Discord bot-token shape, redacted even when it is not one of ours.
 TOKEN_RE = re.compile(
     r"[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}")
@@ -239,8 +245,19 @@ def transcript_message(m, ids):
     }
 
 
+def _state_holds(the_sut):
+    """state.json's never_share holds ({hold id: {item, at, ...}}), or
+    None when the state is missing or has none."""
+    st = the_sut.read_json("state.json")
+    return st.get("holds") if isinstance(st, dict) else None
+
+
 def build_transcript(sc, channel_id, started_at, ids, labels,
-                     converse_turns, messages, the_sut):
+                     converse_turns, messages, the_sut, log_mark=None):
+    scenario_log = ""
+    if the_sut is not None and log_mark is not None \
+            and hasattr(the_sut, "log_since"):
+        scenario_log = the_sut.log_since(log_mark, SCENARIO_LOG_BYTES)
     return {
         "scenario": sc["id"],
         "channel_id": channel_id,
@@ -254,9 +271,14 @@ def build_transcript(sc, channel_id, started_at, ids, labels,
             if the_sut else None,
             "ledger": the_sut.read_json("mention_ledger.json")
             if the_sut else None,
+            "holds": _state_holds(the_sut) if the_sut else None,
+            "worker_items": the_sut.read_json(WORKER_ITEMS)
+            if the_sut else None,
         },
         "monitor_log_tail": the_sut.log_tail(LOG_TAIL_LINES)
         if the_sut else "",
+        # monitor.log since just before this scenario's config restart.
+        "monitor_log": scenario_log,
     }
 
 
@@ -311,6 +333,10 @@ class Runner:
         """Play one scenario; returns its transcript."""
         cfg = sut.scenario_config(self.base_cfg, sc, self.ids["A"],
                                   self.ids["B"])
+        # Marked before the (re)start, so the scenario's log includes
+        # what its config prints at startup (the old-layout notice).
+        log_mark = self.sut.log_size() if hasattr(self.sut, "log_size") \
+            else None
         self.ensure_config(cfg)
         self.notes = []
         started_at = iso_now()
@@ -324,7 +350,7 @@ class Runner:
         msgs = self.history(channel_id)
         return build_transcript(sc, channel_id, started_at, self.ids,
                                 labels, state["converse_turns"], msgs,
-                                self.sut)
+                                self.sut, log_mark=log_mark)
 
     def step(self, step, channel_id, labels, state, index):
         kind, arg = next(iter(step.items()))
@@ -501,7 +527,8 @@ def dry_run(args, scenarios):
         {}, SAMPLE_IDS["A"], SAMPLE_IDS["B"])
     import yaml
     print("# Sample SUT config (ids are placeholders; sut.py also sets "
-          "the token file, persona file and rest_poll_seconds):")
+          "token_from, persona, presence, updates and "
+          "rest_poll_seconds):")
     print(yaml.safe_dump(cfg, sort_keys=False).rstrip())
     print()
     print(f"# Plan: tier {args.tier}, worker {args.worker}, "
@@ -513,6 +540,9 @@ def dry_run(args, scenarios):
         names = [next(iter(c)) if isinstance(c, dict) else str(c)
                  for c in expect]
         extra = []
+        if sc.get("legacy_config"):
+            extra.append("old-layout config.yaml (config.legacy.yaml, "
+                         "monitor restart)")
         if sc.get("config"):
             extra.append("config overrides (monitor restart)")
         if sc.get("b_is_bot"):

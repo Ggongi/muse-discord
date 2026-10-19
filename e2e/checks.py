@@ -9,6 +9,12 @@ quarantine.json and mention_ledger.json under sut_files) and returns one
 {"name", "ok", "detail"} per check, in order. Pure functions: no I/O, no
 network, no clock.
 
+Beyond the channel itself, checks read what run.py captured from the
+SUT: sut_files.holds (state.json's never_share holds),
+sut_files.worker_items (the queue items the fake worker handled, with
+follow_up and the settings card), and monitor_log (monitor.log written
+during the scenario; monitor_log_tail when that is missing).
+
 A "SUT message" is any transcript message with author "sut". A SUT
 message "replies to" a label when its Discord reply reference
 (reply_to) is that label's message id. Every detail string names what
@@ -342,6 +348,99 @@ def check_converse_turns(spec, tr):
     return ok, f"{n} SUT turn(s) during the converse step, {want}"
 
 
+def _scenario_log(tr):
+    log = tr.get("monitor_log")
+    if isinstance(log, str) and log:
+        return log, "the scenario's monitor.log"
+    return str(tr.get("monitor_log_tail") or ""), "the monitor.log tail"
+
+
+def check_log_contains(pattern, tr):
+    log, what = _scenario_log(tr)
+    m = re.search(pattern, log, re.M)
+    if m:
+        line = log[log.rfind("\n", 0, m.start()) + 1:].split("\n", 1)[0]
+        return True, f"/{pattern}/ found in {what}: {line[:200]!r}"
+    return False, (f"/{pattern}/ not found in {what} "
+                   f"({len(log.splitlines())} lines)")
+
+
+def check_log_lacks(pattern, tr):
+    log, what = _scenario_log(tr)
+    hits = [ln for ln in log.splitlines() if re.search(pattern, ln)]
+    if hits:
+        return False, (f"/{pattern}/ found in {what}, expected none: "
+                       f"{len(hits)} line(s), first {hits[0][:200]!r}")
+    return True, f"/{pattern}/ absent from {what}"
+
+
+def check_held(label, tr):
+    """A never_share hold in the SUT's state.json answers the label's
+    message (the held reply's item or reply_to is its id). The detail
+    never quotes the held text."""
+    mid = _label_id(tr, label)
+    holds = (tr.get("sut_files") or {}).get("holds")
+    if not isinstance(holds, dict) or not holds:
+        return False, (f"no never_share holds in the SUT's state.json; "
+                       f"expected one for {label} ({mid})")
+    for hid, h in holds.items():
+        item = (h.get("item") if isinstance(h, dict) else None) or {}
+        if mid in (str(item.get("item") or ""),
+                   str(item.get("reply_to") or "")):
+            return True, f"{label} ({mid}) is held (hold {hid})"
+    seen = [str((h.get("item") or {}).get("item"))
+            for h in holds.values() if isinstance(h, dict)]
+    return False, (f"{label} ({mid}) is not held ({len(holds)} hold(s), "
+                   f"for items {seen})")
+
+
+def _worker_item(tr, mid):
+    """The newest worker-recorded queue item whose trigger or a burst
+    fragment is mid."""
+    items = (tr.get("sut_files") or {}).get("worker_items")
+    if not isinstance(items, list):
+        raise CheckError("no worker items recorded (sut_files."
+                         "worker_items); queue_item needs the tier-1 "
+                         "fake worker")
+    found = None
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        ids = [str(it.get("message_id"))] + [
+            str(x) for x in it.get("fragment_ids") or []]
+        if mid in ids:
+            found = it
+    return found, len(items)
+
+
+def check_queue_item(spec, tr):
+    label = spec["label"]
+    mid = _label_id(tr, label)
+    item, n = _worker_item(tr, mid)
+    if item is None:
+        return False, (f"{label} ({mid}) was never queued (the worker saw "
+                       f"{n} item(s), none with this message)")
+    bad, good = [], []
+    for k, want in spec.items():
+        if k in ("label", "settings"):
+            continue
+        got = item.get(k)
+        if isinstance(want, bool):
+            got = bool(got)
+        (good if got == want else bad).append(
+            f"{k} {got!r}" + ("" if got == want else f" (expected {want!r})"))
+    card = item.get("settings")
+    for k, want in (spec.get("settings") or {}).items():
+        got = card.get(k) if isinstance(card, dict) else None
+        (good if got == want else bad).append(
+            f"settings.{k} {got!r}"
+            + ("" if got == want else f" (expected {want!r})"))
+    where = f"queue item {item.get('message_id')} for {label} ({mid})"
+    if bad:
+        return False, f"{where}: " + ", ".join(bad + good)
+    return True, f"{where}: " + ", ".join(good)
+
+
 CHECKS = {
     "sut_reply_count": check_sut_reply_count,
     "replies_to": check_replies_to,
@@ -358,6 +457,10 @@ CHECKS = {
     "quarantined": check_quarantined,
     "ledger_status": check_ledger_status,
     "converse_turns": check_converse_turns,
+    "log_contains": check_log_contains,
+    "log_lacks": check_log_lacks,
+    "held": check_held,
+    "queue_item": check_queue_item,
 }
 
 

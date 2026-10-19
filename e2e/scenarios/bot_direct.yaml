@@ -1,4 +1,4 @@
-# The bot path (behavior.bots: direct): B is left out of
+# The bot path (who.bots: when-addressed): B is left out of
 # testing.treat_as_human, so the monitor sees a real bot. A bot that
 # mentions the SUT gets an answer. B's follow-up comes 2 s later: a
 # human burst would already have flushed (1.5 s quiet), a bot's waits

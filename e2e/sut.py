@@ -25,9 +25,18 @@ discovery line, and the gateway line for the requested mode, all in
 log output written since this start. Every message sent after that is
 either delivered by the gateway or read by the next REST poll.
 
-What the SUT never does. config.yaml always sets updates.check false,
-so the monitor never DMs the owners (driver A) about a release; the
-pkg copy also leaves out update_check.json and update_request.json.
+Config layouts. config.test.yaml is the settings layout
+muse_settings.py reads (owners, token_from, everywhere/dms/servers,
+engine); config.legacy.yaml is the old layout (bot, behavior, safety,
+owners.user_ids), used by scenarios that set legacy_config: true to
+prove an old config.yaml still loads. effective_config() writes the
+forced fields in whichever layout the config uses (mixing the two is
+a startup error in the monitor).
+
+What the SUT never does. config.yaml always turns updates off
+(updates.notify off; old layout: updates.check false), so the monitor
+never DMs the owners (driver A) about a release; the pkg copy also
+leaves out update_check.json and update_request.json.
 Nothing here runs watchdog.sh or hooks/mention-watch.sh: the harness
 starts and stops monitor.py itself, so the wake hook's restart of a
 dead monitor (watchdog.sh --from-hook) never fights a kill_monitor
@@ -56,6 +65,9 @@ import yaml
 
 E2E_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_TEMPLATE = os.path.join(E2E_DIR, "config.test.yaml")
+LEGACY_TEMPLATE = os.path.join(E2E_DIR, "config.legacy.yaml")
+# Top-level keys only the old config layout has.
+OLD_LAYOUT_KEYS = ("bot", "behavior", "safety")
 LOG_NAME = "monitor.log"
 # The REST poll floor in monitor.py; REST-only scenarios rely on it.
 REST_POLL_SECONDS = 10
@@ -107,12 +119,20 @@ def load_template(path=DEFAULT_TEMPLATE):
 
 
 def render_config(template, values):
-    """Replace every string that is exactly "{{KEY}}" with values[KEY].
-    List entries whose placeholder has no value (missing or None) are
-    dropped; any other unresolved placeholder becomes None."""
+    """Replace every string that is exactly "{{KEY}}" with values[KEY],
+    mapping keys included (servers."{{GUILD_ID}}"). List entries whose
+    placeholder has no value (missing or None) are dropped; any other
+    unresolved placeholder value becomes None (an unresolved key stays
+    as written)."""
+    def render_key(k):
+        ph = _placeholder(k)
+        if ph and values.get(ph) is not None:
+            return str(values[ph])
+        return k
+
     def walk(node):
         if isinstance(node, dict):
-            return {k: walk(v) for k, v in node.items()}
+            return {render_key(k): walk(v) for k, v in node.items()}
         if isinstance(node, list):
             return [walk(v) for v in node
                     if not (_placeholder(v)
@@ -132,20 +152,53 @@ def _placeholder(node):
     return None
 
 
-def base_config(guild_id, a_id, b_id, template=None):
+def is_old_layout(cfg):
+    """True for the old config layout (bot:, behavior:, safety:, or
+    owners/persona as blocks), as muse_settings.detect_layout tells
+    them apart."""
+    cfg = cfg or {}
+    return any(k in cfg for k in OLD_LAYOUT_KEYS) \
+        or isinstance(cfg.get("owners"), dict) \
+        or isinstance(cfg.get("persona"), dict)
+
+
+def guild_of(cfg):
+    """The test server id a rendered config names (engine.guild_ids,
+    old layout bot.guild_ids), or None."""
+    cfg = cfg or {}
+    for block in (cfg.get("engine"), cfg.get("bot")):
+        ids = (block or {}).get("guild_ids") if isinstance(block, dict) \
+            else None
+        if ids:
+            return str(ids[0])
+    return None
+
+
+def base_config(guild_id, a_id, b_id, template=None, legacy=False):
     """The rendered base test config (token and persona paths are
-    filled in by SUT)."""
-    tmpl = template if template is not None else load_template()
-    return render_config(tmpl, {"GUILD_ID": guild_id, "A_ID": a_id,
-                                "B_ID": b_id})
+    filled in by SUT). legacy=True: the old-layout config.legacy.yaml."""
+    if template is None:
+        template = load_template(LEGACY_TEMPLATE if legacy
+                                 else DEFAULT_TEMPLATE)
+    return render_config(template, {"GUILD_ID": guild_id, "A_ID": a_id,
+                                    "B_ID": b_id})
 
 
-def scenario_config(base, scenario, a_id, b_id):
+def scenario_config(base, scenario, a_id, b_id, legacy_base=None):
     """The config one scenario runs under: its `config:` overrides
+    (placeholders {{GUILD_ID}}, {{A_ID}}, {{B_ID}} rendered)
     deep-merged over base, and driver B left out of
     testing.treat_as_human when the scenario sets b_is_bot (unless the
-    overrides set treat_as_human themselves)."""
-    over = scenario.get("config") or {}
+    overrides set treat_as_human themselves). A scenario with
+    legacy_config: true starts from legacy_base instead (default: the
+    old-layout config.legacy.yaml rendered for base's server)."""
+    guild_id = guild_of(base)
+    if scenario.get("legacy_config"):
+        base = legacy_base if legacy_base is not None else base_config(
+            guild_id, a_id, b_id, legacy=True)
+    over = render_config(scenario.get("config") or {},
+                         {"GUILD_ID": guild_id, "A_ID": a_id,
+                          "B_ID": b_id})
     cfg = deep_merge(base, over)
     if "treat_as_human" not in (over.get("testing") or {}):
         humans = [str(a_id)]
@@ -203,13 +256,23 @@ class SUT:
         return path
 
     def effective_config(self, cfg):
-        """cfg plus the fields the harness always controls."""
-        cfg = deep_merge(cfg, {
-            "bot": {"token_file": self.token_file, "token_env": None},
-            "presence": {"enabled": False},
-            "updates": {"check": False},
-            "persona": {"file": self.persona_file},
-        })
+        """cfg plus the fields the harness always controls, in cfg's
+        own layout (see the module docstring)."""
+        if is_old_layout(cfg):
+            forced = {
+                "bot": {"token_file": self.token_file, "token_env": None},
+                "presence": {"enabled": False},
+                "updates": {"check": False},
+                "persona": {"file": self.persona_file},
+            }
+        else:
+            forced = {
+                "token_from": self.token_file,
+                "presence": {"enabled": "off"},
+                "updates": {"notify": "off"},
+                "persona": self.persona_file,
+            }
+        cfg = deep_merge(cfg, forced)
         cfg.setdefault("engine", {})["rest_poll_seconds"] = \
             REST_POLL_SECONDS
         return cfg
@@ -313,12 +376,28 @@ class SUT:
             time.sleep(poll)
 
     def _log_since_start(self):
+        return self.log_since(self._log_offset)
+
+    def log_size(self):
+        """The current size of monitor.log in bytes (0 when missing): a
+        mark for log_since()."""
+        try:
+            return os.path.getsize(self.log_path)
+        except OSError:
+            return 0
+
+    def log_since(self, offset, max_bytes=None):
+        """monitor.log written after byte offset (all starts since),
+        keeping only the last max_bytes when given."""
         try:
             with open(self.log_path, "rb") as f:
-                f.seek(self._log_offset)
-                return f.read().decode("utf-8", "replace")
+                f.seek(offset)
+                data = f.read()
         except OSError:
             return ""
+        if max_bytes is not None and len(data) > max_bytes:
+            data = data[-max_bytes:]
+        return data.decode("utf-8", "replace")
 
     # --- files ---
 
