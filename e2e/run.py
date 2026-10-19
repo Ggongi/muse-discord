@@ -315,7 +315,7 @@ class Runner:
         self.notes = []
         started_at = iso_now()
         labels = {}
-        state = {"converse_turns": None}
+        state = {"converse_turns": None, "senders": {}}
         for i, step in enumerate(sc.get("steps") or []):
             self.check_alive()
             self.step(step, channel_id, labels, state, i)
@@ -329,7 +329,7 @@ class Runner:
     def step(self, step, channel_id, labels, state, index):
         kind, arg = next(iter(step.items()))
         if kind == "send":
-            self.send(arg, channel_id, labels)
+            self.send(arg, channel_id, labels, state.get("senders"))
         elif kind == "wait":
             self.sleep(float(arg))
         elif kind == "wait_for":
@@ -338,6 +338,8 @@ class Runner:
             self.action(arg)
         elif kind == "converse":
             state["converse_turns"] = self.converse(arg, channel_id)
+        elif kind == "delete":
+            self.delete(arg, channel_id, labels, state.get("senders") or {})
         else:
             raise ValueError(f"step {index + 1}: unknown step {kind!r}")
 
@@ -351,7 +353,7 @@ class Runner:
             raise ValueError(f"reply_to: unknown label {ref!r}")
         return labels[ref]
 
-    def send(self, arg, channel_id, labels):
+    def send(self, arg, channel_id, labels, senders=None):
         bot = self.drivers[arg["as"]]
         text = scenario.render(arg.get("text", ""), self.ids)
         files = None
@@ -363,7 +365,17 @@ class Runner:
                        files=files)
         if arg.get("label"):
             labels[arg["label"]] = msg["id"]
+            if senders is not None:
+                senders[arg["label"]] = arg["as"]
         return msg
+
+    def delete(self, label, channel_id, labels, senders):
+        """The driver that sent the label's message deletes it (its id
+        stays in labels, so checks can still name it)."""
+        if label not in labels:
+            raise ValueError(f"delete: unknown label {label!r}")
+        self.drivers[senders.get(label, "a")].delete_message(
+            channel_id, labels[label])
 
     def wait_for(self, arg, channel_id):
         timeout = float(arg.get("timeout", 60))

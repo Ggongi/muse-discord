@@ -144,6 +144,7 @@ class Guild:
         self.n = 1000
         self.channels = {}
         self.deleted = []
+        self.deleted_messages = []  # (deleting bot's id, message id)
         self.sut_id = sut_id
         self.sut_limit = sut_limit
         self.sut_replies = {}
@@ -203,6 +204,11 @@ class FakeBot:
 
     def delete_channel(self, cid):
         self.guild.deleted.append(cid)
+
+    def delete_message(self, cid, mid):
+        self.guild.channels[cid] = [m for m in self.guild.channels[cid]
+                                    if m["id"] != mid]
+        self.guild.deleted_messages.append((self.uid, mid))
 
     def guild_channels(self, gid):
         return []
@@ -338,6 +344,18 @@ class DiscordRestTests(unittest.TestCase):
         b = self.bot([(404, {"message": "Unknown Channel"}, {})])
         self.assertIsNone(b.delete_channel("5"))
 
+    def test_delete_message(self):
+        b = self.bot([(204, None, {}),
+                      (404, {"message": "Unknown Message"}, {}),
+                      (403, {"message": "Missing Permissions"}, {})])
+        self.assertIsNone(b.delete_message("55", "7"))
+        req = b._open.requests[0]
+        self.assertEqual(req.get_method(), "DELETE")
+        self.assertTrue(req.full_url.endswith("/channels/55/messages/7"))
+        self.assertIsNone(b.delete_message("55", "7"))  # already gone
+        with self.assertRaises(discord_rest.DiscordError):
+            b.delete_message("55", "8")
+
     def test_snowflake_roundtrip(self):
         t = 1760000000.0
         self.assertAlmostEqual(
@@ -415,7 +433,8 @@ class SUTTests(unittest.TestCase):
         with open(os.path.join(self.tree, "monitor.py"), "w") as f:
             f.write(FAKE_MONITOR)
         for name in ("state.json", "config.yaml", ".git/HEAD",
-                     "bin/outbox-append.py"):
+                     "bin/outbox-append.py", "update_check.json",
+                     "update_request.json", "watchdog.lock"):
             with open(os.path.join(self.tree, name), "w") as f:
                 f.write("{}\n")
         self.cfg = sut.scenario_config(sut.base_config("10", "20", "30"),
@@ -434,7 +453,8 @@ class SUTTests(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(pkg, "monitor.py")))
         self.assertTrue(os.path.exists(os.path.join(pkg, "bin",
                                                     "outbox-append.py")))
-        for gone in (".git", "state.json"):
+        for gone in (".git", "state.json", "update_check.json",
+                     "update_request.json", "watchdog.lock"):
             self.assertFalse(os.path.exists(os.path.join(pkg, gone)), gone)
         mode = stat.S_IMODE(os.stat(self.s.token_file).st_mode)
         self.assertEqual(mode, 0o600)
@@ -774,6 +794,31 @@ class RunFlowTests(unittest.TestCase):
         self.assertEqual(cfgs[0]["testing"]["treat_as_human"], ["20"])
         self.assertTrue(summary.startswith("<!-- muse-discord-e2e -->"))
         self.assert_no_tokens()
+
+    def test_delete_step(self):
+        self.sc.SCENARIOS = [
+            {"id": "deleted", "tier": 1, "title": "t",
+             "steps": [{"send": {"as": "a", "text": "plain", "label": "c1"}},
+                       {"send": {"as": "b", "text": "<@SUT> hi",
+                                 "label": "q1"}},
+                       {"delete": "q1"},
+                       {"delete": "c1"}],
+             "expect": {"checks": [{"sut_reply_count": {"eq": 1}},
+                                   {"no_sut_reply_to": "c1"}]}},
+        ]
+        code, out = self.main()
+        self.assertEqual(code, 0, out)
+        results, _ = self.outputs()
+        self.assertEqual(results[0]["status"], "pass", results)
+        with open(os.path.join(self.out, "transcripts",
+                               "deleted.json")) as f:
+            tr = json.load(f)
+        # Each message deleted by the driver that sent it; the labels
+        # keep the ids, the history no longer has the messages.
+        self.assertEqual(self.guild.deleted_messages,
+                         [("30", tr["labels"]["q1"]),
+                          ("20", tr["labels"]["c1"])])
+        self.assertEqual([m["author"] for m in tr["messages"]], ["sut"])
 
     def test_tier2_judge_and_converse(self):
         self.guild.sut_limit = 3

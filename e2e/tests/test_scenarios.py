@@ -78,12 +78,23 @@ class RealScenarios(unittest.TestCase):
             "unaddressed_chatter", "burst_coalesce", "injection_quarantined",
             "bot_direct", "silent_item", "long_reply_capped", "no_mass_ping",
             "restart_mid_send", "gateway_down_poll",
-            "two_mentions_two_replies"}, t1)
+            "two_mentions_two_replies", "reply_to_deleted"}, t1)
         self.assertLessEqual({
             "persona_voice", "bot_conversation_ends", "burst_coherent",
             "stranger_owner_command", "owner_request", "image_seen",
             "not_addressed_stays_quiet"}, t2)
         self.assertFalse(t1 & t2)
+
+    def test_reply_to_deleted_deletes_before_the_slow_reply(self):
+        """The trigger must be gone well before the fake worker's
+        [[slow]] draft goes out, or the reply is threaded as usual."""
+        import fake_worker
+        sc = next(s for s in self.all if s["id"] == "reply_to_deleted")
+        kinds = [next(iter(st)) for st in sc["steps"]]
+        self.assertIn("[[slow]]", sc["steps"][0]["send"]["text"])
+        waited = sum(st["wait"] for st in sc["steps"][:kinds.index("delete")]
+                     if "wait" in st)
+        self.assertLessEqual(waited + 5, fake_worker.SLOW_SECS)
 
     def test_tier_filter_accepts_string(self):
         self.assertEqual(
@@ -332,6 +343,19 @@ class Negative(unittest.TestCase):
         self.bad(sc, "steps[1].wait_for.timeout")
         sc["steps"][1] = {"wait_for": {"sut_messages": 1.5}}
         self.bad(sc, "steps[1].wait_for.sut_messages", "integer")
+
+    def test_delete(self):
+        sc = base()
+        sc["steps"].append({"delete": "q1"})
+        scenario.validate(sc)
+        sc["steps"].append({"delete": "q1"})
+        self.bad(sc, "steps[3].delete", "already deleted")
+        sc["steps"][2:] = [{"delete": "q9"}]
+        self.bad(sc, "steps[2].delete", "unknown label 'q9'")
+        sc["steps"][2:] = [{"delete": "last_sut"}]
+        self.bad(sc, "steps[2].delete", "unknown label")
+        sc["steps"].insert(0, {"delete": "q1"})
+        self.bad(sc, "steps[0].delete", "unknown label 'q1'")
 
     def test_action(self):
         sc = base()

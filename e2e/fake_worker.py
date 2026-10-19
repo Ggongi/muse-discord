@@ -4,11 +4,12 @@
     python3 e2e/fake_worker.py --pkg <package dir> [--interval 1]
 
 Polls <pkg>/reply_queue.json and answers every queue item exactly once
-with one outbox item, written through <pkg>/bin/outbox-append.py like a
-real worker (PROTOCOL.md). The reply threads under the item's LAST
-burst fragment (the trigger when there are none) and says `ack <n>`,
-n = the number of messages in the item (trigger + fragments), unless
-the item's text (any fragment) carries a directive:
+with one outbox item, written through <pkg>/bin/outbox-append.py like
+a real worker (PROTOCOL.md): one append call per item, as
+worker-prompt.template.md has the real worker do. The reply threads
+under the item's LAST burst fragment (the trigger when there are none)
+and says `ack <n>`, n = the number of messages in the item (trigger +
+fragments), unless the item's text (any fragment) carries a directive:
 
   [[silent]]     a `silent` outbox item: deliberately no reply
   [[long]]       a 3500-character reply (the monitor must cap/split it)
@@ -139,13 +140,14 @@ class Worker:
             print(f"item {mid}: {sorted(directives(item)) or 'ack'}"
                   f"{f' (in {delay:.0f}s)' if delay else ''}", flush=True)
             self.scheduled.append((now + delay, out))
-        due = [o for t, o in self.scheduled if t <= now]
-        if not due:
-            return 0
-        if append_outbox(self.pkg, due):
-            self.scheduled = [(t, o) for t, o in self.scheduled if t > now]
-            return len(due)
-        return 0  # retried next tick
+        written, kept = 0, []
+        for t, o in self.scheduled:
+            if t <= now and append_outbox(self.pkg, [o]):
+                written += 1
+            else:
+                kept.append((t, o))  # not due yet, or retried next tick
+        self.scheduled = kept
+        return written
 
 
 def main(argv=None):

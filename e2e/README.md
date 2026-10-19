@@ -106,6 +106,11 @@ python3 e2e/run.py --tree . --tier 1 --scenario mention_basic \
        --keep-channels
 ```
 
+The harness runs `monitor.py` itself, from a copy of the tree, with
+`updates.check: false` (no update DMs to the owner) and presence off.
+Neither `watchdog.sh` nor the wake hook runs, so nothing restarts the
+monitor behind a scenario's `kill_monitor` step.
+
 Results land in `out/` (`results.json`, `summary.md`,
 `transcripts/`). Tier 2 also needs the `claude` CLI on PATH, logged
 in or with `CLAUDE_CODE_OAUTH_TOKEN` set. `CLAUDE_BIN` points the
@@ -119,10 +124,16 @@ install (hand each open queue item to exactly one run, with the same
 payload: the items plus the persona) and runs `claude -p` with the
 PR's `worker-prompt.template.md`, its seams filled the way SETUP.md
 step 7 fills them, and the test persona in `fixtures/persona.md`.
-Each wake gets 240 s; its duration and exit code go to
-`claude_worker.log`, and the CLI's JSON output to `claude_wakes/`.
+Like a real worker, it appends each reply as soon as it is drafted
+(one `bin/outbox-append.py` call per item) and ends the run with the
+single line `done`. Each wake gets 240 s; its duration, exit code, and
+`ending=` (`done`, `flag`, or `other` for a run that ended any other
+way) go to `claude_worker.log`, and the CLI's JSON output to
+`claude_wakes/`. The hook's other job, restarting a dead monitor, is
+left out: the harness owns the monitor.
 The run has only the Bash and Read tools, in `dontAsk` permission
-mode, behind a hook that allows exactly the outbox append, the
+mode, behind a hook that allows exactly the outbox append (as often as
+needed), the
 `bin/discord-api.py` owner tool, and reading the item's media files.
 
 `judge.py` runs a separate `claude -p` with no tools, giving it the
@@ -136,7 +147,13 @@ but whose judge says `fail` or `error` is a warning, not a failure.
 Add `e2e/scenarios/<id>.yaml`; the file name is the scenario id. The
 schema (steps, checks, the `judge.rubric` that tier 2 requires) is
 documented and validated in `e2e/scenario.py`; copy an existing
-scenario of the same tier as a starting point. Check it offline with
+scenario of the same tier as a starting point. Steps are `send`,
+`wait`, `wait_for`, `action` (stop, start, or restart the monitor,
+gateway off or on), `converse`, and `delete: <label>` (the driver
+that sent that message deletes it; checks can still name the label).
+In tier 1, directives in a message's text (`[[slow]]`, `[[silent]]`,
+`[[long]]`, `[[everyone]]`, `[[mention_a]]`; see `fake_worker.py`)
+shape the fake worker's reply. Check it offline with
 `python3 e2e/run.py --tree . --tier 1 --dry-run` (or `--tier 2`).
 A tier-2 rubric should state plain pass criteria the judge can verify
 from the transcript alone, such as "replies once, in the lighthouse

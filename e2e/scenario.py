@@ -31,6 +31,7 @@ FIXTURES_DIR = os.path.join(E2E_DIR, "fixtures")
 ID_RE = re.compile(r"^[a-z0-9_]+$")
 LABEL_RE = re.compile(r"^[a-z0-9_]+$")
 DRIVERS = ("a", "b")
+STEPS = ("send", "wait", "wait_for", "action", "converse", "delete")
 ACTIONS = ("kill_monitor", "start_monitor", "restart_monitor",
            "gateway_off", "gateway_on")
 LEDGER_STATUSES = ("queued", "replied", "quarantined", "skipped")
@@ -213,16 +214,26 @@ def _validate_converse(s, where):
         _positive(s["per_turn_timeout"], f"{where}.per_turn_timeout")
 
 
+def _validate_delete(label, where, labels, deleted):
+    """delete: <label>: the driver that sent that message deletes it.
+    Checks may still name the label (its id stays in the transcript's
+    labels; the message itself is gone from the history)."""
+    _label_ref(label, labels, where)
+    if label in deleted:
+        _fail(where, f"label {label!r} is already deleted")
+    deleted.append(label)
+
+
 def _validate_steps(steps, where, fixtures_dir):
     """Returns (labels in definition order, step kinds seen)."""
     if not isinstance(steps, list) or not steps:
         _fail(where, "expected a non-empty list of steps")
-    labels, kinds = [], set()
+    labels, kinds, deleted = [], set(), []
     for i, step in enumerate(steps):
         w = f"{where}[{i}]"
         if not isinstance(step, dict) or len(step) != 1:
-            _fail(w, "each step is a mapping with exactly one key (send, "
-                     "wait, wait_for, action, converse)")
+            _fail(w, f"each step is a mapping with exactly one key "
+                     f"({', '.join(STEPS)})")
         (kind, body), = step.items()
         kinds.add(kind)
         w = f"{w}.{kind}"
@@ -238,9 +249,11 @@ def _validate_steps(steps, where, fixtures_dir):
                          f"{', '.join(ACTIONS)})")
         elif kind == "converse":
             _validate_converse(body, w)
+        elif kind == "delete":
+            _validate_delete(body, w, labels, deleted)
         else:
-            _fail(f"{where}[{i}]", f"unknown step {kind!r} (send, wait, "
-                                   f"wait_for, action, converse)")
+            _fail(f"{where}[{i}]", f"unknown step {kind!r} "
+                                   f"({', '.join(STEPS)})")
     return labels, kinds
 
 

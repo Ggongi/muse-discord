@@ -36,24 +36,26 @@ with open(os.path.join(here, "calls.jsonl"), "a") as f:
 
 FAKES = {
     # (a) a worker: answer every payload item through the append tool,
-    # under the last burst fragment, as the prompt says.
+    # under the last burst fragment, one append per item (step 3), then
+    # end with the one line `done` (step 5), as the prompt says.
     "append": FAKE_HEAD + textwrap.dedent("""\
         import subprocess
         payload = json.loads(prompt.split("```json\\n", 1)[1]
                              .split("\\n```", 1)[0])
-        out = []
+        code = 0
         for it in payload["items"]:
             frags = it.get("burst_fragments") or []
             rt = frags[-1]["message_id"] if frags else it["message_id"]
-            out.append({"item": it["message_id"],
-                        "channel_id": it["channel_id"], "reply_to": rt,
-                        "text": "ahoy " + it["author"]})
-        r = subprocess.run([sys.executable, "bin/outbox-append.py"],
-                           input=json.dumps(out), text=True,
-                           capture_output=True)
+            out = {"item": it["message_id"], "channel_id": it["channel_id"],
+                   "reply_to": rt, "text": "ahoy " + it["author"]}
+            r = subprocess.run([sys.executable, "bin/outbox-append.py"],
+                               input=json.dumps(out), text=True,
+                               capture_output=True)
+            code = code or r.returncode
         print(json.dumps({"type": "result", "is_error": False,
-                          "num_turns": 2, "result": "drafted %d" % len(out)}))
-        sys.exit(r.returncode)
+                          "num_turns": 1 + len(payload["items"]),
+                          "result": "done"}))
+        sys.exit(code)
         """),
     # (b) hangs (with a child process, to check the group kill).
     "hang": FAKE_HEAD + textwrap.dedent("""\
@@ -173,6 +175,18 @@ class TestWorkerPieces(Base):
         self.assertNotIn("queued_at", p["items"][0])
         self.assertIsNone(p["items"][0]["welcome"])
 
+    def test_hook_numbers_and_projection_in_sync(self):
+        """PAYLOAD_FIELDS and LEASE_SECS mirror hooks/mention-watch.sh."""
+        import re
+        with open(os.path.join(REPO, "hooks", "mention-watch.sh")) as f:
+            hook = f.read()
+        m = re.search(r"items: \[\.\[\] \| \{([^}]*)\}\]", hook)
+        self.assertIsNotNone(m, "the hook's payload projection moved")
+        fields = tuple(x.strip() for x in m.group(1).split(","))
+        self.assertEqual(fields, claude_worker.PAYLOAD_FIELDS)
+        lease = re.search(r"^LEASE_SECS=(\d+)$", hook, re.M)
+        self.assertEqual(int(lease.group(1)), claude_worker.LEASE_SECS)
+
     def test_bash_allowlist(self):
         pkg = self.pkg
         ok = [
@@ -180,6 +194,9 @@ class TestWorkerPieces(Base):
             "EOF" % pkg,
             "python3 bin/outbox-append.py << \"END\"\n[]\nEND\n",
             "python3 %s/bin/outbox-append.py items.json" % pkg,
+            # One item per call (the template's step 3): an object.
+            "python3 %s/bin/outbox-append.py <<'EOF'\n{\"item\": \"1\", "
+            "\"channel_id\": \"2\", \"silent\": true}\nEOF" % pkg,
             "python3 %s/bin/discord-api.py react 1 2 '🌊'" % pkg,
             "python3 %s/bin/discord-api.py post 1 \"it's done; ok\"" % pkg,
         ]
@@ -202,6 +219,31 @@ class TestWorkerPieces(Base):
             self.assertTrue(claude_worker.bash_allowed(pkg, cmd)[0], cmd)
         for cmd in bad:
             self.assertFalse(claude_worker.bash_allowed(pkg, cmd)[0], cmd)
+
+    def test_bash_allowlist_is_per_call(self):
+        """The hook keeps no state: the same append is allowed every
+        time, so a worker may run it once per item."""
+        cmd = ("python3 %s/bin/outbox-append.py <<'EOF'\n{}\nEOF"
+               % self.pkg)
+        for _ in range(5):
+            self.assertTrue(claude_worker.bash_allowed(self.pkg, cmd)[0])
+
+    def test_run_ending(self):
+        ending = claude_worker.run_ending
+        self.assertEqual(ending("done"), "done")
+        self.assertEqual(ending(" `done`.\n"), "done")
+        self.assertEqual(ending("done; flag: 1001 threatening"), "flag")
+        for other in ("drafted 2 replies", "done\nall good", "", None):
+            self.assertEqual(ending(other), "other", other)
+
+    def test_template_has_the_steps_mirrored_here(self):
+        """The worker template still asks for what this file and the
+        fakes assume: one append per item, then `done`."""
+        with open(os.path.join(REPO, "worker-prompt.template.md")) as f:
+            text = f.read()
+        self.assertIn("One call per item", text)
+        self.assertIn("`done`", text)
+        self.assertIn("done; flag:", text)
 
     def test_read_allowlist(self):
         pkg = self.pkg
@@ -265,7 +307,8 @@ class TestWorkerRuns(Base):
         with open(log) as f:
             text = f.read()
         self.assertIn("wake 1: done exit=0", text)
-        self.assertIn("result='drafted 2'", text)
+        self.assertIn("turns=3", text)  # one append call per item
+        self.assertIn("ending=done result='done'", text)
         self.assertRegex(text, r"duration=\d+\.\ds")
         self.assertTrue(os.path.exists(
             os.path.join(self.tmp, "claude_wakes", "wake-001.json")))

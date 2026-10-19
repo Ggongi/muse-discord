@@ -27,9 +27,10 @@ SELF = "200000000000000009"        # the monitor's own bot id
 CHAN = "300000000000000001"
 
 
-def load_monitor(tmp, testing=None, name="monitor_under_test"):
-    """Import a copy of monitor.py with a config holding `testing`.
-    Returns (module, stdout printed at import)."""
+def load_monitor(tmp, testing=None, name="monitor_under_test", extra=None):
+    """Import a copy of monitor.py with a config holding `testing` (and
+    the top-level keys in `extra`). Returns (module, stdout printed at
+    import)."""
     shutil.copy(os.path.join(REPO, "monitor.py"), tmp)
     token = os.path.join(tmp, "token")
     with open(token, "w") as f:
@@ -39,6 +40,7 @@ def load_monitor(tmp, testing=None, name="monitor_under_test"):
     data = {"bot": {"token_file": token}, "behavior": {"bots": "off"}}
     if testing is not None:
         data["testing"] = testing
+    data.update(extra or {})
     with open(cfg, "w") as f:
         yaml.safe_dump(data, f)
     spec = importlib.util.spec_from_file_location(
@@ -136,6 +138,29 @@ class TreatAsHumanSet(unittest.TestCase):
         self.assertTrue(m.burst_quiet(p[f"{CHAN}:{HUMAN_BOT}"], now))
         self.assertFalse(m.burst_quiet(p[f"{CHAN}:{OTHER_BOT}"], now))
 
+    def test_dm_burst_quiet(self):
+        """A DM burst flushes after DM_BURST_QUIET_SECS when its author
+        counts as human, after BOT_BURST_QUIET_SECS when it is a bot."""
+        m = self.mon
+        state = {}
+        dm_chan = "300000000000000077"
+        with contextlib.redirect_stdout(io.StringIO()):
+            for mid, uid in (("30", HUMAN_BOT), ("31", OTHER_BOT)):
+                dm = dict(msg(mid, uid, True), channel_id=dm_chan)
+                m.stage_trigger(state, dm, "DM", None, "dm", dm=True)
+        p = state["pending"]
+        # 1s after the last message: past the DM quiet (0.5s), short of
+        # the server quiet (1.5s) and the bot quiet (5s).
+        now = time.time()
+        for uid, mid in ((HUMAN_BOT, "30"), (OTHER_BOT, "31")):
+            m._activity[f"{dm_chan}:{uid}"] = {"msg_id": mid,
+                                               "msg_at": now - 1,
+                                               "msg_seq": 1, "typing_seq": 0}
+        self.assertLess(m.DM_BURST_QUIET_SECS, 1)
+        self.assertLess(1, m.BURST_QUIET_SECS)
+        self.assertTrue(m.burst_quiet(p[f"{dm_chan}:{HUMAN_BOT}"], now))
+        self.assertFalse(m.burst_quiet(p[f"{dm_chan}:{OTHER_BOT}"], now))
+
     def test_history_turns_and_participants(self):
         m = self.mon
         state = {}
@@ -194,6 +219,49 @@ class TreatAsHumanAbsent(unittest.TestCase):
                 self.assertFalse(mon.is_bot_author(author(PERSON, False)))
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
+
+
+class SutContract(unittest.TestCase):
+    """What sut.py relies on in the real monitor.py: its ready and fatal
+    log markers, and updates.check false keeping the update DMs off."""
+
+    def test_log_markers_exist(self):
+        import sut
+        with open(os.path.join(REPO, "monitor.py")) as f:
+            src = f.read()
+        for marker in (sut.READY_IDENTITY, sut.READY_DISCOVERY,
+                       sut.READY_GATEWAY_ON, sut.READY_GATEWAY_OFF) \
+                + sut.FATAL_MARKERS:
+            self.assertIn(marker, src)
+
+    def test_updates_check_false_sends_no_update_dm(self):
+        tmp = tempfile.mkdtemp(prefix="upd-off-")
+        try:
+            mon, _ = load_monitor(
+                tmp, {"treat_as_human": [HUMAN_BOT]}, name="monitor_upd_off",
+                extra={"updates": {"check": False},
+                       "owners": {"user_ids": [HUMAN_BOT]}})
+            with open(mon.UPDATE_CHECK_FILE, "w") as f:
+                f.write('{"latest": "v9.9.9", "installed": "v1.0.0", '
+                        '"entries": ["v9.9.9 (2026-10-18): Big"]}')
+            sent = []
+            mon.dm_owner = lambda uid, payload: sent.append(uid) or True
+            mon.rest_backing_off = lambda: False
+            state = {}
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertFalse(mon.updates_enabled())
+                mon.announce_update(state)
+            self.assertEqual(sent, [])
+            self.assertFalse(state["update_notice"].get("owed"))
+            # Control: the same file with updates on is announced.
+            mon._updates_cfg.update(check=True, mtime=os.path.getmtime(
+                os.path.join(tmp, "config.yaml")))
+            mon._version_installed = lambda tag, timeout=5: False
+            with contextlib.redirect_stdout(io.StringIO()):
+                mon.announce_update(state)
+            self.assertEqual(sent, [HUMAN_BOT])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class GatewayOffStub(unittest.TestCase):

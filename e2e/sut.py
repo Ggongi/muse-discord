@@ -18,10 +18,23 @@ Ready signal. The monitor prints, in order: "Bot user id: <id>"
 so the scenario channels, created before the start, are known and
 their watermarks are seeded right after), then the gateway thread's
 outcome: "Gateway READY: realtime ingest live." or, in REST-only mode,
-"GATEWAY DISABLED (...)". wait_ready() waits for the identity line,
-the discovery line, and the gateway line for the requested mode, all
-in log output written since this start. Every message sent after that
-is either delivered by the gateway or read by the next REST poll.
+"GATEWAY DISABLED (...)". (When /users/@me fails at boot, the identity
+line comes later, as "Bot user id: <id> (from gateway READY)" or from
+an in-loop retry.) wait_ready() waits for the identity line, the
+discovery line, and the gateway line for the requested mode, all in
+log output written since this start. Every message sent after that is
+either delivered by the gateway or read by the next REST poll.
+
+What the SUT never does. config.yaml always sets updates.check false,
+so the monitor never DMs the owners (driver A) about a release; the
+pkg copy also leaves out update_check.json and update_request.json.
+Nothing here runs watchdog.sh or hooks/mention-watch.sh: the harness
+starts and stops monitor.py itself, so the wake hook's restart of a
+dead monitor (watchdog.sh --from-hook) never fights a kill_monitor
+step. (A real install's hook or watchdog on the same machine does not
+see the SUT either: their pgrep matches only `python3 monitor.py`
+started from a package dir, and the SUT runs as `<python path>
+<pkg>/monitor.py`.)
 
 Gateway off. monitor.py imports `websockets` inside the gateway thread
 only, and when that thread dies it logs "GATEWAY DISABLED (thread
@@ -50,10 +63,11 @@ REST_POLL_SECONDS = 10
 # runtime files, and harness output.
 COPY_IGNORE = shutil.ignore_patterns(
     ".git", "__pycache__", "config.yaml", "state.json", "reply_queue.json",
-    "reply_outbox*.json", "reply.lock", "quarantine.json",
+    "reply_outbox*.json", "reply.lock", ".*.tmp", "quarantine.json",
     "mention_ledger.json", "monitor.pid", "monitor.heartbeat",
-    "watchdog_state.json", "update_check.json", "*.log", "*.log.1",
-    "media", "generated", "out")
+    "watchdog_state.json", "watchdog.lock", "update_check.json",
+    "update_request.json", "*.log", "*.log.1", "media", "generated",
+    "out")
 READY_IDENTITY = "Bot user id: "
 READY_DISCOVERY = "muse-discord monitor starting."
 READY_GATEWAY_ON = "Gateway READY: realtime ingest live."

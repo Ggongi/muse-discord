@@ -8,6 +8,7 @@ product's client; monitor.py has its own.
     me = bot.me()
     msg = bot.send(channel_id, "hello", reply_to=None, files=["cat.png"])
     msgs = bot.history(channel_id)          # every message, oldest first
+    bot.delete_message(channel_id, msg["id"])
     ch = bot.create_channel(guild_id, "e2e-123-mention_basic")
     bot.delete_channel(ch["id"])
 
@@ -185,6 +186,17 @@ class Bot:
             if len(page) < 100:
                 break
         return sorted(out.values(), key=lambda m: int(m["id"]))
+
+    def delete_message(self, channel_id, message_id):
+        """Delete a message (a bot may always delete its own). One that
+        is already gone is fine."""
+        try:
+            return self.request(
+                "DELETE", f"/channels/{channel_id}/messages/{message_id}")
+        except DiscordError as e:
+            if e.status == 404:
+                return None
+            raise
 
     def create_channel(self, guild_id, name):
         """Create a text channel; returns the channel object."""

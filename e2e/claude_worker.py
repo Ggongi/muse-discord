@@ -14,15 +14,28 @@ worker-prompt.template.md with its seams filled the way SETUP.md step 7
 fills them (persona from the wake payload, no media tools, default
 judgment), appends the same payload the wake hook builds (the items
 plus the persona text), and runs the CLI in the package dir with a
-hard timeout. Every wake's duration and exit code go to the worker log;
-the CLI's JSON output for each wake is kept in claude_wakes/ next to it.
+hard timeout. Every wake's duration, exit code, and how it ended go to
+the worker log; the CLI's JSON output for each wake is kept in
+claude_wakes/ next to it.
+
+The template has the worker append each reply as soon as it is
+drafted (one outbox-append call per item) and end the run right after
+the last one with the single line `done` (or `done; flag: <id> ...`).
+The log's `ending=` field says which: `done`, `flag`, or `other` (a
+run that wrapped up with something else, which the template forbids).
+
+Not replicated: the hook's monitor-liveness check (it starts
+`watchdog.sh --from-hook` when no monitor runs). The harness owns the
+monitor's lifecycle, and a restart from here would undo a scenario's
+kill_monitor step.
 
 Tool restriction: the CLI gets only the Bash and Read tools, in
 `dontAsk` permission mode (anything not explicitly allowed is denied,
 nobody is prompted), with no user/project settings and no MCP servers.
 A PreToolUse hook (this script, run with --hook) is the allowlist:
 Bash may run only `python3 <pkg>/bin/outbox-append.py` (with a quoted
-heredoc or a file argument) and `python3 <pkg>/bin/discord-api.py
+heredoc or a file argument; each call is checked on its own, so the
+worker may run it once per item) and `python3 <pkg>/bin/discord-api.py
 <simple arguments>`; Read may open only media/ and generated/ files,
 the queue, and the persona. A hook is needed because Claude Code's own
 `Bash(...)` allow rules never match a heredoc command, and the
@@ -199,6 +212,21 @@ def render_prompt(template, pkg):
         warnings.append("GENERATION POLICY limits bullet not found")
     text = text.replace("<package dir>", pkg)
     return text, warnings
+
+
+def run_ending(result):
+    """How a run ended, from the CLI's final message: "done" (the
+    template's one line), "flag" (the one line `done; flag: ...`), or
+    "other" (anything else, a recap or a second line included)."""
+    text = str(result or "").strip()
+    if "\n" in text:
+        return "other"
+    text = text.strip("`*_ .")
+    if text.lower() == "done":
+        return "done"
+    if re.match(r"done\s*;\s*flag\b", text, re.I):
+        return "flag"
+    return "other"
 
 
 def wake_prompt(rendered, payload):
@@ -479,8 +507,9 @@ class Worker:
         summary = ""
         try:
             res = json.loads(out)
-            summary = " turns=%s is_error=%s result=%r" % (
+            summary = " turns=%s is_error=%s ending=%s result=%r" % (
                 res.get("num_turns"), res.get("is_error"),
+                run_ending(res.get("result")),
                 str(res.get("result") or "")[:200])
         except (ValueError, AttributeError):
             if out.strip():
