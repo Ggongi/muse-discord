@@ -398,13 +398,15 @@ def test_typing_thread_lifecycle():
         # 4. an item nobody answers stops after TYPING_MAX_SECS
         b = snowflake()
         it = qitem(b, cid="105")
-        it["queued_at"] = time.time() - 5
+        # Queued 2 s ago: 4 s of typing left (TYPING_MAX_SECS = 6), so
+        # a slow runner still sees at least one refresh (every 2 s).
+        it["queued_at"] = time.time() - 2
         write(m.QUEUE_FILE, [it])
         m.typing_refresh(st)
-        time.sleep(1.5)
+        time.sleep(2.5)
         assert [c for c in typing_calls() if "/105/" in c[2]]
-        time.sleep(1.5)
-        cut = time.time()
+        cut = it["queued_at"] + m.TYPING_MAX_SECS + 0.5
+        time.sleep(max(0.0, cut - time.time()))
         time.sleep(2.5)
         assert not [c for c in typing_calls()
                     if "/105/" in c[2] and c[0] > cut]
