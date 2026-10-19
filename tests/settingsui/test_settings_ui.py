@@ -790,7 +790,16 @@ class Risky(Base):
         self.direct(f"mdset:s:c{G2}.{CH_G2}:r", ["off"])
         self.confirm(f"mdset:s:c{G2}.{CH_G2}:r", ["conversational"])
 
-    def test_undo_that_loosens_is_confirmed(self):
+    def test_undo_is_judged_by_its_outcome(self):
+        # Undo back to the built-in Public facts only: not risky.
+        self.direct(f"mdset:s:s{G1}:m", ["nothing"])
+        r = self.owner(f"mdset:u:s{G1}")
+        self.assertNotIn("Are you sure", text(r))
+        self.assertEqual(len(self.ctx.undos), 1)
+        # Undo back to Anything it remembers in a 1,240-member server:
+        # risky, so it is confirmed first.
+        self.ctx.undos.clear()
+        self.confirm(f"mdset:s:s{G1}:m", ["everything"])
         self.direct(f"mdset:s:s{G1}:m", ["nothing"])
         r = self.owner(f"mdset:u:s{G1}")
         self.assertIn("Are you sure", text(r))
@@ -905,9 +914,12 @@ class Admin(Base):
     def test_admin_undo_and_reset_when_quieter(self):
         self.admin(f"mdset:s:s{G1}:r", ["when-addressed"])
         self.owner(f"mdset:s:s{G1}:r", ["off"])
-        # undoing the owner's "off" would be louder: refused
+        # The newest change is the owner's: admins only ever undo
+        # admins' changes, so there is nothing for them to undo.
         r = self.admin(f"mdset:u:s{G1}")
-        self.assertIn("louder", text(r))
+        self.assertIn("Nothing to undo", text(r))
+        self.assertEqual(self.ctx.value("who.replies",
+                                        MS.Scope.server(G1)), "off")
         # the admin's own change to a channel, undone (it was quieter
         # before? no: undo restores louder) -> refused; a reset that is
         # quieter is fine
