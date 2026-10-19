@@ -1,4 +1,7 @@
 name: media_generation
+# Settings id: plugins.media.* (an old config's plugins.media_generation
+# block maps onto it).
+id: media
 description: >-
   Lets allowed users have the worker generate images/video for them.
   The plugin supplies the may_generate gate on queue items: when it
@@ -9,18 +12,33 @@ description: >-
 hooks:
   - gate_message
   - generation_sent
-params:
-  allowed_user_ids:
-    default: []
+safe_in_new_servers: true
+settings:
+  enabled:
+    type: on-off
+    default: off
+    scopes: [everywhere, dms, all_servers, server, channel]
+  who:
+    type: people
+    values: [owners, everyone]
+    default: owners
+    risky: true
+    legacy: allowed_user_ids
+    scopes: [everywhere, server]
     description: >-
-      Discord user IDs allowed to trigger generation. Empty (the
-      default) means the owners from the top-level owners.user_ids
-      config, and nobody else.
-  daily_cap:
-    default: null
+      Who may trigger generation: owners, everyone, or a list of user
+      ids and "role:<id>" entries (the list replaces the owners; add
+      them to it to keep them). Old allowed_user_ids: [] = owners.
+  per_day:
+    type: number
+    min: 0
+    max: 1000
+    none: true
+    default: none
+    legacy: daily_cap
+    scopes: [everywhere, server]
     description: >-
-      Max replies with generated files actually SENT per day, across
-      all users (a reply carrying two files counts once). Counted at
-      send time by the generation_sent hook, never at queue time (a
-      granted permission that produces no file costs nothing). null =
-      no cap.
+      Max replies with generated files actually SENT per day (a reply
+      carrying two files counts once), counted in the scope where it is
+      set. Counted at send time by the generation_sent hook, never at
+      queue time. none = no cap.

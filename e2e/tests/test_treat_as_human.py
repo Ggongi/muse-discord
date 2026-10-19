@@ -1,11 +1,11 @@
-"""monitor.py's test-only testing.treat_as_human setting, offline.
+"""monitor.py's test-only testing.treat_as_human setting, offline,
+under an old-layout config (still accepted, mapped).
 
 monitor.py is copied into a temp dir and imported from there with a
-temp config (MUSE_DISCORD_CONFIG), so every file it might write lands
-in the temp dir. Import does no network I/O.
+temp config (MUSE_DISCORD_CONFIG; see monitor_util.py), so every file it
+might write lands in the temp dir. Import does no network I/O.
 """
 import contextlib
-import importlib.util
 import io
 import os
 import shutil
@@ -19,6 +19,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 E2E = os.path.dirname(HERE)
 REPO = os.path.dirname(E2E)
 sys.path.insert(0, E2E)
+sys.path.insert(0, HERE)
+
+from monitor_util import load_monitor_with  # noqa: E402
 
 HUMAN_BOT = "200000000000000001"   # a driver bot listed as human
 OTHER_BOT = "200000000000000002"   # a bot that is not listed
@@ -28,41 +31,18 @@ CHAN = "300000000000000001"
 
 
 def load_monitor(tmp, testing=None, name="monitor_under_test", extra=None):
-    """Import a copy of monitor.py with a config holding `testing` (and
-    the top-level keys in `extra`). Returns (module, stdout printed at
-    import)."""
-    shutil.copy(os.path.join(REPO, "monitor.py"), tmp)
+    """Import a copy of monitor.py with an old-layout config holding
+    `testing` (and the top-level keys in `extra`). Returns (module,
+    stdout printed at import). test_settings_layout.py covers the new
+    layout."""
     token = os.path.join(tmp, "token")
     with open(token, "w") as f:
         f.write("not-a-real-token\n")
-    cfg = os.path.join(tmp, "config.yaml")
-    import yaml
     data = {"bot": {"token_file": token}, "behavior": {"bots": "off"}}
     if testing is not None:
         data["testing"] = testing
     data.update(extra or {})
-    with open(cfg, "w") as f:
-        yaml.safe_dump(data, f)
-    spec = importlib.util.spec_from_file_location(
-        name, os.path.join(tmp, "monitor.py"))
-    mod = importlib.util.module_from_spec(spec)
-    out = io.StringIO()
-    old_env = os.environ.get("MUSE_DISCORD_CONFIG")
-    old_argv = sys.argv
-    os.environ["MUSE_DISCORD_CONFIG"] = cfg
-    sys.argv = [sys.argv[0]]
-    try:
-        with contextlib.redirect_stdout(out):
-            spec.loader.exec_module(mod)
-    finally:
-        sys.argv = old_argv
-        if old_env is None:
-            os.environ.pop("MUSE_DISCORD_CONFIG", None)
-        else:
-            os.environ["MUSE_DISCORD_CONFIG"] = old_env
-    mod.BOT_ID = mod.BOT_USER_ID = SELF
-    mod.BOT_NAME = "muse"
-    return mod, out.getvalue()
+    return load_monitor_with(tmp, data, name=name)
 
 
 def author(uid, bot):
@@ -278,6 +258,7 @@ class GatewayOffStub(unittest.TestCase):
             with open(os.path.join(stub, "__init__.py"), "w") as f:
                 f.write(sut.STUB_WEBSOCKETS)
             shutil.copy(os.path.join(REPO, "monitor.py"), tmp)
+            shutil.copy(os.path.join(REPO, "muse_settings.py"), tmp)
             with open(os.path.join(tmp, "token"), "w") as f:
                 f.write("x\n")
             with open(os.path.join(tmp, "config.yaml"), "w") as f:

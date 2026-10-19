@@ -2,12 +2,16 @@
 
 Queues a welcome item when a member joins a server. The core detects
 joins (Discord system messages, type 7) and calls the member_join hook;
-this plugin resolves WHERE the welcome goes (per_guild channel param,
-then the default; "system" = the server's system channel, a name is
-resolved inside that server, an ID is used as-is, "off" disables
-welcomes for that server) and renders the prompt param with {user} and
-{server} substituted. The worker drafts the actual greeting from the
-rendered prompt; see worker-prompt.template.md.
+this plugin resolves WHERE the welcome goes (its channel setting for that
+server: "system" = the server's system channel, an ID is used as-is,
+"off" disables welcomes there, and a name, from old configs, is resolved
+inside that server) and renders the prompt with {user} and {server}
+substituted, plus the server's welcome notes. The worker drafts the
+actual greeting from the rendered prompt; see worker-prompt.template.md.
+
+The core runs this hook only where plugins.welcome.enabled is on, and
+passes the plugin's settings for that scope in ctx["settings"]; without
+them (an old caller) api.param resolves the same values.
 
 State kept in the monitor's state.json under plugins.welcome: the
 per-guild daily counts and the recently welcomed message ids (so a
@@ -22,6 +26,12 @@ DEFAULT_PROMPT = (
 
 
 def register(api):
+    def _value(ctx, key, guild_id, guild_name):
+        vals = ctx.get("settings")
+        if isinstance(vals, dict) and key in vals:
+            return vals[key]
+        return api.param(key, guild_id, guild_name)
+
     def _plugin_state(state):
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         w = state.setdefault("plugins", {}).setdefault(
@@ -59,7 +69,7 @@ def register(api):
 
         # Freshness: skip ancient joins so a long outage does not
         # welcome someone who joined days ago.
-        max_age = api.param("max_age_hours", guild_id, guild_name)
+        max_age = _value(ctx, "max_age_hours", guild_id, guild_name)
         try:
             max_age_secs = float(max_age if max_age is not None else 24) \
                 * 3600
@@ -79,7 +89,7 @@ def register(api):
         w = _plugin_state(state)
         if msg["id"] in w.get("welcomed", []):
             return None
-        cap = api.param("daily_cap", guild_id, guild_name)
+        cap = _value(ctx, "daily_cap", guild_id, guild_name)
         if cap is not None:
             try:
                 cap = int(cap)
@@ -90,7 +100,7 @@ def register(api):
                         f"{guild_name}, skipping join {msg['id']}")
                 return None
 
-        target = api.param("channel", guild_id, guild_name)
+        target = _value(ctx, "channel", guild_id, guild_name)
         channel_id = _resolve_channel(target, guild_id, guild_name, ctx)
         if not channel_id:
             api.log(f"Welcome plugin: no welcome channel resolved for "
@@ -102,11 +112,14 @@ def register(api):
                     f"{channel_id} ({guild_name}); skipping welcome")
             return None
 
-        prompt = api.param("prompt", guild_id, guild_name) \
+        prompt = _value(ctx, "prompt", guild_id, guild_name) \
             or DEFAULT_PROMPT
         author = msg.get("author", {}) or {}
         rendered = str(prompt).replace("{user}", f"<@{author.get('id')}>") \
                               .replace("{server}", str(guild_name))
+        notes = str(_value(ctx, "notes", guild_id, guild_name) or "").strip()
+        if notes:
+            rendered += f"\nAlso: {notes}"
 
         w["counts"][guild_id] = w["counts"].get(guild_id, 0) + 1
         w["welcomed"] = (w.get("welcomed", []) + [msg["id"]])[-200:]

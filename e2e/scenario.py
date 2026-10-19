@@ -38,8 +38,14 @@ LEDGER_STATUSES = ("queued", "replied", "quarantined", "skipped")
 # send.reply_to may name the SUT's newest message instead of a label.
 LAST_SUT = "last_sut"
 
-TOP_KEYS = {"id", "tier", "title", "b_is_bot", "config", "steps",
-            "expect", "judge"}
+TOP_KEYS = {"id", "tier", "title", "b_is_bot", "legacy_config", "config",
+            "steps", "expect", "judge"}
+# Placeholders a scenario's `config:` overrides may use (sut.py renders
+# them, in keys and values).
+CONFIG_PLACEHOLDERS = ("GUILD_ID", "A_ID", "B_ID")
+_CONFIG_PH_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
+# queue_item: the item fields the check can compare.
+QUEUE_ITEM_FIELDS = ("follow_up", "kind", "from_bot", "owner_command")
 # Placeholders render() understands. Anything else shaped like one is a
 # typo that would go out to Discord verbatim.
 MENTION_PLACEHOLDERS = ("SUT", "A", "B")
@@ -317,6 +323,27 @@ def _arg_converse(v, w, labels, kinds):
     _count_spec(v, w)
 
 
+def _arg_queue_item(v, w, labels, kinds):
+    """{label, follow_up?, kind?, from_bot?, owner_command?, settings?}:
+    the queue item the fake worker saw for the label's message."""
+    _need_map(v, w)
+    _only_keys(v, ("label", "settings") + QUEUE_ITEM_FIELDS, w,
+               required=("label",))
+    _label_ref(v["label"], labels, f"{w}.label")
+    if len(v) == 1:
+        _fail(w, "needs at least one field to compare (" + ", ".join(
+            QUEUE_ITEM_FIELDS + ("settings",)) + ")")
+    for k in ("follow_up", "from_bot", "owner_command"):
+        if k in v and not isinstance(v[k], bool):
+            _fail(f"{w}.{k}", f"expected true/false, got {v[k]!r}")
+    if "kind" in v and (not isinstance(v["kind"], str) or not v["kind"]):
+        _fail(f"{w}.kind", f"expected a string, got {v['kind']!r}")
+    if "settings" in v:
+        _need_map(v["settings"], f"{w}.settings")
+        if not v["settings"]:
+            _fail(f"{w}.settings", "expected at least one card field")
+
+
 def _arg_regex(v, w, labels, kinds):
     if not isinstance(v, str) or not v:
         _fail(w, "expected a non-empty regular expression string")
@@ -342,6 +369,10 @@ CHECK_ARGS = {
     "quarantined": _arg_label,
     "ledger_status": _arg_ledger,
     "converse_turns": _arg_converse,
+    "log_contains": _arg_regex,
+    "log_lacks": _arg_regex,
+    "held": _arg_label,
+    "queue_item": _arg_queue_item,
 }
 
 
@@ -365,6 +396,36 @@ def _validate_expect(expect, where, labels, kinds, tier):
             _fail(w, f"unknown check {name!r} (known: "
                      f"{', '.join(sorted(CHECK_ARGS))})")
         CHECK_ARGS[name](arg, f"{w}.{name}", labels, kinds)
+
+
+def _check_config_placeholders(node, where):
+    """Every "{{...}}" in config overrides (keys and values) must be one
+    sut.py renders, and a whole string: anything else would reach the
+    monitor's config.yaml verbatim."""
+    if isinstance(node, dict):
+        items = list(node.items())
+        for k, _ in items:
+            _check_config_placeholder(k, f"{where}.{k}")
+        for k, v in items:
+            _check_config_placeholders(v, f"{where}.{k}")
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            _check_config_placeholders(v, f"{where}[{i}]")
+    else:
+        _check_config_placeholder(node, where)
+
+
+def _check_config_placeholder(v, where):
+    if not isinstance(v, str):
+        return
+    found = _CONFIG_PH_RE.findall(v)
+    if not found:
+        return
+    if len(found) > 1 or not re.fullmatch(r"\{\{\s*[^{}]*?\s*\}\}", v) \
+            or found[0] not in CONFIG_PLACEHOLDERS:
+        _fail(where, f"bad placeholder in {v!r}: use exactly one of "
+                     + ", ".join("{{%s}}" % p for p in CONFIG_PLACEHOLDERS)
+                     + " as the whole value or key")
 
 
 def validate(sc, source=None, fixtures_dir=None):
@@ -395,8 +456,14 @@ def validate(sc, source=None, fixtures_dir=None):
     if "b_is_bot" in sc and not isinstance(sc["b_is_bot"], bool):
         _fail(f"{name}: b_is_bot", f"expected true/false, got "
                                    f"{sc['b_is_bot']!r}")
-    if "config" in sc and not isinstance(sc["config"], dict):
-        _fail(f"{name}: config", "expected a mapping of config overrides")
+    if "legacy_config" in sc and not isinstance(sc["legacy_config"], bool):
+        _fail(f"{name}: legacy_config", f"expected true/false, got "
+                                        f"{sc['legacy_config']!r}")
+    if "config" in sc:
+        if not isinstance(sc["config"], dict):
+            _fail(f"{name}: config", "expected a mapping of config "
+                                     "overrides")
+        _check_config_placeholders(sc["config"], f"{name}: config")
 
     labels, kinds = _validate_steps(sc["steps"], f"{name}: steps",
                                     fixtures_dir)

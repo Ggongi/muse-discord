@@ -73,10 +73,10 @@ PAYLOAD_FIELDS = (
     "author_id", "content", "media", "documents", "unviewable", "history",
     "may_generate", "owner_command", "welcome", "welcome_prompt",
     "reply_to", "burst", "burst_fragments", "from_bot", "bot_turns",
-    "participants")
+    "participants", "follow_up", "settings")
 
 # Env vars the worker run has no business seeing. The SUT token stays:
-# bin/discord-api.py may resolve it through bot.token_env.
+# bin/discord-api.py may resolve it through token_from (env:NAME).
 SCRUB_ENV = ("E2E_DRIVER_A_TOKEN", "E2E_DRIVER_B_TOKEN")
 
 # Seam fills for the test install (SETUP.md step 7).
@@ -158,18 +158,22 @@ def open_items(pkg, answered=None):
 
 def persona_file(pkg, override=None):
     """The persona path: the override (the e2e test persona) when given,
-    else config.yaml persona.file relative to the package dir, default
-    persona.md, the way the wake hook resolves it."""
+    else config.yaml `persona` (old layout: persona.file) relative to
+    the package dir, default persona.md, the way the wake hook resolves
+    it."""
     if override:
         return override
     name = None
     try:
         import yaml
         with open(os.path.join(pkg, "config.yaml")) as f:
-            name = ((yaml.safe_load(f) or {}).get("persona") or {}) \
-                .get("file")
+            name = (yaml.safe_load(f) or {}).get("persona")
+        if isinstance(name, dict):
+            name = name.get("file")
+        if not isinstance(name, str):
+            name = None
     except Exception:
-        pass
+        name = None
     return os.path.join(pkg, os.path.expanduser(name or "persona.md"))
 
 
@@ -553,7 +557,7 @@ def main(argv=None):
     ap.add_argument("--poll", type=float, default=POLL_SECS)
     ap.add_argument("--persona", default=DEFAULT_PERSONA,
                     help="persona file (default: the e2e test persona; "
-                    "'' = config.yaml persona.file)")
+                    "'' = config.yaml persona)")
     ap.add_argument("--hook", action="store_true",
                     help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
@@ -568,7 +572,7 @@ def main(argv=None):
         signal.signal(sig, lambda *_: stop.set())
     worker.log("claude worker up: pkg=%s claude=%s timeout=%ss persona=%s"
                % (pkg, claude_bin(), args.timeout, worker.persona or
-                  "config.yaml persona.file"))
+                  "config.yaml persona"))
     while not stop.is_set():
         try:
             worker.poll()

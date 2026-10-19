@@ -1,0 +1,32 @@
+# Conversational follow-ups (who.replies: conversational, the
+# default): after the bot's reply to a person is actually sent, that
+# person's next message in the same channel within 120 s
+# (FOLLOW_UP_WINDOW_SECS) counts as addressed, with no @mention and no
+# Discord reply. q2 is such a plain message: exactly one more reply,
+# threaded under q2, from a queue item marked follow_up: true (q1's
+# own item, a direct mention, is not). The monitor logs it as
+# "Queued <kind> (follow-up) ...". Catches: the window never opening,
+# opening without the follow_up mark, or q2 answered twice.
+id: follow_up_answered
+tier: 1
+title: "A plain follow-up right after the bot's reply gets an answer"
+steps:
+  - send: { as: a, text: "<@SUT> what's a good name for a cat?", label: q1 }
+  - wait_for: { sut_messages: 1, timeout: 60 }
+  - send: { as: a, text: "and one for a dog, too", label: q2 }
+  - wait_for: { sut_messages: 2, timeout: 60 }
+expect:
+  settle: 15
+  checks:
+    - sut_reply_count: { eq: 2 }
+    - replies_to_any: [q1, q2]
+    - latency: { from: q2, max: 30 }
+    - content_matches: "^ack 1$"
+    - no_duplicate_replies: true
+    - queue_item: { label: q1, follow_up: false }
+    - queue_item:
+        label: q2
+        follow_up: true
+        settings: { where: server, speaker: owner, audience: public }
+    - ledger_status: { label: q2, status: replied }
+    - log_contains: "^Queued \\w+ \\(follow-up\\) from "

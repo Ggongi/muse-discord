@@ -18,12 +18,13 @@
 #     scheduled run waits up to LOCK_WAIT_SECS for a running one to
 #     finish; a hook run just leaves the work to the run in progress.
 #
-# Fully automatic: both processes read the bot token themselves from the
-# configured token file (bot.token_file in config.yaml, mode 600), or
-# from the environment variable named by bot.token_env, which must then
-# be set in this script's own environment (the processes inherit it).
-# This script never uses the token value; it only checks that one of the
-# two is present.
+# Fully automatic: both processes read the bot token themselves from
+# where token_from in config.yaml points (old layout: bot.token_file /
+# bot.token_env): a token file (mode 600), or an environment variable,
+# which must then be set in this script's own environment (the processes
+# inherit it). This script never uses the token value; it only checks
+# that one of the two is present. Settings are read through
+# muse_settings.py, so both config layouts work.
 #
 # Output contract (for whatever scheduler runs this, e.g. cron):
 #   - "OK ..." lines for healthy or recovered state.
@@ -31,7 +32,7 @@
 #     attention. Repeat runs while the same failure persists print
 #     "OK (already alerted)".
 #   - "UPDATE: ..." printed ONCE per new release, a vX.Y.Z tag (checked
-#     at most daily; updates.check in config.yaml turns it off). Never an
+#     at most daily; updates.notify in config.yaml turns it off). Never an
 #     alert, and the watchdog never applies updates: see UPDATING.md.
 #   - State lives in watchdog_state.json and update_check.json; log in
 #     watchdog.log.
@@ -104,49 +105,70 @@ alive() { pgrep -f "^python3 $1" >/dev/null 2>&1; }
 get_state() { python3 -c "import json;print(json.load(open('$STATE')).get('last_alert',''))" 2>/dev/null || echo ""; }
 set_state() { python3 -c "import json;json.dump({'last_alert':\"$1\"},open('$STATE','w'))" 2>/dev/null; }
 
-# Read one config value with the same YAML the monitor uses. Prints the
-# fallback (arg 2) when the config or key is missing.
-cfg_get() {
-  python3 - "$CONFIG" "$1" "$2" <<'PYEOF' 2>/dev/null || echo "$2"
+# Read one setting (token_file, token_env, presence_enabled,
+# updates_notify) the way the monitor does: through muse_settings.py,
+# which reads both config layouts. Without that module next to this
+# script, straight from the old layout's keys. Prints the fallback
+# (arg 2) when it cannot tell (an invalid config: the monitor then
+# refuses to start and says why in monitor.log).
+setting() {
+  python3 - "$DIR" "$CONFIG" "$1" "$2" <<'PYEOF' 2>/dev/null || echo "$2"
+import os
 import sys
+d, cfg, name, fallback = sys.argv[1:5]
+sys.path.insert(0, d)
 try:
+    import muse_settings
+except ImportError:
+    muse_settings = None
+try:
+    if muse_settings is not None:
+        st = muse_settings.load(cfg, os.path.join(d, "plugins"))
+        print(muse_settings.shell_value(st, name, d))
+        sys.exit(0)
     import yaml
-    with open(sys.argv[1]) as f:
-        cfg = yaml.safe_load(f) or {}
-    cur = cfg
-    for part in sys.argv[2].split("."):
+    with open(cfg) as f:
+        cur = yaml.safe_load(f) or {}
+    old = {"token_file": "bot.token_file", "token_env": "bot.token_env",
+           "presence_enabled": "presence.enabled",
+           "updates_notify": "updates.check"}[name]
+    for part in old.split("."):
         cur = (cur or {}).get(part)
         if cur is None:
             break
     if cur is None:
-        print(sys.argv[3] if len(sys.argv) > 3 else "")
+        print(fallback)
     elif isinstance(cur, bool):
         print("true" if cur else "false")
     else:
         print(cur)
+except SystemExit:
+    raise
 except Exception:
-    print(sys.argv[3] if len(sys.argv) > 3 else "")
+    print(fallback)
 PYEOF
 }
 
-TOKEN_FILE="$(cfg_get bot.token_file "$HOME/.config/muse-discord/bot_token")"
+TOKEN_FILE="$(setting token_file "$HOME/.config/muse-discord/bot_token")"
 TOKEN_FILE="${TOKEN_FILE/#\~/$HOME}"
-TOKEN_ENV="$(cfg_get bot.token_env "")"
-PRESENCE_ENABLED="$(cfg_get presence.enabled true)"
+TOKEN_ENV="$(setting token_env "")"
+PRESENCE_ENABLED="$(setting presence_enabled true)"
 HEARTBEAT="$DIR/monitor.heartbeat"
 HEARTBEAT_STALE_SECS=600
 
-# True when the processes will find a token: the bot.token_env variable
-# set in this environment (they inherit it), or a non-empty token file.
+# True when the processes will find a token: the token_from variable set
+# in this environment (they inherit it), or a non-empty token file.
 token_available() {
   if [[ "$TOKEN_ENV" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
       && [ -n "${!TOKEN_ENV:-}" ]; then
     return 0
   fi
-  [ -s "$TOKEN_FILE" ]
+  [ -n "$TOKEN_FILE" ] && [ -s "$TOKEN_FILE" ]
 }
-if [ -n "$TOKEN_ENV" ]; then
+if [ -n "$TOKEN_ENV" ] && [ -n "$TOKEN_FILE" ]; then
   TOKEN_WHERE="env var \$$TOKEN_ENV unset and no token file at $TOKEN_FILE"
+elif [ -n "$TOKEN_ENV" ]; then
+  TOKEN_WHERE="env var \$$TOKEN_ENV unset"
 else
   TOKEN_WHERE="no token file at $TOKEN_FILE"
 fi
@@ -491,7 +513,7 @@ elif cmd == "record":
 PYEOF
 )
 upd_py() { python3 -c "$UPD_PY" "$DIR" "$UPDATE_STATE" "$@" 2>/dev/null; }
-if [ "$(cfg_get updates.check true)" = "true" ] \
+if [ "$(setting updates_notify true)" = "true" ] \
     && git -C "$DIR" remote get-url origin >/dev/null 2>&1; then
   now=$(date +%s)
   last_check="$(upd_get checked)"

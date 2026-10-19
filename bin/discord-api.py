@@ -17,10 +17,11 @@ server settings, webhooks, roles, and anything else are NOT implemented:
 if the owner asks for something outside this list, the worker says so
 honestly instead of improvising.
 
-The bot token is resolved exactly like monitor.py's: the package
-config.yaml (../config.yaml relative to this file, or
-MUSE_DISCORD_CONFIG) bot.token_env env var first, then bot.token_file
-(mode 600). The token is never printed.
+The bot token is resolved exactly like monitor.py's: token_from in the
+package config.yaml (../config.yaml relative to this file, or
+MUSE_DISCORD_CONFIG), read through muse_settings.py so both config
+layouts work (old layout: the bot.token_env env var first, then
+bot.token_file, mode 600). The token is never printed.
 """
 import json
 import mimetypes
@@ -72,14 +73,38 @@ def _bot_cfg():
         return {}
 
 
+def _token_sources():
+    """token_from as [("env", NAME) | ("file", path)], in order."""
+    path = os.environ.get("MUSE_DISCORD_CONFIG") or os.path.join(
+        PACKAGE_DIR, "config.yaml")
+    try:
+        sys.path.insert(0, PACKAGE_DIR)
+        import muse_settings
+        return muse_settings.load(
+            path, os.path.join(PACKAGE_DIR, "plugins")).token_sources()
+    except Exception:
+        bot = _bot_cfg()  # the old layout, read directly
+        out = [("env", bot["token_env"])] if bot.get("token_env") else []
+        return out + [("file", bot.get("token_file")
+                       or "~/.config/muse-discord/bot_token")]
+
+
 def _load_token():
-    bot = _bot_cfg()
-    env_name = bot.get("token_env")
-    if env_name and os.environ.get(env_name):
-        return os.environ[env_name].strip()
-    token_file = os.path.expanduser(
-        bot.get("token_file") or "~/.config/muse-discord/bot_token")
-    with open(token_file) as f:
+    files = []
+    for kind, where in _token_sources():
+        if kind == "env":
+            if where and os.environ.get(where):
+                return os.environ[where].strip()
+            continue
+        files.append(where)
+        try:
+            with open(os.path.expanduser(where)) as f:
+                return f.read().strip()
+        except OSError:
+            continue
+    # Nothing readable: fail the way a missing token file always did.
+    with open(os.path.expanduser(
+            files[-1] if files else "~/.config/muse-discord/bot_token")) as f:
         return f.read().strip()
 
 

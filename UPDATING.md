@@ -11,7 +11,8 @@ Commands run from `<package dir>`. Never print the bot token.
 
 Updates never need to overwrite these, so never discard them:
 
-- `config.yaml` (untracked) and the token file.
+- `config.yaml` (untracked), its backups, `config.discord.yaml`
+  (settings changed through the bot, if any), and the token file.
 - `persona.md`: tracked as a placeholder, rewritten during setup.
   Upstream never changes it, so it never conflicts.
 - Custom plugins: their own folders under `plugins/` (untracked).
@@ -135,7 +136,12 @@ only releases, and skips any release HEAD already contains.
 - **Config**: `git diff "$OLD" HEAD -- config.example.yaml` shows new
   settings. Every new setting has a safe default in the code, so an
   older `config.yaml` keeps working. Mention each new setting to the
-  owner and add only what they want to `config.yaml`.
+  owner and add only what they want to `config.yaml`. Then run
+  `python3 bin/settings.py validate` (if the release has it) and fix
+  what it reports before the restart.
+- **Settings layout** (once, when updating from a release without
+  `bin/settings.py`): see "Converting to the new settings layout"
+  below.
 - **Action needed** items from the CHANGELOG: walk through each one
   with the owner and do the ones they agree to.
 - **Worker prompt**: `git diff "$OLD" HEAD --
@@ -149,6 +155,48 @@ only releases, and skips any release HEAD already contains.
   describes (main chat, ~60 s poll, its wake prompt). From then on
   the owner can start an update from the bot's update DM. If the
   script changed and the runtime registered a copy, update the copy.
+
+### Converting to the new settings layout
+
+This release reorganized `config.yaml` (see `config.example.yaml`).
+An old-layout file keeps working unchanged: the bot reads it, maps
+every old setting to its new name, and logs one line saying so. So
+converting is optional, and never done without the owner.
+
+1. Tell the owner, in plain words: the bot works as before; the file
+   can be converted to the new, shorter layout, which is easier to
+   read and needed for per-server and per-channel settings; their
+   current file is kept as a backup. One thing does change either
+   way: in servers the bot now also answers the person it just
+   replied to when they keep talking within about 2 minutes. If they
+   prefer the old behavior, after converting, set
+   `all_servers.who.replies: when-addressed`.
+2. Only with their OK, convert:
+
+   ```bash
+   python3 bin/settings.py migrate
+   ```
+
+   It writes the new `config.yaml`, keeps the old one as a
+   timestamped backup next to it, and prints any difference in
+   effective behavior. The only expected difference is the
+   conversational replies above; it refuses to write if anything
+   else would change.
+
+   The backup is `config.yaml.bak-<UTC time>`. migrate does not
+   prompt, so ask the owner before running it; `--dry-run` shows
+   what it would write without writing.
+
+3. Show the owner the new `config.yaml` and what migrate printed,
+   then run `python3 bin/settings.py validate`.
+4. If the owner wants to undo it, copy the backup back over
+   `config.yaml`; the old layout still works.
+
+Reinstall the worker prompt for this release, not only the seams'
+diff: the new SETTINGS section is how the Muse learns each place's
+reply length, house rules, and how much of the owner's memory it may
+use. Apply `worker-prompt.template.md` from the release to the
+installed prompt, keeping what the owner put inside the seams.
 
 ## Step 5: Restart
 
@@ -189,5 +237,6 @@ If the new version misbehaves and the owner wants to roll back:
   changes go under its version heading. The first release, `v1.0.0`,
   is tagged once the update DM ships; installs then on main are
   offered it unless their HEAD already contains it.
-- Every new config setting gets a default in `DEFAULT_CONFIG`
-  (monitor.py) so existing `config.yaml` files keep working.
+- Every new config setting gets a built-in default in the settings
+  code (`muse_settings.py`) so existing `config.yaml` files keep
+  working, and every renamed one keeps mapping from its old name.

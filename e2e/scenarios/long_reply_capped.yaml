@@ -1,7 +1,7 @@
 # The fake worker drafts a 3500-character reply. What the monitor
 # guarantees (normalize_parts / sanitize_reply, PROTOCOL.md
 # "Guardrails"): the TOTAL across all parts is trimmed to
-# behavior.max_reply_chars (default 1800, used here) and each message
+# engine.max_reply_chars (default 1800, used here) and each message
 # is clamped to Discord's 2000. It trims, it does not split, so the
 # total should be just under 1800 (rstrip may eat a few characters).
 # Catches: the over-long send failing (400 on every retry -> no reply),
