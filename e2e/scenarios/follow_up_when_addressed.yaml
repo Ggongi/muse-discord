@@ -1,0 +1,29 @@
+# who.replies: when-addressed turns the follow-up window off: only an
+# @mention or a Discord reply to the bot is answered, so A's plain
+# message right after the bot's reply (c1) gets nothing. Set on the
+# test server (servers.<id>, a server-scope override). q2 is the
+# liveness control. Catches: the window ignoring the setting, or the
+# server scope not applied.
+id: follow_up_when_addressed
+tier: 1
+title: "With who.replies when-addressed, a plain follow-up gets no answer"
+config:
+  servers:
+    "{{GUILD_ID}}":
+      who:
+        replies: when-addressed
+steps:
+  - send: { as: a, text: "<@SUT> how do I boil an egg?", label: q1 }
+  - wait_for: { sut_messages: 1, timeout: 60 }
+  - send: { as: a, text: "and how long for a soft one?", label: c1 }
+  - wait: 20
+  - send: { as: a, text: "<@SUT> hello again", label: q2 }
+  - wait_for: { sut_messages: 2, timeout: 60 }
+expect:
+  settle: 10
+  checks:
+    - no_sut_reply_to: c1
+    - sut_reply_count: { eq: 2 }
+    - replies_to_any: [q1, q2]
+    - latency: { from: q2, max: 30 }
+    - log_lacks: "\\(follow-up\\)"

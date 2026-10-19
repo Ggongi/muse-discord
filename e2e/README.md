@@ -86,9 +86,50 @@ The monitor logs a WARNING at startup while it is set. It is absent
 from `config.example.yaml` on purpose: never set it in a real
 install.
 
-In the test config, driver A is the owner (`owners.user_ids`) and
-listed in `treat_as_human`. Driver B is listed too, unless a scenario
-sets `b_is_bot: true` to exercise the bot-to-bot path.
+In the test config, driver A is the owner (`owners`) and listed in
+`treat_as_human`. Driver B is listed too, unless a scenario sets
+`b_is_bot: true` to exercise the bot-to-bot path.
+
+## The test config
+
+`config.test.yaml` is the SUT's `config.yaml` in the settings layout
+(`muse_settings.py`): `owners` (driver A), `token_from` and `persona`
+(filled in by `sut.py`), `everywhere` / `dms` with the shipped
+defaults written out, the test server under `servers."<id>"` (with
+`who.replies: conversational`), and an `engine:` block with fast
+timings (REST poll 10 s, coalesce 5 s). `sut.py` always forces
+presence off and `updates.notify: off`. A scenario's `config:` is
+deep-merged on top and may use `{{GUILD_ID}}`, `{{A_ID}}` and
+`{{B_ID}}`, in keys too:
+
+```yaml
+config:
+  servers:
+    "{{GUILD_ID}}":
+      who:
+        ignore: ["{{B_ID}}"]
+```
+
+One scenario, `legacy_config_mention`, sets `legacy_config: true` and
+runs under `config.legacy.yaml`, the old layout (`bot:`, `behavior:`,
+`safety:`, `owners.user_ids`), on purpose: an old `config.yaml` must
+keep working unchanged, and the monitor must print its one-line
+"uses the old layout" notice.
+
+What the settings scenarios cannot cover on Discord:
+
+- Owner DMs. Driver A, the owner, is a bot, and Discord does not let
+  a bot DM another bot. The never_share hold DM (with **Send anyway**
+  / **Discard**) therefore fails, and the monitor logs "no owner
+  reachable"; `never_share_hold` checks the hold in `state.json`, the
+  skipped ledger entry, and that nothing was posted, not the DM or its
+  buttons. For the same reason there are no `who.dms_from` scenarios.
+- The follow-up window's expiry. It is a 120 s constant in
+  `monitor.py` (`FOLLOW_UP_WINDOW_SECS`), not a setting, so testing it
+  would take a 2-minute wait per run;
+  `tests/test_settings_layout.py` covers it offline.
+- `role:<id>` entries in `who.allow` / `who.ignore`: the drivers hold
+  no roles in the test server.
 
 ## Running locally
 
@@ -107,7 +148,7 @@ python3 e2e/run.py --tree . --tier 1 --scenario mention_basic \
 ```
 
 The harness runs `monitor.py` itself, from a copy of the tree, with
-`updates.check: false` (no update DMs to the owner) and presence off.
+`updates.notify: off` (no update DMs to the owner) and presence off.
 Neither `watchdog.sh` nor the wake hook runs, so nothing restarts the
 monitor behind a scenario's `kill_monitor` step.
 
@@ -152,8 +193,17 @@ scenario of the same tier as a starting point. Steps are `send`,
 gateway off or on), `converse`, and `delete: <label>` (the driver
 that sent that message deletes it; checks can still name the label).
 In tier 1, directives in a message's text (`[[slow]]`, `[[silent]]`,
-`[[long]]`, `[[everyone]]`, `[[mention_a]]`; see `fake_worker.py`)
-shape the fake worker's reply. Check it offline with
+`[[long]]`, `[[everyone]]`, `[[mention_a]]`, `[[say:<text>]]`; see
+`fake_worker.py`) shape the fake worker's reply. Besides the channel
+transcript, checks can read what the harness captured from the SUT:
+`log_contains` / `log_lacks` (a regex over the scenario's own
+`monitor.log`), `held` (a never_share hold in `state.json` for a
+label's message), `ledger_status`, `quarantined`, and, in tier 1,
+`queue_item` (the queue item the fake worker got for a label's
+message: `follow_up`, `kind`, `from_bot`, `owner_command`, and
+fields of its `settings` card). A scenario may set `config:`
+overrides or `legacy_config: true` (see "The test config"); either
+restarts the monitor for that scenario. Check it offline with
 `python3 e2e/run.py --tree . --tier 1 --dry-run` (or `--tier 2`).
 A tier-2 rubric should state plain pass criteria the judge can verify
 from the transcript alone, such as "replies once, in the lighthouse

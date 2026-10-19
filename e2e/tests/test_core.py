@@ -228,6 +228,7 @@ class FakeSUT:
         self.calls = []
         self.die_after = None  # alive() turns False after N checks
         self.cleaned = False
+        self.configs = []      # every config start() was given
         FakeSUT.instances.append(self)
 
     def effective_config(self, cfg):
@@ -245,6 +246,7 @@ class FakeSUT:
         self.gateway = gateway
         if config is not None:
             self.config = config
+            self.configs.append(config)
         self.running = True
 
     def stop(self, kill=False):
@@ -266,6 +268,12 @@ class FakeSUT:
 
     def log_tail(self, n=200):
         return f"log line; token={FAKE_TOKEN}"
+
+    def log_size(self):
+        return 7
+
+    def log_since(self, offset, max_bytes=None):
+        return f"since {offset}: Queued mention; token={FAKE_TOKEN}"
 
     def cleanup(self):
         self.cleaned = True
@@ -369,33 +377,87 @@ class ConfigTests(unittest.TestCase):
         text = json.dumps(cfg)
         self.assertNotIn("{{", text.replace("{{TOKEN_FILE}}", "")
                          .replace("{{PERSONA_FILE}}", ""))
+        self.assertFalse(sut.is_old_layout(cfg))
+        self.assertEqual(cfg["owners"], ["20"])
+        self.assertEqual(cfg["engine"]["guild_ids"], ["10"])
+        self.assertEqual(cfg["servers"]["10"]["who"]["replies"],
+                         "conversational")
+        self.assertEqual(cfg["testing"]["treat_as_human"], ["20", "30"])
+        self.assertEqual(cfg["presence"]["enabled"], "off")
+        self.assertEqual(cfg["updates"]["notify"], "off")
+        self.assertEqual(cfg["engine"]["rest_poll_seconds"], 10)
+        self.assertEqual(sut.guild_of(cfg), "10")
+
+    def test_legacy_template(self):
+        cfg = sut.base_config("10", "20", "30", legacy=True)
+        self.assertTrue(sut.is_old_layout(cfg))
         self.assertEqual(cfg["owners"]["user_ids"], ["20"])
         self.assertEqual(cfg["bot"]["guild_ids"], ["10"])
         self.assertEqual(cfg["behavior"]["active_guild_ids"], ["10"])
         self.assertEqual(cfg["testing"]["treat_as_human"], ["20", "30"])
         self.assertFalse(cfg["presence"]["enabled"])
         self.assertFalse(cfg["updates"]["check"])
-        self.assertEqual(cfg["engine"]["rest_poll_seconds"], 10)
+        self.assertEqual(sut.guild_of(cfg), "10")
+
+    def test_layout_detection(self):
+        self.assertTrue(sut.is_old_layout({"behavior": {}}))
+        self.assertTrue(sut.is_old_layout({"owners": {"user_ids": []}}))
+        self.assertTrue(sut.is_old_layout({"persona": {"file": "p"}}))
+        self.assertFalse(sut.is_old_layout({"owners": ["1"]}))
+        self.assertFalse(sut.is_old_layout({}))
+        self.assertIsNone(sut.guild_of({}))
 
     def test_missing_list_placeholder_dropped(self):
         cfg = sut.render_config({"l": ["{{A}}", "{{B}}"], "s": "{{B}}"},
                                 {"A": 1})
         self.assertEqual(cfg, {"l": ["1"], "s": None})
 
+    def test_placeholder_keys(self):
+        cfg = sut.render_config({"servers": {"{{G}}": {"x": "{{G}}"},
+                                             "{{H}}": 1}}, {"G": 10})
+        self.assertEqual(cfg, {"servers": {"10": {"x": "10"}, "{{H}}": 1}})
+
     def test_scenario_config(self):
         base = sut.base_config("10", "20", "30")
-        c = sut.scenario_config(base, {"b_is_bot": True,
-                                       "config": {"behavior": {"bots": "off"}}},
-                                "20", "30")
+        c = sut.scenario_config(base, {"b_is_bot": True, "config": {
+            "everywhere": {"who": {"bots": "ignore"}}}}, "20", "30")
         self.assertEqual(c["testing"]["treat_as_human"], ["20"])
-        self.assertEqual(c["behavior"]["bots"], "off")
-        self.assertEqual(c["behavior"]["coalesce_seconds"], 5)
-        self.assertEqual(base["behavior"]["bots"], "direct")  # untouched
+        self.assertEqual(c["everywhere"]["who"]["bots"], "ignore")
+        self.assertEqual(c["engine"]["coalesce_seconds"], 5)
+        self.assertEqual(base["everywhere"]["who"]["bots"],
+                         "when-addressed")  # untouched
         c2 = sut.scenario_config(base, {}, "20", "30")
         self.assertEqual(c2["testing"]["treat_as_human"], ["20", "30"])
         c3 = sut.scenario_config(
             base, {"config": {"testing": {"treat_as_human": []}}}, "20", "30")
         self.assertEqual(c3["testing"]["treat_as_human"], [])
+
+    def test_scenario_config_placeholders(self):
+        base = sut.base_config("10", "20", "30")
+        c = sut.scenario_config(base, {"config": {"servers": {"{{GUILD_ID}}": {
+            "who": {"ignore": ["{{B_ID}}"], "replies": "when-addressed"}}}}},
+            "20", "30")
+        srv = c["servers"]["10"]
+        self.assertEqual(srv["who"]["ignore"], ["30"])
+        self.assertEqual(srv["who"]["replies"], "when-addressed")
+        self.assertEqual(srv["name"], "e2e test server")  # deep-merged
+        self.assertNotIn("{{GUILD_ID}}", c["servers"])
+
+    def test_scenario_config_legacy(self):
+        base = sut.base_config("10", "20", "30")
+        c = sut.scenario_config(base, {"legacy_config": True, "b_is_bot": True,
+                                       "config": {"behavior": {"bots": "off"}}},
+                                "20", "30")
+        self.assertTrue(sut.is_old_layout(c))
+        self.assertNotIn("everywhere", c)
+        self.assertEqual(c["bot"]["guild_ids"], ["10"])
+        self.assertEqual(c["owners"]["user_ids"], ["20"])
+        self.assertEqual(c["behavior"]["bots"], "off")
+        self.assertEqual(c["testing"]["treat_as_human"], ["20"])
+        mine = {"bot": {"guild_ids": ["10"]}}
+        self.assertEqual(sut.scenario_config(
+            base, {"legacy_config": True}, "20", "30", legacy_base=mine)
+            ["bot"], {"guild_ids": ["10"]})
 
 
 FAKE_MONITOR = r'''
@@ -464,12 +526,38 @@ class SUTTests(unittest.TestCase):
         import yaml
         with open(os.path.join(pkg, "config.yaml")) as f:
             cfg = yaml.safe_load(f)
-        self.assertEqual(cfg["bot"]["token_file"], self.s.token_file)
+        self.assertEqual(cfg["token_from"], self.s.token_file)
+        self.assertNotIn("bot", cfg)  # never a mixed layout
         self.assertEqual(cfg["engine"]["rest_poll_seconds"], 10)
+        self.assertEqual(cfg["presence"]["enabled"], "off")
+        self.assertEqual(cfg["updates"]["notify"], "off")
+        self.assertTrue(os.path.exists(cfg["persona"]))
+        self.assertNotIn(FAKE_TOKEN, json.dumps(cfg))
+
+    def test_legacy_config_forced_fields(self):
+        legacy = sut.scenario_config(sut.base_config("10", "20", "30"),
+                                     {"legacy_config": True}, "20", "30")
+        cfg = self.s.effective_config(legacy)
+        self.assertEqual(cfg["bot"]["token_file"], self.s.token_file)
+        self.assertIsNone(cfg["bot"]["token_env"])
+        self.assertNotIn("token_from", cfg)
         self.assertFalse(cfg["presence"]["enabled"])
         self.assertFalse(cfg["updates"]["check"])
+        self.assertNotIn("notify", cfg["updates"])
         self.assertTrue(os.path.exists(cfg["persona"]["file"]))
-        self.assertNotIn(FAKE_TOKEN, json.dumps(cfg))
+        self.assertEqual(cfg["engine"]["rest_poll_seconds"], 10)
+
+    def test_log_since(self):
+        s = self.s
+        self.assertEqual(s.log_size(), 0)
+        self.assertEqual(s.log_since(0), "")
+        with open(s.log_path, "w") as f:
+            f.write("old line\n")
+        mark = s.log_size()
+        with open(s.log_path, "a") as f:
+            f.write("new line 1\nnew line 2\n")
+        self.assertEqual(s.log_since(mark), "new line 1\nnew line 2\n")
+        self.assertEqual(s.log_since(mark, max_bytes=11), "new line 2\n")
 
     def test_lifecycle_and_gateway_off(self):
         s = self.s
@@ -487,9 +575,10 @@ class SUTTests(unittest.TestCase):
         self.assertIn("Gateway READY", s.log_tail(2))
         s.stop(kill=True)
         self.assertFalse(s.alive())
-        s.start(config=sut.deep_merge(self.cfg, {"behavior": {"bots": "off"}}))
+        s.start(config=sut.deep_merge(
+            self.cfg, {"everywhere": {"who": {"bots": "ignore"}}}))
         s.wait_ready(20)
-        self.assertEqual(s.config["behavior"]["bots"], "off")
+        self.assertEqual(s.config["everywhere"]["who"]["bots"], "ignore")
         s.stop()
         self.assertFalse(s.alive())
 
@@ -527,7 +616,7 @@ class FakeWorkerTests(unittest.TestCase):
         shutil.copy(os.path.join(REPO, "bin", "outbox-append.py"),
                     os.path.join(self.pkg, "bin"))
         with open(os.path.join(self.pkg, "config.yaml"), "w") as f:
-            f.write(f'owners: {{user_ids: ["{A_ID}"]}}\n')
+            f.write(f'owners: ["{A_ID}"]\n')
 
     def tearDown(self):
         shutil.rmtree(self.pkg, ignore_errors=True)
@@ -599,6 +688,64 @@ class FakeWorkerTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             w2 = fake_worker.Worker(self.pkg, clock=lambda: now[0])
             self.assertEqual(w2.tick(), 0)
+
+
+    def test_say_directive(self):
+        out, _ = fake_worker.build_reply(
+            queue_item("301", "hi [[say:the Blue Pelican]] there"))
+        self.assertEqual(out["text"], "ack 1 the Blue Pelican")
+        out, _ = fake_worker.build_reply(queue_item(
+            "302", "[[say:one]] x", [("303", "[[say: two ]]")]))
+        self.assertEqual(out["text"], "ack 2 one two")
+        out, _ = fake_worker.build_reply(
+            queue_item("304", "[[say:x]] [[silent]]"))
+        self.assertTrue(out["silent"])
+        out, _ = fake_worker.build_reply(queue_item("305", "[[say:]] hi"))
+        self.assertEqual(out["text"], "ack 1")
+        self.assertEqual(fake_worker.directives(queue_item("306", "x")),
+                         set())
+
+    def test_items_recorded(self):
+        fu = queue_item("401", "and a dog?")
+        fu.update(follow_up=True, from_bot=False, owner_command=True,
+                  settings={"where": "server", "speaker": "owner"})
+        self.write_queue([fu, queue_item("402", "x", [("403", "y")])])
+        w = fake_worker.Worker(self.pkg, clock=lambda: 1000.0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            w.tick()
+            w.tick()  # nothing new: nothing recorded twice
+        recs = fake_worker.load_json(
+            os.path.join(self.pkg, fake_worker.WORKER_ITEMS), None)
+        self.assertEqual([r["message_id"] for r in recs], ["401", "402"])
+        self.assertIs(recs[0]["follow_up"], True)
+        self.assertEqual(recs[0]["settings"]["speaker"], "owner")
+        self.assertIs(recs[0]["owner_command"], True)
+        self.assertEqual(recs[1]["fragment_ids"], ["403"])
+        self.assertIsNone(recs[1]["follow_up"])
+        self.assertFalse(os.path.exists(os.path.join(
+            self.pkg, fake_worker.WORKER_ITEMS + ".tmp")))
+
+    def test_records_are_bounded(self):
+        many = [{"message_id": str(i)} for i in range(5)]
+        old = fake_worker.WORKER_ITEMS_KEEP
+        fake_worker.WORKER_ITEMS_KEEP = 3
+        try:
+            fake_worker.record_items(self.pkg, many[:2])
+            fake_worker.record_items(self.pkg, many[2:])
+        finally:
+            fake_worker.WORKER_ITEMS_KEEP = old
+        recs = fake_worker.load_json(
+            os.path.join(self.pkg, fake_worker.WORKER_ITEMS), None)
+        self.assertEqual([r["message_id"] for r in recs], ["2", "3", "4"])
+
+    def test_driver_a_id_both_layouts(self):
+        self.assertEqual(fake_worker.driver_a_id(self.pkg), A_ID)
+        with open(os.path.join(self.pkg, "config.yaml"), "w") as f:
+            f.write('owners: {user_ids: ["55"]}\nbot: {}\n')
+        self.assertEqual(fake_worker.driver_a_id(self.pkg), "55")
+        with open(os.path.join(self.pkg, "config.yaml"), "w") as f:
+            f.write("owners: []\n")
+        self.assertIsNone(fake_worker.driver_a_id(self.pkg))
 
 
 class RunHelperTests(unittest.TestCase):
@@ -759,8 +906,12 @@ class RunFlowTests(unittest.TestCase):
                        {"action": "start_monitor"}],
              "expect": {"settle": 1,
                         "checks": [{"sut_reply_count": {"eq": 2}}]}},
+            {"id": "old_layout", "tier": 1, "title": "t",
+             "legacy_config": True,
+             "steps": [{"send": {"as": "a", "text": "<@SUT> hi"}}],
+             "expect": {"checks": [{"log_contains": "Queued mention"}]}},
             {"id": "too_many", "tier": 1, "title": "t", "b_is_bot": True,
-             "config": {"behavior": {"bots": "off"}},
+             "config": {"everywhere": {"who": {"bots": "ignore"}}},
              "steps": [{"send": {"as": "a", "text": "<@SUT> hi"}}],
              "expect": {"checks": [{"sut_reply_count": {"eq": 5}}]}},
             {"id": "tier_two", "tier": 2, "title": "t", "steps": []},
@@ -769,7 +920,9 @@ class RunFlowTests(unittest.TestCase):
         self.assertEqual(code, 1, out)  # too_many fails its check
         results, summary = self.outputs()
         by = {r["scenario"]: r for r in results}
-        self.assertEqual(set(by), {"mention_basic", "too_many"})
+        self.assertEqual(set(by), {"mention_basic", "old_layout",
+                                   "too_many"})
+        self.assertEqual(by["old_layout"]["status"], "pass", by)
         self.assertEqual(by["mention_basic"]["status"], "pass", by)
         self.assertEqual(by["too_many"]["status"], "fail")
         self.assertIsNone(by["mention_basic"]["judge"])
@@ -782,6 +935,10 @@ class RunFlowTests(unittest.TestCase):
                          ["a", "sut", "b", "sut"])
         self.assertEqual(tr["messages"][2]["reply_to"], tr["messages"][1]["id"])
         self.assertIn("[REDACTED]", tr["monitor_log_tail"])
+        self.assertEqual(tr["monitor_log"],
+                         "since 7: Queued mention; token=[REDACTED]")
+        self.assertIn("holds", tr["sut_files"])
+        self.assertIn("worker_items", tr["sut_files"])
         self.assertEqual(sorted(self.guild.deleted),
                          sorted(self.guild.channels))
         fs = FakeSUT.instances[0]
@@ -789,9 +946,17 @@ class RunFlowTests(unittest.TestCase):
         self.assertIn(("start", False), fs.calls)   # gateway_off
         self.assertIn(("kill",), fs.calls)
         # too_many ran under its own config, B not treated as human.
-        cfgs = [c for c in [fs.config]]
-        self.assertEqual(cfgs[0]["behavior"]["bots"], "off")
-        self.assertEqual(cfgs[0]["testing"]["treat_as_human"], ["20"])
+        self.assertEqual(fs.config["everywhere"]["who"]["bots"], "ignore")
+        self.assertEqual(fs.config["testing"]["treat_as_human"], ["20"])
+        # old_layout ran under the old-layout config, then back to the
+        # base config (new layout) before too_many.
+        layouts = [sut.is_old_layout(c) for c in fs.configs]
+        self.assertIn(True, layouts)
+        self.assertFalse(layouts[-1])
+        old = fs.configs[layouts.index(True)]
+        self.assertEqual(old["owners"]["user_ids"], ["20"])
+        self.assertFalse(sut.is_old_layout(fs.configs[layouts.index(True)
+                                                      + 1]))
         self.assertTrue(summary.startswith("<!-- muse-discord-e2e -->"))
         self.assert_no_tokens()
 

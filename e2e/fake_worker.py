@@ -18,13 +18,23 @@ fragments), unless the item's text (any fragment) carries a directive:
   [[mention_a]]  the reply mentions driver A as <@id> (driver A is the
                  config's first owner; --a-id overrides)
   [[slow]]       wait 15 s before writing the outbox item
+  [[say:<text>]] the reply goes on with " <text>" after `ack <n>` (the
+                 never_share scenario plants a listed phrase this way)
 
 Directives combine ([[slow]] [[long]] is a slow long reply); [[silent]]
-wins over the rest. Runs until SIGTERM. Never reads the token.
+wins over the rest.
+
+Every queue item it handles is also recorded in
+<pkg>/e2e_worker_items.json (its ids, kind, follow_up, from_bot,
+owner_command and settings card; the newest 200), so the harness can
+check what the monitor queued (run.py copies it into the transcript;
+the queue_item check reads it). Runs until SIGTERM. Never reads the
+token.
 """
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -32,6 +42,10 @@ import time
 
 LONG_CHARS = 3500
 SLOW_SECS = 15.0
+WORKER_ITEMS = "e2e_worker_items.json"
+WORKER_ITEMS_KEEP = 200
+FLAGS = ("silent", "long", "everyone", "mention_a", "slow")
+SAY_RE = re.compile(r"\[\[say:([^\]]*)\]\]")
 
 
 def load_json(path, default):
@@ -43,12 +57,15 @@ def load_json(path, default):
 
 
 def driver_a_id(pkg):
-    """Driver A is the test config's (only) owner."""
+    """Driver A is the test config's (only) owner: `owners: [id]`, or
+    owners.user_ids in the old layout."""
     try:
         import yaml
         with open(os.path.join(pkg, "config.yaml")) as f:
             cfg = yaml.safe_load(f) or {}
-        owners = (cfg.get("owners") or {}).get("user_ids") or []
+        owners = cfg.get("owners") or []
+        if isinstance(owners, dict):
+            owners = owners.get("user_ids") or []
         return str(owners[0]) if owners else None
     except Exception:
         return None
@@ -65,8 +82,50 @@ def item_texts(item):
 
 def directives(item):
     text = item_texts(item)
-    return {d for d in ("silent", "long", "everyone", "mention_a", "slow")
-            if f"[[{d}]]" in text}
+    found = {d for d in FLAGS if f"[[{d}]]" in text}
+    if SAY_RE.search(text):
+        found.add("say")
+    return found
+
+
+def say_text(item):
+    """The text of every distinct [[say:<text>]] directive, in order,
+    joined (item_texts repeats a burst's fragments)."""
+    out = []
+    for t in SAY_RE.findall(item_texts(item)):
+        if t.strip() and t.strip() not in out:
+            out.append(t.strip())
+    return " ".join(out)
+
+
+def item_record(item):
+    """What e2e_worker_items.json keeps about one queue item."""
+    return {"message_id": item.get("message_id"),
+            "fragment_ids": [f.get("message_id") for f in
+                             item.get("burst_fragments") or []
+                             if isinstance(f, dict)],
+            "channel_id": item.get("channel_id"),
+            "kind": item.get("kind"),
+            "follow_up": item.get("follow_up"),
+            "from_bot": item.get("from_bot"),
+            "owner_command": item.get("owner_command"),
+            "settings": item.get("settings")}
+
+
+def record_items(pkg, items):
+    """Append records to <pkg>/e2e_worker_items.json (atomic replace,
+    newest WORKER_ITEMS_KEEP kept)."""
+    if not items:
+        return
+    path = os.path.join(pkg, WORKER_ITEMS)
+    data = load_json(path, [])
+    if not isinstance(data, list):
+        data = []
+    data = (data + [item_record(i) for i in items])[-WORKER_ITEMS_KEEP:]
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=1)
+    os.replace(tmp, path)
 
 
 def build_reply(item, a_id=None):
@@ -88,6 +147,8 @@ def build_reply(item, a_id=None):
     text = f"ack {n}"
     if "mention_a" in flags and a_id:
         text += f" <@{a_id}>"
+    if "say" in flags and say_text(item):
+        text += " " + say_text(item)
     if "everyone" in flags:
         text += f" @everyone <@&{item.get('guild_id')}>"
     if "long" in flags:
@@ -131,15 +192,21 @@ class Worker:
             self.a_id = driver_a_id(self.pkg)
         queue = load_json(os.path.join(self.pkg, "reply_queue.json"), [])
         now = self.clock()
+        seen = []
         for item in queue if isinstance(queue, list) else []:
             mid = str(item.get("message_id") or "")
             if not mid or mid in self.answered:
                 continue
             self.answered.add(mid)
+            seen.append(item)
             out, delay = build_reply(item, self.a_id)
             print(f"item {mid}: {sorted(directives(item)) or 'ack'}"
                   f"{f' (in {delay:.0f}s)' if delay else ''}", flush=True)
             self.scheduled.append((now + delay, out))
+        try:
+            record_items(self.pkg, seen)
+        except OSError as e:
+            print(f"could not record items: {e}", flush=True)
         written, kept = 0, []
         for t, o in self.scheduled:
             if t <= now and append_outbox(self.pkg, [o]):

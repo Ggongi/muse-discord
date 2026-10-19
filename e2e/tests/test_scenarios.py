@@ -78,7 +78,11 @@ class RealScenarios(unittest.TestCase):
             "unaddressed_chatter", "burst_coalesce", "injection_quarantined",
             "bot_direct", "silent_item", "long_reply_capped", "no_mass_ping",
             "restart_mid_send", "gateway_down_poll",
-            "two_mentions_two_replies", "reply_to_deleted"}, t1)
+            "two_mentions_two_replies", "reply_to_deleted",
+            "legacy_config_mention", "follow_up_answered",
+            "follow_up_closed_by_other_address", "follow_up_not_for_others",
+            "follow_up_when_addressed", "ignore_user", "never_share_hold"},
+            t1)
         self.assertLessEqual({
             "persona_voice", "bot_conversation_ends", "burst_coherent",
             "stranger_owner_command", "owner_request", "image_seen",
@@ -138,6 +142,41 @@ class RealScenarios(unittest.TestCase):
                             == c["quarantined"])
                 t = scenario.render(send["text"], IDS).lower()
                 self.assertTrue(any(re.search(p, t) for p in pats), sc["id"])
+
+    def test_exactly_one_legacy_scenario(self):
+        legacy = [s["id"] for s in self.all if s.get("legacy_config")]
+        self.assertEqual(legacy, ["legacy_config_mention"])
+
+    def test_follow_up_messages_are_plain(self):
+        """A follow-up must not address the bot directly, or the
+        scenario tests the mention path instead."""
+        for sid, labels in (("follow_up_answered", ["q2"]),
+                            ("follow_up_not_for_others", ["c1", "c2"]),
+                            ("follow_up_when_addressed", ["c1"]),
+                            ("follow_up_closed_by_other_address",
+                             ["c0", "c1", "c2"])):
+            sc = next(s for s in self.all if s["id"] == sid)
+            sends = {st["send"]["label"]: st["send"] for st in sc["steps"]
+                     if "send" in st and "label" in st["send"]}
+            for label in labels:
+                send = sends[label]
+                self.assertNotIn("<@SUT>", send["text"], (sid, label))
+                self.assertNotEqual(send.get("reply_to"), "last_sut",
+                                    (sid, label))
+
+    def test_follow_ups_inside_the_window(self):
+        """Waits between the bot's reply and a follow-up stay well inside
+        monitor.py's FOLLOW_UP_WINDOW_SECS (wait_for timeouts are upper
+        bounds: count them fully)."""
+        with open(os.path.join(REPO, "monitor.py")) as f:
+            window = int(re.search(r"^FOLLOW_UP_WINDOW_SECS = (\d+)$",
+                                   f.read(), re.M).group(1))
+        for sid in ("follow_up_answered", "follow_up_not_for_others"):
+            sc = next(s for s in self.all if s["id"] == sid)
+            first = next(i for i, st in enumerate(sc["steps"])
+                         if "wait_for" in st)
+            waits = sum(st.get("wait", 0) for st in sc["steps"][first + 1:])
+            self.assertLess(waits + 30, window, sid)
 
     def test_bare_name_scenario_has_no_mention_in_q1(self):
         sc = next(s for s in self.all if s["id"] == "bare_name_ignored")
@@ -218,6 +257,26 @@ class Negative(unittest.TestCase):
         sc = base()
         sc["config"] = ["x"]
         self.bad(sc, "config")
+
+    def test_legacy_config_bool(self):
+        sc = base()
+        sc["legacy_config"] = "yes"
+        self.bad(sc, "legacy_config", "true/false")
+        sc["legacy_config"] = True
+        scenario.validate(sc)
+
+    def test_config_placeholders(self):
+        sc = base()
+        sc["config"] = {"servers": {"{{GUILD_ID}}": {"who": {
+            "ignore": ["{{B_ID}}", "{{ A_ID }}"]}}}}
+        scenario.validate(sc)
+        for bad, where in (
+                ({"servers": {"{{GUILD}}": {}}}, "servers.{{GUILD}}"),
+                ({"who": {"ignore": ["{{SUT_ID}}"]}}, "who.ignore[0]"),
+                ({"x": "id {{A_ID}}"}, "config.x"),
+                ({"x": "{{A_ID}}{{B_ID}}"}, "config.x")):
+            sc["config"] = bad
+            self.bad(sc, where, "bad placeholder")
 
     def test_tier2_needs_rubric(self):
         sc = base()
@@ -435,6 +494,20 @@ class Negative(unittest.TestCase):
             ({"content_matches": "("}, "invalid regular expression"),
             ({"content_matches": ""}, "content_matches"),
             ({"total_chars": {"max": "x"}}, "total_chars.max"),
+            ({"log_contains": "("}, "invalid regular expression"),
+            ({"log_lacks": ""}, "log_lacks"),
+            ({"held": "q9"}, "unknown label 'q9'"),
+            ({"queue_item": {"label": "q1"}}, "at least one field"),
+            ({"queue_item": {"follow_up": True}}, "label"),
+            ({"queue_item": {"label": "q1", "follow_up": "yes"}},
+             "queue_item.follow_up"),
+            ({"queue_item": {"label": "q1", "kind": ""}}, "queue_item.kind"),
+            ({"queue_item": {"label": "q1", "settings": {}}},
+             "queue_item.settings"),
+            ({"queue_item": {"label": "q1", "settings": "x"}},
+             "queue_item.settings"),
+            ({"queue_item": {"label": "q1", "speaker": "owner"}},
+             "unknown field(s) speaker"),
         ]
         for chk, frag in cases:
             sc = base()

@@ -1,5 +1,5 @@
 # A Discord reply to one of the bot's messages is direct address even
-# without an @mention (behavior.respond_to: reply_to_bot). B's reply
+# without an @mention (who.replies: when-addressed and up). B's reply
 # carries no <@SUT>; the runner must send driver replies with
 # allowed_mentions.replied_user = false, or Discord lists the SUT in
 # the reply's mentions and the mention path answers instead, hiding a
