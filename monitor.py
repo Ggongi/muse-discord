@@ -684,12 +684,28 @@ def discover_threads_for_guild(gid, gname, names_by_id, known_ids,
                                             previous))
 
 
+# Brand-new threads. A thread created since the previous successful
+# thread listing of its guild (or since the monitor started) is seeded at
+# its own id, not at its newest message: a mention posted in it before
+# the gateway event was drained would otherwise sit at or below the
+# watermark, be skipped by the drain as "poll already handled", and wait
+# for the sweep. Its whole (short) history is read by the poll instead;
+# the gateway/poll dedup (gw_seen, the watermark) keeps that to one
+# reply. Older threads seen for the first time keep the usual seeding:
+# their history is history.
+MONITOR_STARTED = time.time()
+NEW_THREAD_SLACK_SECS = 60   # clock skew between us and Discord
+_THREADS_LISTED = {}         # guild id -> when its threads were last listed
+_NEW_THREADS = set()         # thread ids to seed at their start
+
+
 def discover_threads_iter(gid, gname, names_by_id, known_ids,
                           perms_by_id=None, previous=None):
     """discover_threads_for_guild as a generator that yields after each
     request (see discover_channels_iter)."""
     out = {}
     previous = previous or {}
+    listed_at = time.time()
     try:
         resp = api_get(f"/guilds/{gid}/threads/active")
     except Exception as e:
@@ -699,6 +715,9 @@ def discover_threads_iter(gid, gname, names_by_id, known_ids,
                 and t not in known_ids}
     finally:
         yield
+    since = _THREADS_LISTED.get(gid, MONITOR_STARTED) \
+        - NEW_THREAD_SLACK_SECS
+    _THREADS_LISTED[gid] = listed_at
     for t in resp.get("threads", []):
         tid = t["id"]
         if tid in known_ids or tid in out:
@@ -726,6 +745,8 @@ def discover_threads_iter(gid, gname, names_by_id, known_ids,
                     "guild_id": gid, "guild_name": gname,
                     "can_send": can_send,
                     "thread": True, "parent_id": t.get("parent_id")}
+        if tid not in previous and _snowflake_ts(tid) >= since:
+            _NEW_THREADS.add(tid)
     return out
 
 
@@ -741,8 +762,17 @@ def seed_channel_seen(cid, cname, state):
     archived thread a new message brought back, keeps its watermark so
     the poll still reads what arrived in between. When the channel is
     empty or the read fails, the watermark is "now": the history stays
-    seen and the next message is still new."""
+    seen and the next message is still new. A brand-new thread (see
+    _NEW_THREADS) is seeded just below its own id instead, so the poll
+    reads every message in it (a forum post's first message has the
+    thread's id)."""
+    brand_new = cid in _NEW_THREADS
+    _NEW_THREADS.discard(cid)
     if cid in state["last_seen"]:
+        return
+    if brand_new and _is_snowflake(cid):
+        state["last_seen"][cid] = str(int(cid) - 1)
+        print(f"Tracking new thread #{cname} from its start.", flush=True)
         return
     try:
         msgs = api_get(f"/channels/{cid}/messages?limit=5")
@@ -2448,26 +2478,54 @@ def trigger_kind(msg, guild_id=None, state=None):
     address only, and never under who.bots: ignore; who.allow /
     who.ignore apply to everyone but the owners. The bot's own messages
     never trigger."""
+    return trigger_verdict(msg, guild_id, state)[0]
+
+
+def addresses_bot(msg):
+    """Direct address as bot.respond_to defines it: a platform @mention
+    or a Discord reply to the bot."""
+    return ("mention" in RESPOND_TO and is_mention(msg)) \
+        or ("reply_to_bot" in RESPOND_TO and is_reply_to_bot(msg))
+
+
+def trigger_verdict(msg, guild_id=None, state=None):
+    """trigger_kind plus why: (kind, refusal). refusal is set only when
+    the message addresses the bot directly (addresses_bot) and the
+    settings of its scope decline it; ordinary chatter gets None."""
     author = msg.get("author", {}) or {}
     if author.get("id") == BOT_ID:
-        return None
+        return None, None
     gid = guild_id or msg.get("guild_id") \
         or (CHANNELS.get(msg.get("channel_id")) or {}).get("guild_id")
     here = settings().resolve(scope_for(gid, msg.get("channel_id")))
     replies = here["who.replies"]
+    direct = addresses_bot(msg)
     if replies == "off":
-        return None
+        return None, "who.replies is off here" if direct else None
     if is_bot_author(author) and here["who.bots"] == "ignore":
-        return None
-    direct = ("mention" in RESPOND_TO and is_mention(msg)) \
-        or ("reply_to_bot" in RESPOND_TO and is_reply_to_bot(msg))
+        return None, "who.bots: ignore" if direct else None
     if not direct and not (state is not None
                            and replies == "conversational"
                            and follow_up_open(state, msg)):
-        return None
+        return None, None
     if not who_allows(msg, gid, here):
-        return None
-    return "mention" if direct else "follow_up"
+        return None, ("not allowed by who.allow / who.ignore"
+                      if direct else None)
+    return ("mention" if direct else "follow_up"), None
+
+
+def note_refused(msg, cname, reason):
+    """A message that addressed the bot directly but that the settings
+    decline: ledgered as skipped, so the reconciliation sweep (which
+    judges by the settings in force when it runs) never answers it
+    later, after a setting is relaxed. A deliberately ignored message
+    stays ignored. Ordinary chatter is never ledgered."""
+    author = msg.get("author", {}) or {}
+    ledger_record(msg["id"], "skipped", f"settings: {reason}",
+                  channel_id=msg.get("channel_id"),
+                  author=author.get("username"))
+    print(f"Not answering {author.get('username')} in {cname}: "
+          f"{reason}.", flush=True)
 
 
 def join_enabled(guild_id, channel_id):
@@ -3789,6 +3847,11 @@ def check_channel(channel_id, channel_name, state, guild_id=None):
     return triggers, joins
 
 
+# Message types people write: DEFAULT and REPLY. Everything else in a
+# channel is a system notice (join messages are handled before this).
+CONVERSATION_TYPES = (0, 19)
+
+
 def classify_message(state, msg, channel_name, guild_id=None):
     """Classify a single message exactly the way check_channel's loop does.
 
@@ -3804,16 +3867,26 @@ def classify_message(state, msg, channel_name, guild_id=None):
         # Welcomes are a plugin, on per scope (off in new servers).
         return "join" if join_enabled(guild_id, msg.get("channel_id")) \
             else None
+    if msg.get("type", 0) not in CONVERSATION_TYPES:
+        # Discord's system notices ("X pinned a message", "X started a
+        # thread", ...) carry the acting user as author: never a
+        # trigger, a follow-up or a fragment.
+        return None
     author = msg.get("author", {}) or {}
     if author.get("id") == BOT_ID:
         return None  # the bot's own messages: never triggers or fragments
     if is_bot_author(author) and settings().get(
             "who.bots", scope_for(guild_id, msg.get("channel_id"))) \
             == "ignore":
+        if addresses_bot(msg):
+            note_refused(msg, channel_name, "who.bots: ignore")
         return None
     if hold_fragment(state, msg.get("channel_id"), msg):
         return None  # folded into a burst already being coalesced
-    return trigger_kind(msg, guild_id, state)
+    kind, refusal = trigger_verdict(msg, guild_id, state)
+    if refusal:
+        note_refused(msg, channel_name, refusal)
+    return kind
 
 
 def is_join_message(msg):
@@ -3901,11 +3974,28 @@ def check_dm_channel(dm_id, dm_name, state):
         newest = max(new, key=lambda m: int(m["id"]))
         advance_rest_watermark(state, dm_id, newest["id"])
 
-    return [m for m in sorted(new, key=lambda m: int(m["id"]))
-            if m.get("author", {}).get("id") != BOT_USER_ID
-            and m["id"] not in gw_done
-            and dm_sender_allowed(m.get("author"))
-            and not hold_fragment(state, dm_id, m)]
+    out = []
+    for m in sorted(new, key=lambda m: int(m["id"])):
+        if m.get("author", {}).get("id") == BOT_USER_ID \
+                or m["id"] in gw_done \
+                or m.get("type", 0) not in CONVERSATION_TYPES:
+            continue
+        if not dm_sender_allowed(m.get("author")):
+            note_dm_refused(m)
+            continue
+        if not hold_fragment(state, dm_id, m):
+            out.append(m)
+    return out
+
+
+def note_dm_refused(msg):
+    """A DM the DM settings decline (dm_sender_allowed). Only an owner's
+    is ledgered (see note_refused): the sweep covers the owners' DM
+    channels only, and a stranger's DMs stay unrecorded."""
+    author = msg.get("author", {}) or {}
+    if author.get("id") in OWNER_USER_IDS and not is_bot_author(author):
+        note_refused(msg, "DM with " + (author.get("username") or "?"),
+                     "who.replies is off for DMs")
 
 
 def bot_run_length(history, msg):
@@ -4077,7 +4167,13 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
 
     # 2. Rate limits (also bound token spend). One charge per burst, not
     #    per fragment.
+    #    A capped burst is dropped at once, not retried: ledgered as
+    #    skipped (terminal), so flush_pending drops its pending entry
+    #    and the author's later messages are judged on their own.
     if not rate_allows(state, author_id, msg["channel_id"], scope):
+        ledger_record_many(burst_ids, "skipped", "daily cap reached",
+                           channel_id=msg.get("channel_id"),
+                           author=author_name)
         return False
     rate_record(state, author_id, scope)
 
@@ -5013,9 +5109,12 @@ def drain_gateway(state, inbox, channels):
                 note_gateway_seen(state, cid, m["id"])
                 continue  # own messages are context only
             if not dm_sender_allowed(author):
+                note_dm_refused(m)
                 continue
             record_history(state, cid, [m])
             note_gateway_seen(state, cid, m["id"])
+            if m.get("type", 0) not in CONVERSATION_TYPES:
+                continue  # a system notice (a pin): context only
             if hold_fragment(state, cid, m):
                 continue  # folded into a burst already being coalesced
             dms.append((m, "DM with " + (author.get("username") or cid)))
@@ -5089,10 +5188,13 @@ def sweep_mentions(state, queue, channels, dms=True):
             author = m.get("author", {}) or {}
             if author.get("id") == BOT_ID:
                 continue  # (other bots: trigger_kind applies behavior.bots)
+            if m.get("type", 0) not in CONVERSATION_TYPES:
+                continue  # a system notice (a pin, a new thread)
             if dm:
                 # Owner DM channels: every owner message is a trigger.
                 if is_bot_author(author) \
-                        or author.get("id") not in OWNER_USER_IDS:
+                        or author.get("id") not in OWNER_USER_IDS \
+                        or not dm_sender_allowed(author):
                     continue
             # Direct address only: follow-ups are never requeued.
             elif trigger_kind(m, info.get("guild_id")) != "mention":

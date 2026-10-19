@@ -6,6 +6,31 @@ entries below the releases are pre-release history. **Action
 needed** lists what an existing install must do after updating;
 UPDATING.md walks a Muse through it.
 
+## 2026-10-19: Daily limits, ignored mentions, threads and notices
+
+Fixed:
+
+- A message over a daily limit (`limits.per_day` /
+  `limits.per_person_per_day`) is now dropped right away. It used to
+  be retried for 15 minutes while the person's next messages there
+  were folded into it and went unanswered, and a restart could answer
+  it late. Their later messages are judged on their own.
+- A mention the settings tell the bot to ignore (replies off, someone
+  on the ignore list, other bots ignored, DMs off) stays ignored. It
+  used to get answered up to 6 hours later if the setting was relaxed
+  in the meantime. With DMs off, your own DMs are no longer answered
+  late either.
+- A mention in a brand-new thread or forum post could wait about 4
+  minutes for a reply when the bot noticed the thread at the same
+  moment. It is now answered right away.
+- Discord's own notices ("X pinned a message", "X started a thread")
+  no longer count as someone talking to the bot. Right after a reply,
+  a pin could get answered as a follow-up.
+
+**Action needed:**
+
+- None.
+
 ## 2026-10-19: Status line changes show up right away
 
 Fixed:

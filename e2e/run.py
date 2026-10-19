@@ -15,6 +15,14 @@ Flow: check env -> load scenarios -> create one channel per scenario ->
 start SUT + worker -> wait ready -> run scenarios one by one -> delete
 channels (unless --keep-channels) -> stop everything -> results.
 
+Before each scenario the monitor is (re)started when its config
+differs or when a config.discord.yaml overlay is present (deleted
+first, so a `settings` step never leaks into the next scenario). The
+transcript is the scenario channel's history merged with every thread
+the scenario started (one list, sorted by id), and records how many
+times the monitor was (re)started while the steps ran
+(monitor_restarts).
+
 Exit code: 1 when any scenario failed (or the scenarios do not load),
 else 0. "warn" (tier-2 judge said no while every check passed), "flake"
 (Discord or the SUT misbehaved outside the PR's control) and "skip"
@@ -29,6 +37,7 @@ Tokens never reach any file this writes: every string that goes to
 results, summary, transcripts, or the copied logs is redacted.
 """
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -73,6 +82,26 @@ TOKEN_RE = re.compile(
 SAMPLE_IDS = {"SUT": "100000000000000001", "A": "100000000000000002",
               "B": "100000000000000003", "SUT_NAME": "muse-test"}
 SAMPLE_GUILD = "100000000000000000"
+SAMPLE_CHANNEL = "100000000000000009"
+# settings step: how long to wait for the monitor to log the reload
+# (its main loop re-checks the files at least every ~2 s), and how
+# often to look.
+SETTINGS_TIMEOUT = 30
+SETTINGS_POLL_SECS = 0.5
+RELOADED_MARKER = "Settings reloaded"
+RELOAD_FAILED_MARKER = "Config re-read failed"
+# Discord system messages a thread creates (THREAD_CREATED, the
+# THREAD_STARTER_MESSAGE copy of the parent): not conversation.
+THREAD_SYSTEM_TYPES = (18, 21)
+# Driver bot permission integers (e2e/README.md): Create Public
+# Threads (1 << 35) and Send Messages in Threads (1 << 38) on top of
+# the original 101456 (A) / 101440 (B).
+CREATE_PUBLIC_THREADS = 1 << 35
+SEND_MESSAGES_IN_THREADS = 1 << 38
+DRIVER_PERMISSIONS = {
+    "a": 101456 | CREATE_PUBLIC_THREADS | SEND_MESSAGES_IN_THREADS,
+    "b": 101440 | SEND_MESSAGES_IN_THREADS,
+}
 
 
 class Flake(Exception):
@@ -226,10 +255,12 @@ def author_role(author_id, ids):
     return "other"
 
 
-def transcript_message(m, ids):
+def transcript_message(m, ids, thread=None):
+    """One transcript entry; thread is the label of the thread the
+    message was posted in (None: the scenario channel)."""
     author = m.get("author") or {}
     ref = m.get("message_reference") or {}
-    return {
+    out = {
         "id": m.get("id"),
         "author": author_role(author.get("id"), ids),
         "author_id": author.get("id"),
@@ -243,6 +274,9 @@ def transcript_message(m, ids):
         "mention_everyone": bool(m.get("mention_everyone")),
         "mention_roles": list(m.get("mention_roles") or []),
     }
+    if thread:
+        out["thread"] = thread
+    return out
 
 
 def _state_holds(the_sut):
@@ -253,7 +287,12 @@ def _state_holds(the_sut):
 
 
 def build_transcript(sc, channel_id, started_at, ids, labels,
-                     converse_turns, messages, the_sut, log_mark=None):
+                     converse_turns, messages, the_sut, log_mark=None,
+                     threads=None, monitor_restarts=None):
+    """threads: {thread label: thread id} for the threads the scenario
+    started; messages from those channels get their `thread` label."""
+    threads = dict(threads or {})
+    thread_of = {str(tid): lab for lab, tid in threads.items()}
     scenario_log = ""
     if the_sut is not None and log_mark is not None \
             and hasattr(the_sut, "log_since"):
@@ -265,7 +304,11 @@ def build_transcript(sc, channel_id, started_at, ids, labels,
         "ids": ids,
         "labels": labels,
         "converse_turns": converse_turns,
-        "messages": [transcript_message(m, ids) for m in messages],
+        "threads": threads,
+        "monitor_restarts": monitor_restarts,
+        "messages": [transcript_message(
+            m, ids, thread_of.get(str(m.get("channel_id"))))
+            for m in messages],
         "sut_files": {
             "quarantine": the_sut.read_json("quarantine.json")
             if the_sut else None,
@@ -288,6 +331,18 @@ def iso_now():
 
 # --- scenario execution ------------------------------------------------
 
+def missing_thread_permission(driver, perm, doing):
+    """The Flake message for a 403 from a thread call: the driver's
+    role predates the thread permissions (e2e/README.md)."""
+    want = DRIVER_PERMISSIONS.get(driver, 0) | SEND_MESSAGES_IN_THREADS
+    if perm == "Create Public Threads":
+        want |= CREATE_PUBLIC_THREADS
+    return (f"driver {driver.upper()} lacks {perm} (HTTP 403 {doing}). In "
+            f"the test server, Server Settings > Roles > driver-{driver}: "
+            f"enable Create Public Threads and Send Messages in Threads; "
+            f"or re-invite it with permissions={want} (e2e/README.md)")
+
+
 class Runner:
     """Plays scenarios against one SUT. Steps never fail a scenario on
     their own (a timeout just moves on; the checks judge the result);
@@ -304,12 +359,32 @@ class Runner:
         self.clock = clock
         self.monitor_expected = True
         self.notes = []  # per scenario: timeouts and the like
+        self.threads = {}  # per scenario: thread label -> thread id
+        self.starts = 0    # monitor (re)starts during the steps
+        self._ms = None    # the SUT's muse_settings module
 
     def history(self, channel_id):
-        return self.reader.history(channel_id, after=channel_id)
+        """One channel's (or thread's) messages, oldest first. Reading
+        after the channel's own id skips a thread's starter message,
+        which shares the id of the message the thread was started on."""
+        return [m for m in self.reader.history(channel_id, after=channel_id)
+                if m.get("type") not in THREAD_SYSTEM_TYPES]
 
-    def sut_messages(self, channel_id):
-        return [m for m in self.history(channel_id)
+    def scenario_history(self, channel_id):
+        """The channel plus every thread this scenario started, as one
+        list sorted by id."""
+        msgs = {}
+        for cid in [channel_id] + list(self.threads.values()):
+            for m in self.history(cid):
+                msgs[m["id"]] = m
+        return sorted(msgs.values(), key=lambda m: int(m["id"]))
+
+    def sut_messages(self, channel_id, threads=False):
+        """The SUT's messages in one channel or thread; threads=True:
+        in the channel and all of its threads."""
+        hist = self.scenario_history(channel_id) if threads \
+            else self.history(channel_id)
+        return [m for m in hist
                 if (m.get("author") or {}).get("id") == self.ids["SUT"]]
 
     def check_alive(self):
@@ -317,45 +392,70 @@ class Runner:
             raise Flake("monitor exited unexpectedly:\n"
                         + self.sut.log_tail(15))
 
+    def overlay_path(self):
+        return os.path.join(self.sut.pkg_dir, sut.OVERLAY_NAME)
+
     def ensure_config(self, cfg):
         """(Re)start the monitor under cfg (gateway on) unless it is
-        already running exactly that."""
-        if self.sut.alive() and self.sut.gateway \
+        already running exactly that with no config.discord.yaml. An
+        overlay (a `settings` step's live changes) is deleted while the
+        monitor is stopped, so it never leaks into the next scenario (and
+        the new process has no reload to log). Returns monitor.log's size
+        just before the new start (None when nothing was restarted)."""
+        overlay = os.path.exists(self.overlay_path())
+        if not overlay and self.sut.alive() and self.sut.gateway \
                 and self.sut.config == self.sut.effective_config(cfg):
-            return
-        log("restarting the monitor for this scenario's config")
+            return None
+        log("restarting the monitor for this scenario's config"
+            + (" (clearing config.discord.yaml)" if overlay else ""))
         self.sut.stop()
+        try:
+            os.unlink(self.overlay_path())
+        except FileNotFoundError:
+            pass
+        mark = self.sut.log_size() if hasattr(self.sut, "log_size") \
+            else None
         self.sut.start(gateway=True, config=cfg)
+        self.starts += 1
         self.sut.wait_ready(READY_TIMEOUT)
         self.monitor_expected = True
+        return mark
 
     def run(self, sc, channel_id):
         """Play one scenario; returns its transcript."""
         cfg = sut.scenario_config(self.base_cfg, sc, self.ids["A"],
-                                  self.ids["B"])
-        # Marked before the (re)start, so the scenario's log includes
-        # what its config prints at startup (the old-layout notice).
-        log_mark = self.sut.log_size() if hasattr(self.sut, "log_size") \
-            else None
-        self.ensure_config(cfg)
+                                  self.ids["B"], channel_id=channel_id)
+        # The scenario's log starts just before its config (re)start, so
+        # it includes what the config prints at startup (the old-layout
+        # notice) and nothing the previous process wrote; with no
+        # restart, it starts now.
+        log_mark = self.ensure_config(cfg)
+        if log_mark is None and hasattr(self.sut, "log_size"):
+            log_mark = self.sut.log_size()
         self.notes = []
+        self.threads = {}
+        self.starts = 0  # the restart above is not the scenario's
         started_at = iso_now()
         labels = {}
-        state = {"converse_turns": None, "senders": {}}
+        # senders: label -> driver; posted_in: label -> channel/thread id
+        state = {"converse_turns": None, "senders": {}, "posted_in": {}}
         for i, step in enumerate(sc.get("steps") or []):
             self.check_alive()
             self.step(step, channel_id, labels, state, i)
         self.check_alive()
         self.sleep(float((sc.get("expect") or {}).get("settle", 0) or 0))
-        msgs = self.history(channel_id)
+        msgs = self.scenario_history(channel_id)
         return build_transcript(sc, channel_id, started_at, self.ids,
                                 labels, state["converse_turns"], msgs,
-                                self.sut, log_mark=log_mark)
+                                self.sut, log_mark=log_mark,
+                                threads=self.threads,
+                                monitor_restarts=self.starts)
 
     def step(self, step, channel_id, labels, state, index):
         kind, arg = next(iter(step.items()))
         if kind == "send":
-            self.send(arg, channel_id, labels, state.get("senders"))
+            self.send(arg, channel_id, labels, state.get("senders"),
+                      state.get("posted_in"))
         elif kind == "wait":
             self.sleep(float(arg))
         elif kind == "wait_for":
@@ -365,7 +465,12 @@ class Runner:
         elif kind == "converse":
             state["converse_turns"] = self.converse(arg, channel_id)
         elif kind == "delete":
-            self.delete(arg, channel_id, labels, state.get("senders") or {})
+            self.delete(arg, channel_id, labels, state.get("senders") or {},
+                        state.get("posted_in") or {})
+        elif kind == "thread":
+            self.thread(arg, channel_id, labels)
+        elif kind == "settings":
+            self.settings(arg, channel_id)
         else:
             raise ValueError(f"step {index + 1}: unknown step {kind!r}")
 
@@ -379,36 +484,163 @@ class Runner:
             raise ValueError(f"reply_to: unknown label {ref!r}")
         return labels[ref]
 
-    def send(self, arg, channel_id, labels, senders=None):
+    def _thread_id(self, label):
+        if label not in self.threads:
+            raise ValueError(f"unknown thread label {label!r}")
+        return self.threads[label]
+
+    def send(self, arg, channel_id, labels, senders=None, posted_in=None):
+        """Post as a driver, in the scenario channel or (send.in) in one
+        of its threads; reply_to (and last_sut) resolve there."""
         bot = self.drivers[arg["as"]]
         text = scenario.render(arg.get("text", ""), self.ids)
         files = None
         if arg.get("attach"):
             files = [fixture_path(arg["attach"])]
-        msg = bot.send(channel_id, text,
-                       reply_to=self._reply_target(arg.get("reply_to"),
-                                                   channel_id, labels),
-                       files=files)
+        target = self._thread_id(arg["in"]) if arg.get("in") \
+            else channel_id
+        try:
+            msg = bot.send(target, text,
+                           reply_to=self._reply_target(arg.get("reply_to"),
+                                                       target, labels),
+                           files=files)
+        except discord_rest.DiscordError as e:
+            if arg.get("in") and e.status == 403:
+                raise Flake(missing_thread_permission(
+                    arg["as"], "Send Messages in Threads",
+                    f"posting in thread {arg['in']!r}")) from None
+            raise
         if arg.get("label"):
             labels[arg["label"]] = msg["id"]
             if senders is not None:
                 senders[arg["label"]] = arg["as"]
+            if posted_in is not None:
+                posted_in[arg["label"]] = target
         return msg
 
-    def delete(self, label, channel_id, labels, senders):
-        """The driver that sent the label's message deletes it (its id
-        stays in labels, so checks can still name it)."""
+    def delete(self, label, channel_id, labels, senders, posted_in=None):
+        """The driver that sent the label's message deletes it, where it
+        was posted (its id stays in labels, so checks can still name
+        it)."""
         if label not in labels:
             raise ValueError(f"delete: unknown label {label!r}")
         self.drivers[senders.get(label, "a")].delete_message(
-            channel_id, labels[label])
+            (posted_in or {}).get(label, channel_id), labels[label])
+
+    def thread(self, arg, channel_id, labels):
+        """A driver (default a) starts a public thread on a labelled
+        channel message; later steps reach it by its label."""
+        who = arg.get("as", "a")
+        src = arg["from"]
+        if src not in labels:
+            raise ValueError(f"thread: unknown label {src!r}")
+        try:
+            th = self.drivers[who].start_thread(channel_id, labels[src],
+                                                arg["name"])
+        except discord_rest.DiscordError as e:
+            if e.status == 403:
+                raise Flake(missing_thread_permission(
+                    who, "Create Public Threads",
+                    f"starting a thread on {src!r}")) from None
+            raise
+        self.threads[arg["label"]] = th["id"]
+        return th
+
+    # --- settings step ---
+
+    def settings_module(self):
+        """The SUT's own muse_settings.py (the PR's code, in pkg),
+        imported once."""
+        if self._ms is None:
+            path = os.path.join(self.sut.pkg_dir, "muse_settings.py")
+            if not os.path.isfile(path):
+                raise ValueError("settings step: the tree under test has "
+                                 "no muse_settings.py")
+            spec = importlib.util.spec_from_file_location(
+                "_e2e_sut_muse_settings", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            self._ms = mod
+        return self._ms
+
+    def scope_path(self, scope, channel_id):
+        """muse_settings scope path of a settings step scope."""
+        if scope in ("everywhere", "dms"):
+            return (scope,)
+        gid = sut.guild_of(self.base_cfg)
+        if not gid:
+            raise ValueError("settings step: the base config names no "
+                             "test server")
+        if scope == "server":
+            return ("servers", gid)
+        if scope == "channel":
+            return ("servers", gid, "channels", str(channel_id))
+        raise ValueError(f"settings step: unknown scope {scope!r}")
+
+    def settings(self, arg, channel_id):
+        """Change a setting live, the way /settings does (settings_ui ->
+        muse_settings.set_value / reset / undo on <pkg>/config.yaml,
+        by driver A, the owner), then wait for the monitor to log the
+        reload. A timeout is a note, not a failure. Returns True when
+        the reload was seen."""
+        ms = self.settings_module()
+        config_path = os.path.join(self.sut.pkg_dir, "config.yaml")
+        plugins_dir = os.path.join(self.sut.pkg_dir, "plugins")
+        by = str(self.ids["A"])
+        op = next(k for k in ("set", "reset", "undo") if k in arg)
+        scope = arg["undo"] if op == "undo" else arg["scope"]
+        path = self.scope_path(scope, channel_id)
+        mark = self.sut.log_size()
+        if op == "set":
+            key = ms.format_key(path, arg["set"])
+            ms.set_value(config_path, key, arg["value"], by, plugins_dir)
+            what = f"set {key} = {arg['value']!r}"
+        elif op == "reset":
+            key = ms.format_key(path, arg["reset"])
+            ms.reset(config_path, key, by, plugins_dir)
+            what = f"reset {key}"
+        else:
+            key = ms.undo(config_path, ms.scope_prefix(path), by,
+                          plugins_dir)
+            if key is None:
+                note = f"settings undo at {scope}: nothing to undo"
+                log(note)
+                self.notes.append(note)
+                return False
+            what = f"undo {key}"
+        log(f"settings: {what}")
+        return self._wait_reload(mark, float(arg.get("timeout",
+                                                     SETTINGS_TIMEOUT)),
+                                 what)
+
+    def _wait_reload(self, mark, timeout, what):
+        deadline = self.clock() + timeout
+        while True:
+            text = self.sut.log_since(mark)
+            if RELOADED_MARKER in text:
+                return True
+            if RELOAD_FAILED_MARKER in text:
+                note = (f"settings {what}: the monitor rejected the change "
+                        f"({RELOAD_FAILED_MARKER})")
+                log(note)
+                self.notes.append(note)
+                return False
+            if self.clock() >= deadline:
+                note = (f"settings {what}: no \"{RELOADED_MARKER}\" in "
+                        f"monitor.log after {timeout:.0f}s")
+                log(note)
+                self.notes.append(note)
+                return False
+            self.check_alive()
+            self.sleep(SETTINGS_POLL_SECS)
 
     def wait_for(self, arg, channel_id):
         timeout = float(arg.get("timeout", 60))
         deadline = self.clock() + timeout
         while True:
             if "sut_messages" in arg:
-                done = len(self.sut_messages(channel_id)) \
+                # The channel and every thread the scenario started.
+                done = len(self.sut_messages(channel_id, threads=True)) \
                     >= int(arg["sut_messages"])
             elif arg.get("outbox_processing"):
                 done = os.path.exists(os.path.join(
@@ -447,6 +679,7 @@ class Runner:
             self.sut.restart(gateway=True)
         else:
             raise ValueError(f"unknown action {name!r}")
+        self.starts += 1
         self.sut.wait_ready(READY_TIMEOUT)
         self.monitor_expected = True
 
@@ -535,7 +768,7 @@ def dry_run(args, scenarios):
           f"{len(scenarios)} scenario(s)")
     for sc in scenarios:
         steps = sc.get("steps") or []
-        kinds = [next(iter(s)) for s in steps]
+        kinds = [describe_step(s) for s in steps]
         expect = (sc.get("expect") or {}).get("checks") or []
         names = [next(iter(c)) if isinstance(c, dict) else str(c)
                  for c in expect]
@@ -555,6 +788,28 @@ def dry_run(args, scenarios):
         if extra:
             print(f"    {'; '.join(extra)}")
     return 0
+
+
+def describe_step(step):
+    """A step for the --dry-run plan: its kind, plus the details of the
+    thread / settings steps and of a send into a thread."""
+    kind, arg = next(iter(step.items()))
+    if not isinstance(arg, dict):
+        return kind
+    if kind == "send" and arg.get("in"):
+        return f"send in {arg['in']}"
+    if kind == "thread":
+        return (f"thread {arg.get('label')} on {arg.get('from')} "
+                f"(as {arg.get('as', 'a')})")
+    if kind == "settings":
+        if "undo" in arg:
+            return f"settings undo @{arg['undo']}"
+        if "set" in arg:
+            return (f"settings set {arg['set']}={arg.get('value')!r} "
+                    f"@{arg.get('scope')}")
+        if "reset" in arg:
+            return f"settings reset {arg['reset']} @{arg.get('scope')}"
+    return kind
 
 
 def channel_name(tag, sid):

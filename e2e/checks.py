@@ -15,6 +15,13 @@ sut_files.worker_items (the queue items the fake worker handled, with
 follow_up and the settings card), and monitor_log (monitor.log written
 during the scenario; monitor_log_tail when that is missing).
 
+Threads. run.py merges the history of every thread a scenario started
+into messages (one list, sorted by id); a message from a thread has
+`thread` set to the thread's label. Every check sees them like channel
+messages: a label of a message sent in a thread works anywhere a label
+does, and the SUT's replies in a thread count toward replies_to,
+sut_reply_count and the rest.
+
 A "SUT message" is any transcript message with author "sut". A SUT
 message "replies to" a label when its Discord reply reference
 (reply_to) is that label's message id. Every detail string names what
@@ -441,6 +448,18 @@ def check_queue_item(spec, tr):
     return True, f"{where}: " + ", ".join(good)
 
 
+def check_monitor_restarts(spec, tr):
+    """How many times the harness (re)started the monitor while the
+    scenario's steps ran (the restart for its config, before the first
+    step, is not counted)."""
+    n = tr.get("monitor_restarts")
+    if not isinstance(n, int) or isinstance(n, bool):
+        return False, (f"transcript has no monitor_restarts count (got "
+                       f"{n!r})")
+    ok, want = _count_ok(n, spec)
+    return ok, f"{n} monitor (re)start(s) during the steps, {want}"
+
+
 CHECKS = {
     "sut_reply_count": check_sut_reply_count,
     "replies_to": check_replies_to,
@@ -461,6 +480,7 @@ CHECKS = {
     "log_lacks": check_log_lacks,
     "held": check_held,
     "queue_item": check_queue_item,
+    "monitor_restarts": check_monitor_restarts,
 }
 
 

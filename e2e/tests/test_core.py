@@ -148,6 +148,9 @@ class Guild:
         self.sut_id = sut_id
         self.sut_limit = sut_limit
         self.sut_replies = {}
+        self.threads = []          # (bot id, parent, message id, name)
+        self.no_threads = False    # start_thread -> 403
+        self.no_thread_send = False  # send in a thread -> 403
 
     def new_id(self):
         self.n += 1
@@ -191,7 +194,28 @@ class FakeBot:
         return {"id": self.uid, "username": f"bot{self.uid}"}
 
     def send(self, cid, content, reply_to=None, files=None):
+        if self.guild.no_thread_send and any(
+                t[2] == cid for t in self.guild.threads):
+            raise discord_rest.DiscordError(
+                "POST -> HTTP 403: Missing Permissions", status=403)
         return self.guild.post(cid, self.uid, content, reply_to, files)
+
+    def start_thread(self, cid, mid, name):
+        """Like Discord: the thread's id is the message's id, its first
+        message a THREAD_STARTER_MESSAGE (type 21) with that same id,
+        and the parent may get a THREAD_CREATED (type 18) notice."""
+        if self.guild.no_threads:
+            raise discord_rest.DiscordError(
+                "POST -> HTTP 403: Missing Permissions", status=403)
+        self.guild.threads.append((self.uid, cid, mid, name))
+        self.guild.channels[mid] = [{
+            "id": mid, "channel_id": mid, "type": 21, "content": "",
+            "author": {"id": self.uid}, "message_reference": {
+                "message_id": mid, "channel_id": cid}}]
+        self.guild.channels[cid].append({
+            "id": self.guild.new_id(), "channel_id": cid, "type": 18,
+            "content": name, "author": {"id": self.uid}})
+        return {"id": mid, "type": 11, "parent_id": cid, "name": name}
 
     def history(self, cid, after=None):
         return [m for m in self.guild.channels.get(cid, [])
@@ -281,6 +305,77 @@ class FakeSUT:
         shutil.rmtree(self.pkg_dir, ignore_errors=True)
 
 
+class SettingsSUT(FakeSUT):
+    """A FakeSUT with the real muse_settings.py and plugins in pkg, a
+    real config.yaml, and a monitor.log that, like the monitor's
+    settings Watcher, logs "Settings reloaded" once per change of
+    config.discord.yaml it notices (on any log read while running)."""
+    reload_line = "Settings reloaded (config.yaml or config.discord.yaml " \
+        "changed).\n"
+
+    def __init__(self, tree=None, run_dir=None, base_config=None,
+                 token=None):
+        super().__init__(tree, run_dir, base_config, token)
+        shutil.copy(os.path.join(REPO, "muse_settings.py"), self.pkg_dir)
+        shutil.copytree(os.path.join(REPO, "plugins"),
+                        os.path.join(self.pkg_dir, "plugins"))
+        self.log = ""
+        self.overlays = []  # the overlay doc at each logged reload
+        self.react = self.reload_line
+        self._sig = None
+        if base_config is not None:
+            self._write(base_config)
+
+    def _write(self, cfg):
+        token = os.path.join(self.pkg_dir, "tok")
+        persona = os.path.join(self.pkg_dir, "persona.md")
+        for path in (token, persona):
+            with open(path, "w") as f:
+                f.write("x\n")
+        stand_in = types.SimpleNamespace(token_file=token,
+                                         persona_file=persona)
+        import yaml
+        with open(os.path.join(self.pkg_dir, "config.yaml"), "w") as f:
+            yaml.safe_dump(sut.SUT.effective_config(stand_in, cfg), f)
+
+    def overlay(self):
+        return os.path.join(self.pkg_dir, sut.OVERLAY_NAME)
+
+    def _overlay_sig(self):
+        try:
+            st = os.stat(self.overlay())
+            return (st.st_mtime_ns, st.st_ino, st.st_size)
+        except OSError:
+            return None
+
+    def start(self, gateway=True, config=None):
+        super().start(gateway, config)
+        if config is not None:
+            self._write(config)
+        self._sig = self._overlay_sig()
+        self.log += "===== e2e: start monitor =====\n"
+
+    def _poll(self):
+        sig = self._overlay_sig()
+        if self.running and sig != self._sig:
+            self._sig = sig
+            self.log += self.react
+            import yaml
+            try:
+                with open(self.overlay()) as f:
+                    self.overlays.append(yaml.safe_load(f))
+            except OSError:
+                self.overlays.append(None)
+
+    def log_size(self):
+        self._poll()
+        return len(self.log)
+
+    def log_since(self, offset, max_bytes=None):
+        self._poll()
+        return self.log[offset:]
+
+
 # ---------------------------------------------------------------------
 
 class DiscordRestTests(unittest.TestCase):
@@ -364,6 +459,24 @@ class DiscordRestTests(unittest.TestCase):
         with self.assertRaises(discord_rest.DiscordError):
             b.delete_message("55", "8")
 
+    def test_start_thread(self):
+        b = self.bot([(201, {"id": "7", "type": 11, "parent_id": "55"}, {}),
+                      (403, {"message": "Missing Permissions",
+                             "code": 50013}, {})])
+        th = b.start_thread("55", "7", "side chat " + "x" * 200)
+        self.assertEqual(th["id"], "7")
+        req = b._open.requests[0]
+        self.assertEqual(req.get_method(), "POST")
+        self.assertTrue(req.full_url.endswith(
+            "/channels/55/messages/7/threads"))
+        body = json.loads(req.data)
+        self.assertEqual(body["auto_archive_duration"], 60)
+        self.assertEqual(len(body["name"]), 100)
+        with self.assertRaises(discord_rest.DiscordError) as cm:
+            b.start_thread("55", "8", "again")
+        self.assertEqual(cm.exception.status, 403)
+        self.assertFalse(cm.exception.transient)
+
     def test_snowflake_roundtrip(self):
         t = 1760000000.0
         self.assertAlmostEqual(
@@ -443,6 +556,16 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(srv["name"], "e2e test server")  # deep-merged
         self.assertNotIn("{{GUILD_ID}}", c["servers"])
 
+    def test_scenario_config_channel_placeholder(self):
+        base = sut.base_config("10", "20", "30")
+        sc = {"config": {"servers": {"{{GUILD_ID}}": {
+            "who": {"replies": "off"},
+            "channels": {"{{CHANNEL_ID}}": {"replies": "when-addressed"}}}}}}
+        c = sut.scenario_config(base, sc, "20", "30", channel_id="77")
+        self.assertEqual(c["servers"]["10"]["channels"],
+                         {"77": {"replies": "when-addressed"}})
+        self.assertEqual(c["servers"]["10"]["who"]["replies"], "off")
+
     def test_scenario_config_legacy(self):
         base = sut.base_config("10", "20", "30")
         c = sut.scenario_config(base, {"legacy_config": True, "b_is_bot": True,
@@ -495,6 +618,7 @@ class SUTTests(unittest.TestCase):
         with open(os.path.join(self.tree, "monitor.py"), "w") as f:
             f.write(FAKE_MONITOR)
         for name in ("state.json", "config.yaml", ".git/HEAD",
+                     "config.discord.yaml", "config.yaml.bak-20260101-0000",
                      "bin/outbox-append.py", "update_check.json",
                      "update_request.json", "watchdog.lock"):
             with open(os.path.join(self.tree, name), "w") as f:
@@ -516,7 +640,8 @@ class SUTTests(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(pkg, "bin",
                                                     "outbox-append.py")))
         for gone in (".git", "state.json", "update_check.json",
-                     "update_request.json", "watchdog.lock"):
+                     "update_request.json", "watchdog.lock",
+                     "config.discord.yaml", "config.yaml.bak-20260101-0000"):
             self.assertFalse(os.path.exists(os.path.join(pkg, gone)), gone)
         mode = stat.S_IMODE(os.stat(self.s.token_file).st_mode)
         self.assertEqual(mode, 0o600)
@@ -829,8 +954,9 @@ class RunHelperTests(unittest.TestCase):
         self.assertTrue(name.startswith("e2e-123-x"))
 
 
-class RunFlowTests(unittest.TestCase):
-    """run.py end to end against a fake Discord and a fake SUT."""
+class RunFlowBase(unittest.TestCase):
+    """run.py end to end against a fake Discord and a fake SUT: the
+    fixtures (no tests here, so subclasses do not run them twice)."""
 
     ENV = {"E2E_GUILD_ID": "10", "E2E_SUT_TOKEN": FAKE_TOKEN,
            "E2E_DRIVER_A_TOKEN": "tokA-secret", "E2E_DRIVER_B_TOKEN":
@@ -892,6 +1018,8 @@ class RunFlowTests(unittest.TestCase):
                     if tok != "10":
                         self.assertNotIn(tok, text, name)
 
+
+class RunFlowTests(RunFlowBase):
     def test_full_run(self):
         self.sc.SCENARIOS = [
             {"id": "mention_basic", "tier": 1, "title": "t",
@@ -1107,6 +1235,240 @@ class RunFlowTests(unittest.TestCase):
         self.assertEqual(self.guild.channels, {})
         self.assertFalse(os.path.exists(os.path.join(self.out,
                                                      "results.json")))
+
+
+class RunThreadsSettingsTests(RunFlowBase):
+    """Threads, the settings step, overlay hygiene, monitor_restarts."""
+
+    def transcript(self, sid):
+        with open(os.path.join(self.out, "transcripts",
+                               f"{sid}.json")) as f:
+            return json.load(f)
+
+    def use_settings_sut(self):
+        self.R.sut.SUT = SettingsSUT
+
+    def test_threads(self):
+        self.sc.SCENARIOS = [{
+            "id": "threads", "tier": 1, "title": "t",
+            "steps": [
+                {"send": {"as": "a", "text": "<@SUT> hi", "label": "q1"}},
+                {"send": {"as": "a", "text": "plain", "label": "c1"}},
+                {"thread": {"from": "q1", "name": "side chat",
+                            "label": "t1"}},
+                {"send": {"as": "b", "in": "t1", "text": "<@SUT> in t1",
+                          "label": "q2"}},
+                {"send": {"as": "a", "in": "t1", "text": "thanks",
+                          "reply_to": "last_sut", "label": "q3"}},
+                {"send": {"as": "b", "in": "t1", "text": "bye",
+                          "label": "c2"}},
+                {"delete": "c2"},
+                {"wait_for": {"sut_messages": 3, "timeout": 5}}],
+            "expect": {"checks": [{"sut_reply_count": {"eq": 3}}]}}]
+        code, out = self.main()
+        self.assertEqual(code, 0, out)
+        results, _ = self.outputs()
+        self.assertEqual(results[0]["status"], "pass", results)
+        self.assertEqual(results[0]["notes"], [])  # wait_for saw 3
+        tr = self.transcript("threads")
+        lb = tr["labels"]
+        tid = lb["q1"]  # a thread shares its starter message's id
+        self.assertEqual(tr["threads"], {"t1": tid})
+        self.assertEqual(self.guild.threads[0][1:],
+                         (tr["channel_id"], lb["q1"], "side chat"))
+        self.assertEqual(self.guild.threads[0][0], "20")  # driver A
+        msgs = tr["messages"]
+        # One list sorted by id; no starter / THREAD_CREATED messages.
+        self.assertEqual([int(m["id"]) for m in msgs],
+                         sorted(int(m["id"]) for m in msgs))
+        self.assertEqual(
+            [(m["author"], m.get("thread")) for m in msgs],
+            [("a", None), ("sut", None), ("a", None), ("b", "t1"),
+             ("sut", "t1"), ("a", "t1"), ("sut", "t1")])
+        self.assertNotIn(tid, [m["id"] for m in msgs[1:]])
+        # last_sut inside the thread is the SUT's reply in the thread.
+        by_id = {m["id"]: m for m in msgs}
+        r2 = by_id[lb["q3"]]["reply_to"]
+        self.assertEqual(by_id[r2]["thread"], "t1")
+        self.assertEqual(by_id[r2]["reply_to"], lb["q2"])
+        # c2 was deleted in the thread, by B.
+        self.assertIn(("30", lb["c2"]), self.guild.deleted_messages)
+        self.assertNotIn(lb["c2"], by_id)
+
+    def test_thread_403_is_a_flake_with_the_fix(self):
+        self.guild.no_threads = True
+        self.sc.SCENARIOS = [{
+            "id": "t403", "tier": 1, "title": "t",
+            "steps": [{"send": {"as": "a", "text": "hi", "label": "q1"}},
+                      {"thread": {"from": "q1", "name": "n",
+                                  "label": "t1"}}],
+            "expect": {"checks": []}}]
+        code, out = self.main()
+        self.assertEqual(code, 0, out)
+        results, summary = self.outputs()
+        r = results[0]
+        self.assertEqual(r["status"], "flake", r)
+        for frag in ("driver A lacks Create Public Threads",
+                     "Server Settings > Roles",
+                     f"permissions={self.R.DRIVER_PERMISSIONS['a']}",
+                     "permissions=309237746768"):
+            self.assertIn(frag, r["error"])
+        self.assertIn("FLAKED", summary)
+
+    def test_thread_send_403_is_a_flake(self):
+        self.guild.no_thread_send = True
+        self.sc.SCENARIOS = [{
+            "id": "s403", "tier": 1, "title": "t",
+            "steps": [{"send": {"as": "a", "text": "hi", "label": "q1"}},
+                      {"thread": {"from": "q1", "name": "n",
+                                  "label": "t1"}},
+                      {"send": {"as": "b", "in": "t1", "text": "x"}}],
+            "expect": {"checks": []}}]
+        self.main()
+        results, _ = self.outputs()
+        self.assertEqual(results[0]["status"], "flake")
+        self.assertIn("driver B lacks Send Messages in Threads",
+                      results[0]["error"])
+        self.assertIn("permissions=274878008384", results[0]["error"])
+
+    def test_permission_integers(self):
+        self.assertEqual(self.R.DRIVER_PERMISSIONS,
+                         {"a": 309237746768, "b": 274878008384})
+        sut_perms = 2252074691710016  # README: muse-test's invite
+        self.assertTrue(sut_perms & self.R.SEND_MESSAGES_IN_THREADS)
+        with open(os.path.join(E2E, "README.md")) as f:
+            readme = f.read()
+        for n in (309237746768, 274878008384, sut_perms):
+            self.assertIn(f"permissions={n}", readme)
+
+    def test_settings_steps_and_overlay_hygiene(self):
+        self.use_settings_sut()
+        self.sc.SCENARIOS = [
+            {"id": "live", "tier": 1, "title": "t",
+             "config": {"servers": {"{{GUILD_ID}}": {"channels": {
+                 "{{CHANNEL_ID}}": {"replies": "when-addressed"}}}}},
+             "steps": [
+                 {"settings": {"set": "who.replies", "value": False,
+                               "scope": "channel"}},
+                 {"settings": {"undo": "channel"}},
+                 {"settings": {"undo": "dms"}},  # nothing to undo
+                 {"settings": {"reset": "who.replies", "scope": "server"}},
+                 {"settings": {"set": "style.notes", "value": "be brief",
+                               "scope": "channel", "timeout": 5}}],
+             "expect": {"checks": []}},
+            {"id": "next", "tier": 1, "title": "t",
+             "steps": [{"action": "restart_monitor"}],
+             "expect": {"checks": []}},
+        ]
+        code, out = self.main()
+        self.assertEqual(code, 0, out)
+        results, _ = self.outputs()
+        self.assertEqual([r["status"] for r in results], ["pass", "pass"],
+                         results)
+        self.assertEqual(results[0]["notes"],
+                         ["settings undo at dms: nothing to undo"])
+        fs = FakeSUT.instances[0]
+        cid = self.transcript("live")["channel_id"]
+        # {{CHANNEL_ID}} rendered to the scenario's channel.
+        self.assertIn({cid: {"replies": "when-addressed"}},
+                      [c["servers"]["10"].get("channels")
+                       for c in fs.configs])
+        # Four reloads, one per write, each with the keystr /settings
+        # writes (format_key), by driver A.
+        chan_key = f'servers."10".channels."{cid}".replies'
+        values = [d["values"] for d in fs.overlays]
+        self.assertEqual(len(values), 4, values)
+        self.assertEqual(values[0][chan_key]["value"], "off")
+        self.assertEqual(values[0][chan_key]["by"], "20")
+        self.assertNotIn(chan_key, values[1])  # undone: the file's value
+        self.assertEqual(values[2]['servers."10".who.replies']["value"],
+                         "inherit")
+        self.assertEqual(
+            values[3][f'servers."10".channels."{cid}".notes']["value"],
+            "be brief")
+        # The scenario's log has the reloads; no restart during it.
+        tr = self.transcript("live")
+        self.assertEqual(tr["monitor_log"].count("Settings reloaded"), 4)
+        self.assertEqual(tr["monitor_restarts"], 0)
+        # Overlay hygiene: gone before the next scenario, which ran on a
+        # fresh process whose log has no reload line.
+        self.assertFalse(os.path.exists(fs.overlay()))
+        nxt = self.transcript("next")
+        self.assertEqual(nxt["monitor_restarts"], 1)
+        self.assertNotIn("Settings reloaded", nxt["monitor_log"])
+
+    def runner(self, the_sut, clock=None):
+        cfg = sut.scenario_config(sut.base_config("10", "20", "30"), {},
+                                  "20", "30")
+        t = clock or [0.0]
+        r = self.R.Runner(the_sut, {}, None,
+                          {"SUT": "900", "A": "20", "B": "30"}, cfg,
+                          sleep=lambda s: t.__setitem__(0, t[0] + s),
+                          clock=lambda: t[0])
+        return r, cfg
+
+    def test_settings_timeout_and_rejection_are_notes(self):
+        fs = SettingsSUT(base_config=sut.base_config("10", "20", "30"))
+        try:
+            r, cfg = self.runner(fs)
+            r.ensure_config(cfg)
+            fs.react = ""  # the monitor never logs the reload
+            step = {"set": "who.replies", "value": "off",
+                    "scope": "server", "timeout": 3}
+            self.assertFalse(r.settings(step, "1001"))
+            self.assertEqual(len(r.notes), 1)
+            self.assertIn('no "Settings reloaded" in monitor.log after 3s',
+                          r.notes[0])
+            fs.react = "Config re-read failed; keeping the previous\n"
+            step["value"] = "when-addressed"
+            self.assertFalse(r.settings(step, "1001"))
+            self.assertIn("the monitor rejected the change", r.notes[1])
+            fs.react = SettingsSUT.reload_line
+            step["value"] = "conversational"
+            self.assertTrue(r.settings(step, "1001"))
+            self.assertEqual(len(r.notes), 2)
+        finally:
+            fs.cleanup()
+
+    def test_ensure_config_overlay_hygiene(self):
+        fs = SettingsSUT(base_config=sut.base_config("10", "20", "30"))
+        try:
+            r, cfg = self.runner(fs)
+            self.assertIsNotNone(r.ensure_config(cfg))   # first start
+            n = len(fs.calls)
+            self.assertIsNone(r.ensure_config(cfg))      # same: no-op
+            self.assertEqual(len(fs.calls), n)
+            with open(fs.overlay(), "w") as f:
+                f.write("version: 1\nvalues: {}\nhistory: []\n")
+            mark = r.ensure_config(cfg)                  # overlay: restart
+            self.assertEqual(fs.calls[n:], [("stop",), ("start", True),
+                                            ("ready",)])
+            self.assertFalse(os.path.exists(fs.overlay()))
+            self.assertEqual(fs.log[mark:], "===== e2e: start monitor "
+                                            "=====\n")
+        finally:
+            fs.cleanup()
+
+    def test_dry_run_describes_new_steps(self):
+        self.sc.SCENARIOS = [{
+            "id": "s1", "tier": 1, "title": "hello",
+            "steps": [{"send": {"as": "a", "text": "x", "label": "q1"}},
+                      {"thread": {"from": "q1", "name": "n", "label": "t1"}},
+                      {"send": {"as": "b", "in": "t1", "text": "y"}},
+                      {"settings": {"set": "who.replies", "value": "off",
+                                    "scope": "channel"}},
+                      {"settings": {"reset": "who.replies",
+                                    "scope": "server"}},
+                      {"settings": {"undo": "channel"}}],
+            "expect": {"checks": [{"monitor_restarts": {"eq": 0}}]}}]
+        for k in self.ENV:
+            os.environ.pop(k)
+        code, out = self.main("--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("steps: 6 (send, thread t1 on q1 (as a), send in t1, "
+                      "settings set who.replies='off' @channel, settings "
+                      "reset who.replies @server, settings undo @channel)",
+                      out)
 
 
 class DryRunProcessTest(unittest.TestCase):

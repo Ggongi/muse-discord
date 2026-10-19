@@ -521,6 +521,211 @@ class Negative(unittest.TestCase):
         scenario.validate(sc)
 
 
+def threaded():
+    """base() plus a thread t1 on q1 and a message q2 in it."""
+    sc = base()
+    sc["steps"] += [
+        {"thread": {"from": "q1", "name": "side chat", "label": "t1"}},
+        {"send": {"as": "b", "in": "t1", "text": "<@SUT> in thread",
+                  "label": "q2"}},
+    ]
+    return sc
+
+
+class Threads(Negative):
+    def test_valid(self):
+        sc = threaded()
+        sc["steps"] += [
+            {"send": {"as": "a", "in": "t1", "text": "x", "reply_to": "q2"}},
+            {"send": {"as": "a", "in": "t1", "text": "y",
+                      "reply_to": "last_sut"}},
+            {"thread": {"from": "q1x", "name": "n", "label": "t2",
+                        "as": "b"}},
+        ]
+        sc["steps"].insert(0, {"send": {"as": "a", "text": "c",
+                                        "label": "q1x"}})
+        sc["expect"]["checks"].append({"replies_to": "q2"})
+        sc["steps"].append({"delete": "q2"})
+        scenario.validate(sc)
+        self.assertEqual(scenario.labels_of(sc), ["q1x", "q1", "q2"])
+
+    def test_thread_fields(self):
+        for body, frags in (
+                ({"from": "q1", "name": "n"}, ("thread", "label")),
+                ({"from": "q1", "label": "t1"}, ("thread", "name")),
+                ({"from": "q9", "name": "n", "label": "t1"},
+                 ("thread.from", "unknown label 'q9'")),
+                ({"from": "q1", "name": " ", "label": "t1"},
+                 ("thread.name", "non-empty")),
+                ({"from": "q1", "name": "x" * 101, "label": "t1"},
+                 ("thread.name", "at most 100")),
+                ({"from": "q1", "name": "n", "label": "t1", "as": "c"},
+                 ("thread.as",)),
+                ({"from": "q1", "name": "n", "label": "T 1"},
+                 ("thread.label", "[a-z0-9_]+")),
+                ({"from": "q1", "name": "n", "label": "q1"},
+                 ("thread.label", "defined twice", "message label")),
+                ({"from": "q1", "name": "n", "label": "t1", "in": "x"},
+                 ("unknown field(s) in",))):
+            sc = base()
+            sc["steps"].append({"thread": body})
+            self.bad(sc, "steps[2]", *frags)
+
+    def test_thread_on_thread_message_or_twice_or_deleted(self):
+        sc = threaded()
+        sc["steps"].append({"thread": {"from": "q2", "name": "n",
+                                       "label": "t2"}})
+        self.bad(sc, "steps[4].thread.from", "is in thread 't1'")
+        sc = threaded()
+        sc["steps"].append({"thread": {"from": "q1", "name": "n",
+                                       "label": "t2"}})
+        self.bad(sc, "steps[4].thread.from", "already has a thread")
+        sc = base()
+        sc["steps"] += [{"delete": "q1"},
+                        {"thread": {"from": "q1", "name": "n",
+                                    "label": "t1"}}]
+        self.bad(sc, "steps[3].thread.from", "deleted")
+
+    def test_send_in(self):
+        sc = base()
+        sc["steps"].append({"send": {"as": "a", "in": "t1", "text": "x"}})
+        self.bad(sc, "steps[2].send.in", "unknown thread label 't1'",
+                 "threads so far: none")
+        sc = threaded()
+        sc["steps"].append({"send": {"as": "a", "in": "q1", "text": "x"}})
+        self.bad(sc, "steps[4].send.in", "unknown thread label 'q1'",
+                 "threads so far: t1")
+
+    def test_labels_unique_across_channel_and_threads(self):
+        sc = threaded()
+        sc["steps"].append({"send": {"as": "a", "text": "x",
+                                     "label": "t1"}})
+        self.bad(sc, "steps[4].send.label", "defined twice", "thread label")
+        sc = threaded()
+        sc["steps"].append({"send": {"as": "a", "in": "t1", "text": "x",
+                                     "label": "q1"}})
+        self.bad(sc, "steps[4].send.label", "defined twice")
+
+    def test_reply_stays_in_its_channel_or_thread(self):
+        sc = threaded()
+        sc["steps"].append({"send": {"as": "a", "in": "t1", "text": "x",
+                                     "reply_to": "q1"}})
+        self.bad(sc, "steps[4].send.reply_to", "'q1' is in the scenario "
+                 "channel", "goes to thread 't1'")
+        sc = threaded()
+        sc["steps"].append({"send": {"as": "a", "text": "x",
+                                     "reply_to": "q2"}})
+        self.bad(sc, "steps[4].send.reply_to", "'q2' is in thread 't1'",
+                 "goes to the scenario channel")
+
+    def test_thread_label_is_not_a_check_label(self):
+        sc = threaded()
+        sc["expect"]["checks"].append({"replies_to": "t1"})
+        self.bad(sc, "expect.checks[2].replies_to", "unknown label 't1'")
+
+
+class SettingsStep(Negative):
+    def with_step(self, body):
+        sc = base()
+        sc["steps"].append({"settings": body})
+        return sc
+
+    def test_valid(self):
+        for body in (
+                {"set": "who.replies", "value": "off", "scope": "channel"},
+                {"set": "who.replies", "value": False, "scope": "server"},
+                {"set": "style.notes", "value": "be brief",
+                 "scope": "channel"},
+                {"set": "limits.per_person_per_day", "value": 1,
+                 "scope": "server", "timeout": 45},
+                {"set": "who.dms_from", "value": "anyone", "scope": "dms"},
+                {"set": "plugins.welcome.enabled", "value": "on",
+                 "scope": "channel"},
+                {"reset": "who.bots", "scope": "everywhere"},
+                {"undo": "channel"},
+                {"undo": "server", "timeout": 5}):
+            with self.subTest(body):
+                scenario.validate(self.with_step(body))
+
+    def test_shape(self):
+        w = "steps[2].settings"
+        for body, frags in (
+                ({}, (w, "exactly one of set, reset, undo")),
+                ({"set": "who.replies", "reset": "who.replies",
+                  "scope": "channel"}, (w, "exactly one of")),
+                ({"set": "who.replies", "value": "off"},
+                 (w, "missing required field(s) scope")),
+                ({"set": "who.replies", "value": "off", "scope": "thread"},
+                 (f"{w}.scope", "channel, server, everywhere, dms")),
+                ({"set": "who.replies", "scope": "channel"},
+                 (w, "set needs a value")),
+                ({"set": "who.replies", "value": "inherit",
+                  "scope": "channel"}, (f"{w}.value", "reset")),
+                ({"reset": "who.replies", "value": "off",
+                  "scope": "channel"}, (w, "reset takes no value")),
+                ({"undo": "channel", "scope": "channel"},
+                 (w, "undo takes only its scope")),
+                ({"undo": "category"}, (f"{w}.undo", "expected one of")),
+                ({"undo": "channel", "timeout": 0}, (f"{w}.timeout",)),
+                ({"set": "who.replies", "value": "off", "scope": "channel",
+                  "by": "b"}, (w, "unknown field(s) by"))):
+            with self.subTest(body):
+                self.bad(self.with_step(body), *frags)
+
+    def test_keys_scopes_and_values(self):
+        w = "steps[2].settings"
+        for body, frags in (
+                ({"set": "Who Replies", "value": "x", "scope": "channel"},
+                 (f"{w}.set", "like who.replies")),
+                ({"set": "who.replys", "value": "off", "scope": "server"},
+                 (f"{w}.set", "unknown setting 'who.replys'",
+                  "who.replies")),
+                ({"set": "limits.per_person_per_day", "value": 1,
+                  "scope": "channel"},
+                 (f"{w}.set", "cannot be set at channel scope",
+                  "everywhere, dms, server")),
+                ({"reset": "who.replies", "scope": "everywhere"},
+                 (f"{w}.reset", "cannot be set at everywhere scope",
+                  "dms, server, channel")),
+                ({"reset": "who.dms_from", "scope": "server"},
+                 (f"{w}.reset", "cannot be set at server scope", "dms")),
+                ({"set": "privacy.never_share", "value": ["x"],
+                  "scope": "everywhere"},
+                 (f"{w}.set", "not editable from Discord")),
+                ({"set": "who.replies", "value": "sometimes",
+                  "scope": "channel"},
+                 (f"{w}.value", "not a valid value",
+                  "off, when-addressed, conversational")),
+                ({"set": "limits.per_day", "value": -1, "scope": "server"},
+                 (f"{w}.value",)),
+                ({"set": "plugins.welcome.channel", "value": "x",
+                  "scope": "channel"},
+                 (f"{w}.set", "plugins.<plugin>.enabled")),
+                ({"set": "plugins.welcome", "value": "on",
+                  "scope": "server"},
+                 (f"{w}.set", "plugins.<plugin>.<setting>"))):
+            with self.subTest(body):
+                self.bad(self.with_step(body), *frags)
+
+
+class NewConfigAndChecks(Negative):
+    def test_channel_id_placeholder(self):
+        sc = base()
+        sc["config"] = {"servers": {"{{GUILD_ID}}": {"channels": {
+            "{{CHANNEL_ID}}": {"replies": "when-addressed"}}}}}
+        scenario.validate(sc)
+        sc["config"] = {"servers": {"{{GUILD_ID}}": {"channels": {
+            "{{CHANNEL}}": {"replies": "off"}}}}}
+        self.bad(sc, "{{CHANNEL}}", "{{CHANNEL_ID}}")
+
+    def test_monitor_restarts(self):
+        sc = base()
+        sc["expect"]["checks"] = [{"monitor_restarts": {"eq": 0}}]
+        scenario.validate(sc)
+        sc["expect"]["checks"] = [{"monitor_restarts": 0}]
+        self.bad(sc, "expect.checks[0].monitor_restarts", "mapping")
+
+
 class LoadAll(unittest.TestCase):
     def write(self, d, name, text):
         with open(os.path.join(d, name), "w") as f:

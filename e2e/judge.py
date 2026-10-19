@@ -88,7 +88,8 @@ def labels_for(scenario, transcript):
 
 def render_transcript(scenario, transcript):
     """A compact, numbered rendering: one line per message,
-    `[n] +Ts AUTHOR -> [m] (label): text`. Mentions of the test
+    `[n] +Ts AUTHOR -> [m] (label) [in thread t]: text` (the thread
+    tag only for a message posted in a thread). Mentions of the test
     identities read as @SUT/@A/@B."""
     transcript = transcript or {}
     labels, who = labels_for(scenario, transcript)
@@ -125,6 +126,8 @@ def render_transcript(scenario, transcript):
                               if str(rt) in index else "(earlier message)")
         if str(msg.get("id")) in tags:
             head += " (%s)" % tags[str(msg.get("id"))]
+        if msg.get("thread"):
+            head += " [in thread %s]" % msg["thread"]
         text = str(msg.get("content") or "")
         text = re.sub(r"<@!?(\d+)>", mention, text)
         if len(text) > MAX_CONTENT:

@@ -18,7 +18,21 @@ API:
 Every problem raises ScenarioError with the file and the field at
 fault, e.g. "mention_basic.yaml: steps[2].send.reply_to: unknown label
 'q9' (defined so far: q1)".
+
+Threads and labels. A `thread` step starts a thread on a channel
+message and names it with a label; `send.in: <thread label>` posts in
+that thread. Message labels and thread labels share one namespace (a
+label is defined once, whatever it names). A reply stays where it is
+sent: `send.reply_to` must name a message in the same channel or
+thread as the new message (last_sut: the SUT's newest message there).
+Checks name message labels only, wherever the message was posted.
+
+The `settings` step's key, scope and value are checked against the
+muse_settings.py next to e2e/ (the code under test) when it is there:
+an unknown key, a scope that cannot set it, or an invalid value fails
+at load time instead of mid-run.
 """
+import importlib.util
 import os
 import re
 
@@ -31,18 +45,25 @@ FIXTURES_DIR = os.path.join(E2E_DIR, "fixtures")
 ID_RE = re.compile(r"^[a-z0-9_]+$")
 LABEL_RE = re.compile(r"^[a-z0-9_]+$")
 DRIVERS = ("a", "b")
-STEPS = ("send", "wait", "wait_for", "action", "converse", "delete")
+STEPS = ("send", "wait", "wait_for", "action", "converse", "delete",
+         "thread", "settings")
 ACTIONS = ("kill_monitor", "start_monitor", "restart_monitor",
            "gateway_off", "gateway_on")
 LEDGER_STATUSES = ("queued", "replied", "quarantined", "skipped")
 # send.reply_to may name the SUT's newest message instead of a label.
 LAST_SUT = "last_sut"
+# settings step scopes: this scenario's channel, the test server, and
+# the two global scopes.
+SETTINGS_SCOPES = ("channel", "server", "everywhere", "dms")
+SETTINGS_OPS = ("set", "reset", "undo")
+_SETTING_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]*(\.[a-z0-9_-]+)+$")
+THREAD_NAME_MAX = 100
 
 TOP_KEYS = {"id", "tier", "title", "b_is_bot", "legacy_config", "config",
             "steps", "expect", "judge"}
 # Placeholders a scenario's `config:` overrides may use (sut.py renders
 # them, in keys and values).
-CONFIG_PLACEHOLDERS = ("GUILD_ID", "A_ID", "B_ID")
+CONFIG_PLACEHOLDERS = ("GUILD_ID", "A_ID", "B_ID", "CHANNEL_ID")
 _CONFIG_PH_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 # queue_item: the item fields the check can compare.
 QUEUE_ITEM_FIELDS = ("follow_up", "kind", "from_bot", "owner_command")
@@ -154,10 +175,31 @@ def _count_spec(v, where):
 # Steps
 # ---------------------------------------------------------------------------
 
-def _validate_send(s, where, labels, fixtures_dir):
+def _new_label(label, where, labels, threads):
+    """A fresh label: well formed, not reserved, not yet defined as a
+    message or a thread label."""
+    if not isinstance(label, str) or not LABEL_RE.match(label):
+        _fail(where, f"expected [a-z0-9_]+, got {label!r}")
+    if label == LAST_SUT:
+        _fail(where, f"'{LAST_SUT}' is reserved")
+    if label in labels or label in threads:
+        what = "thread" if label in threads else "message"
+        _fail(where, f"label {label!r} defined twice (already a {what} "
+                     f"label)")
+
+
+def _place(thread):
+    return f"thread {thread!r}" if thread else "the scenario channel"
+
+
+def _validate_send(s, where, labels, fixtures_dir, threads=(),
+                   located=None):
+    """located: message label -> the thread label it was posted in
+    (None: the channel); this send's label is added to it."""
+    located = {} if located is None else located
     _need_map(s, where)
-    _only_keys(s, ("as", "text", "label", "reply_to", "attach"), where,
-               required=("as",))
+    _only_keys(s, ("as", "text", "label", "reply_to", "attach", "in"),
+               where, required=("as",))
     if s["as"] not in DRIVERS:
         _fail(f"{where}.as", f"expected one of {', '.join(DRIVERS)}, got "
                              f"{s['as']!r}")
@@ -165,9 +207,23 @@ def _validate_send(s, where, labels, fixtures_dir):
         _check_text(s["text"], f"{where}.text")
     if not (s.get("text") or "").strip() and not s.get("attach"):
         _fail(where, "needs non-empty text or an attach")
+    here = None
+    if "in" in s:
+        here = s["in"]
+        if not isinstance(here, str) or here not in threads:
+            known = ", ".join(threads) or "none"
+            _fail(f"{where}.in", f"unknown thread label {here!r} (threads "
+                                 f"so far: {known}; a thread step defines "
+                                 f"one)")
     if "reply_to" in s:
         _label_ref(s["reply_to"], labels, f"{where}.reply_to",
                    allow_last_sut=True)
+        ref = s["reply_to"]
+        if ref != LAST_SUT and located.get(ref) != here:
+            _fail(f"{where}.reply_to", f"{ref!r} is in "
+                  f"{_place(located.get(ref))} but this message goes to "
+                  f"{_place(here)}: a reply must stay in the same channel "
+                  f"or thread")
     if "attach" in s:
         name = s["attach"]
         if not isinstance(name, str) or not name or os.sep in name \
@@ -179,13 +235,9 @@ def _validate_send(s, where, labels, fixtures_dir):
                                      f"{fixtures_dir}")
     if "label" in s:
         label = s["label"]
-        if not isinstance(label, str) or not LABEL_RE.match(label):
-            _fail(f"{where}.label", f"expected [a-z0-9_]+, got {label!r}")
-        if label == LAST_SUT:
-            _fail(f"{where}.label", f"'{LAST_SUT}' is reserved")
-        if label in labels:
-            _fail(f"{where}.label", f"label {label!r} defined twice")
+        _new_label(label, f"{where}.label", labels, threads)
         labels.append(label)
+        located[label] = here
 
 
 def _validate_wait_for(s, where):
@@ -230,11 +282,140 @@ def _validate_delete(label, where, labels, deleted):
     deleted.append(label)
 
 
+def _validate_thread(s, where, labels, deleted, threads, located,
+                     threaded):
+    """thread: {from, name, label, as?}: a driver (default a) starts a
+    public thread on the channel message labelled `from`."""
+    _need_map(s, where)
+    _only_keys(s, ("from", "name", "label", "as"), where,
+               required=("from", "name", "label"))
+    if "as" in s and s["as"] not in DRIVERS:
+        _fail(f"{where}.as", f"expected one of {', '.join(DRIVERS)}, got "
+                             f"{s['as']!r}")
+    src = s["from"]
+    _label_ref(src, labels, f"{where}.from")
+    if located.get(src):
+        _fail(f"{where}.from", f"{src!r} is in thread {located[src]!r}; a "
+                               f"thread starts on a channel message")
+    if src in deleted:
+        _fail(f"{where}.from", f"{src!r} is deleted by then")
+    if src in threaded:
+        _fail(f"{where}.from", f"{src!r} already has a thread "
+                               f"({threaded[src]!r})")
+    name = s["name"]
+    if not isinstance(name, str) or not name.strip():
+        _fail(f"{where}.name", "expected a non-empty string")
+    if len(name) > THREAD_NAME_MAX:
+        _fail(f"{where}.name", f"at most {THREAD_NAME_MAX} characters "
+                               f"(Discord's limit), got {len(name)}")
+    _new_label(s["label"], f"{where}.label", labels, threads)
+    threads.append(s["label"])
+    threaded[src] = s["label"]
+
+
+_MS = []  # [muse_settings module or None], loaded once
+
+
+def _settings_module():
+    """The muse_settings.py next to e2e/ (the code under test), or None
+    when it is missing or does not import."""
+    if not _MS:
+        path = os.path.join(os.path.dirname(E2E_DIR), "muse_settings.py")
+        mod = None
+        if os.path.isfile(path):
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    "_e2e_muse_settings", path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+            except Exception:
+                mod = None
+        _MS.append(mod)
+    return _MS[0]
+
+
+def _check_setting(key, scope, where, value=None, has_value=False):
+    """key is a settings key /settings can change at scope (and value,
+    when given, a valid value for it)."""
+    if not isinstance(key, str) or not _SETTING_KEY_RE.match(key):
+        _fail(where, f"expected a settings key like who.replies, got "
+                     f"{key!r}")
+    if key.startswith("plugins."):
+        if len(key.split(".")) != 3:
+            _fail(where, f"expected plugins.<plugin>.<setting>, got "
+                         f"{key!r}")
+        if scope == "channel" and not key.endswith(".enabled"):
+            _fail(where, "a channel may set only who.replies, style.notes "
+                         "and plugins.<plugin>.enabled")
+        return  # plugin keys need the manifests: set_value checks them
+    ms = _settings_module()
+    if ms is None:
+        return
+    spec = ms.CORE.get(key)
+    if spec is None:
+        _fail(where, f"unknown setting {key!r} (known: "
+                     f"{', '.join(sorted(ms.CORE))}, plugins.<plugin>."
+                     f"<setting>)")
+    if scope not in spec.scopes:
+        ok = [x for x in spec.scopes if x in SETTINGS_SCOPES]
+        _fail(where, f"{key} cannot be set at {scope} scope (scopes that "
+                     f"can: {', '.join(ok) or 'none'})")
+    if not spec.discord_editable or spec.hidden:
+        _fail(where, f"{key} is not editable from Discord (/settings "
+                     f"cannot change it)")
+    if has_value:
+        ok, norm = ms.normalize(spec, value)
+        if not ok:
+            _fail(f"{where.rsplit('.', 1)[0]}.value",
+                  f"{norm}; valid: {spec.valid_text()}")
+
+
+def _validate_settings(s, where):
+    """settings: {set: key, value: v, scope: s} | {reset: key, scope: s}
+    | {undo: scope}, each with an optional timeout: a live change
+    written the way /settings writes it."""
+    _need_map(s, where)
+    _only_keys(s, SETTINGS_OPS + ("value", "scope", "timeout"), where)
+    ops = [k for k in SETTINGS_OPS if k in s]
+    if len(ops) != 1:
+        _fail(where, "needs exactly one of set, reset, undo")
+    op = ops[0]
+
+    def scope_ok(v, w):
+        if v not in SETTINGS_SCOPES:
+            _fail(w, f"expected one of {', '.join(SETTINGS_SCOPES)}, got "
+                     f"{v!r}")
+
+    if op == "undo":
+        if "scope" in s or "value" in s:
+            _fail(where, "undo takes only its scope (undo: channel) and an "
+                         "optional timeout")
+        scope_ok(s["undo"], f"{where}.undo")
+    else:
+        if "scope" not in s:
+            _fail(where, f"missing required field(s) scope (one of "
+                         f"{', '.join(SETTINGS_SCOPES)})")
+        scope_ok(s["scope"], f"{where}.scope")
+        if op == "set":
+            if "value" not in s:
+                _fail(where, "set needs a value")
+            if s["value"] == "inherit":
+                _fail(f"{where}.value", "use `reset: <key>` to go back to "
+                                        "the inherited value")
+        elif "value" in s:
+            _fail(where, "reset takes no value")
+        _check_setting(s[op], s["scope"], f"{where}.{op}",
+                       value=s.get("value"), has_value=op == "set")
+    if "timeout" in s:
+        _positive(s["timeout"], f"{where}.timeout")
+
+
 def _validate_steps(steps, where, fixtures_dir):
-    """Returns (labels in definition order, step kinds seen)."""
+    """Returns (message labels in definition order, step kinds seen)."""
     if not isinstance(steps, list) or not steps:
         _fail(where, "expected a non-empty list of steps")
     labels, kinds, deleted = [], set(), []
+    threads, located, threaded = [], {}, {}
     for i, step in enumerate(steps):
         w = f"{where}[{i}]"
         if not isinstance(step, dict) or len(step) != 1:
@@ -244,7 +425,7 @@ def _validate_steps(steps, where, fixtures_dir):
         kinds.add(kind)
         w = f"{w}.{kind}"
         if kind == "send":
-            _validate_send(body, w, labels, fixtures_dir)
+            _validate_send(body, w, labels, fixtures_dir, threads, located)
         elif kind == "wait":
             _positive(body, w)
         elif kind == "wait_for":
@@ -257,6 +438,11 @@ def _validate_steps(steps, where, fixtures_dir):
             _validate_converse(body, w)
         elif kind == "delete":
             _validate_delete(body, w, labels, deleted)
+        elif kind == "thread":
+            _validate_thread(body, w, labels, deleted, threads, located,
+                             threaded)
+        elif kind == "settings":
+            _validate_settings(body, w)
         else:
             _fail(f"{where}[{i}]", f"unknown step {kind!r} "
                                    f"({', '.join(STEPS)})")
@@ -373,6 +559,7 @@ CHECK_ARGS = {
     "log_lacks": _arg_regex,
     "held": _arg_label,
     "queue_item": _arg_queue_item,
+    "monitor_restarts": _arg_count,
 }
 
 

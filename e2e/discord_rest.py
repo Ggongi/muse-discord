@@ -9,6 +9,8 @@ product's client; monitor.py has its own.
     msg = bot.send(channel_id, "hello", reply_to=None, files=["cat.png"])
     msgs = bot.history(channel_id)          # every message, oldest first
     bot.delete_message(channel_id, msg["id"])
+    th = bot.start_thread(channel_id, msg["id"], "side chat")
+    bot.send(th["id"], "in the thread")     # a thread is a channel
     ch = bot.create_channel(guild_id, "e2e-123-mention_basic")
     bot.delete_channel(ch["id"])
 
@@ -197,6 +199,15 @@ class Bot:
             if e.status == 404:
                 return None
             raise
+
+    def start_thread(self, channel_id, message_id, name):
+        """Start a public thread on a message; returns the thread (a
+        channel object whose id also works with send / history). Needs
+        Create Public Threads in the channel (and Send Messages in
+        Threads to post in it): a 403 means the bot's role lacks it."""
+        return self.request(
+            "POST", f"/channels/{channel_id}/messages/{message_id}/threads",
+            body={"name": str(name)[:100], "auto_archive_duration": 60})
 
     def create_channel(self, guild_id, name):
         """Create a text channel; returns the channel object."""
