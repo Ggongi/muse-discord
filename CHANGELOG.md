@@ -6,6 +6,19 @@ entries below the releases are pre-release history. **Action
 needed** lists what an existing install must do after updating;
 UPDATING.md walks a Muse through it.
 
+## 2026-10-19: Status line changes show up right away
+
+Fixed:
+
+- Changing the bot's status line (`presence.status` / `presence.kind`)
+  with `/settings` or in `config.yaml` did nothing until the presence
+  client restarted, which the watchdog never does while it is healthy.
+  It now updates within a few seconds, without reconnecting.
+
+**Action needed:**
+
+- None.
+
 ## 2026-10-19: Change settings from Discord with /settings
 
 New:
