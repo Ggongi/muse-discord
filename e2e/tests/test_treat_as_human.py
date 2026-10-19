@@ -259,6 +259,7 @@ class GatewayOffStub(unittest.TestCase):
                 f.write(sut.STUB_WEBSOCKETS)
             shutil.copy(os.path.join(REPO, "monitor.py"), tmp)
             shutil.copy(os.path.join(REPO, "muse_settings.py"), tmp)
+            shutil.copy(os.path.join(REPO, "settings_nl.py"), tmp)
             with open(os.path.join(tmp, "token"), "w") as f:
                 f.write("x\n")
             with open(os.path.join(tmp, "config.yaml"), "w") as f:

@@ -38,6 +38,11 @@
 # retried every few seconds. A stuck monitor (alive, stale heartbeat),
 # presence, alerts and update checks stay with the scheduled run.
 #
+# Owner DMs are handed out alone (never in the same wake as anyone
+# else's message), so a server message can never share a worker's
+# context with an owner's settings request (PROTOCOL.md, Settings
+# requests).
+#
 # This script targets Muse's hook runtime (it sources
 # $HATCH_HOOK_RUNTIME for the silent/wake/log/hook_state helpers and is
 # registered as a hook with a prompt like worker-prompt.template.md;
@@ -208,6 +213,20 @@ ndue=$(printf '%s' "$due" | jq 'length')
 if [ "$ndue" -eq 0 ]; then
     silent "a worker already holds every open item" \
         '{"open":"'"$count"'"}'
+fi
+# Owner DMs wake alone: a run that handles an owner's DM (which may ask
+# to change settings) never also reads a server message or anyone
+# else's, so text written by someone else can never share a context
+# with an owner's settings request. The rest are handed out on the
+# next run, a few seconds later (they keep no lease meanwhile).
+owner_dms=$(printf '%s' "$due" | jq -c '[.[] | select(.kind == "dm"
+    and (.settings.speaker // "") == "owner")]')
+nowner=$(printf '%s' "$owner_dms" | jq 'length')
+if [ "$nowner" -gt 0 ] && [ "$nowner" -lt "$ndue" ]; then
+    log "owner DMs wake alone; the rest wait for the next run" \
+        '{"owner_dms":"'"$nowner"'","held":"'"$((ndue - nowner))"'"}'
+    due=$owner_dms
+    ndue=$nowner
 fi
 expired=$(printf '%s' "$due" | jq --argjson w "$woken" \
     '[.[] | select($w[.message_id] != null)] | length')

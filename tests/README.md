@@ -61,6 +61,7 @@ them.
 | `settingsui` | `settings_ui.py`, the `/settings` pages: fake interactions from owners, server admins and strangers, in DMs and servers, writes through `muse_settings`, every response checked against Discord's limits. |
 | `settingsplumb` | The `/settings` plumbing in `monitor.py`: command registration, interaction routing, the 3 s deadline under a slow main loop, `SettingsCtx` writes, reset, undo and reload, the admin-change digest, the join notice's Configure button, a missing `settings_ui.py`. |
 | `presencelive` | `presence.py` following settings changes live on the open gateway session: one Presence Update per change, clearing, rate limiting, invalid edits, disabling, resumes, heartbeats. |
+| `settingsnl` | Settings requests (`settings_nl.py`): who may change settings by DM (owners' own DMs only, from the monitor's own records; forged, replayed, forwarded and stale actions refused), meaning failures (all or nothing), apply / confirm / Apply / Cancel / expiry / stale cards / Undo, the lockout guard, retries and restarts, notices for `bin/settings.py` changes, the owner alert, the card's places and `directory.json`; the wake hook's owner-DM isolation, `bin/outbox-append.py`'s shape checks and `bin/settings.py places`. |
 | `monitorfixes` | Daily-cap refusals dropped at once; declined direct messages ledgered as skipped; new threads seeded at their own id; Discord system notices (pins, thread starts) never trigger. |
 
 The slow suites are marked by a `SLOW` file in their directory (its
