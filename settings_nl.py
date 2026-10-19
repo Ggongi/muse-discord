@@ -28,6 +28,22 @@ monitor globals. monitor.py gives a ctx with:
     save(state)           persist state.json now
     live                  a Live (the interaction thread's copy of the
                           pending confirms and undo buttons)
+    channel_label(cid)    "#general in Work" / "a DM with me": a name
+                          the monitor knows (never an outbox field)
+    write_lock()          the overlay write lock (re-entrant), held
+                          across a decision and its write
+    journal_put(tok, e) / journal_drop(tok) / journal_all()
+                          a small file the interaction thread writes
+                          before an Apply, so a crash before the main
+                          loop records the Undo button loses nothing
+
+Every owner-DM queue item gets a capability nonce (nl_nonces, never in
+reply_queue.json; the wake hook passes it only to a wake that holds
+nothing but owner DMs). A settings action must echo it as
+settings.nonce: a worker woken for anything else cannot forge an
+owner's request even if it reads the queue. A missing or wrong nonce,
+or a channel that is not the item's own, is refused without settling
+the item, so the real reply still goes out.
 
 State (state.json, main loop only): nl_outcomes {item: outcome},
 nl_pending {token: confirm}, nl_undo {token: undo button},
@@ -37,6 +53,7 @@ waiting for their batch). Button clicks (custom_id mdnl:ok|no|undo:
 their state changes to the main loop through record() (apply_record).
 """
 import hashlib
+import hmac
 import json
 import re
 import secrets
@@ -79,6 +96,7 @@ NOT_ON_SETTINGS_ITEMS = ("parts", "attachments", "reactions", "standalone",
 PLACE_RE = re.compile(r"(defaults|dms|server:\d{1,25}|channel:\d{1,25}:"
                       r"\d{1,25})")
 _USER_RE = re.compile(r"\d{1,25}")
+NONCE_RE = re.compile(r"[0-9a-f]{32,64}")
 _PERSON_RE = re.compile(r"(role:)?\d{1,25}")
 
 # Reply copy (the monitor's own words; the worker's text is only ever a
@@ -233,11 +251,17 @@ def shape_problems(item, plugins_dir=None):
         out.append(f"text on a settings item is a short lead-in (up to "
                    f"{TEXT_MAX} characters) or nothing")
     s = item["settings"]
-    if not isinstance(s, dict) or set(s) != {"v", "changes"}:
-        out.append('settings must be {"v": 1, "changes": [...]}')
+    if not isinstance(s, dict) or not {"v", "changes"} <= set(s) \
+            or not set(s) <= {"v", "changes", "nonce"}:
+        out.append('settings must be {"v": 1, "nonce": "<the item\'s '
+                   'settings_nonce>", "changes": [...]}')
         return out
     if s["v"] != VERSION or isinstance(s["v"], bool):
         out.append("settings.v must be 1")
+    if not (isinstance(s.get("nonce"), str)
+            and NONCE_RE.fullmatch(s["nonce"])):
+        out.append('settings.nonce: copy the item\'s "settings_nonce" from '
+                   'the wake payload (owner DMs only)')
     ch = s["changes"]
     if not isinstance(ch, list) or not 1 <= len(ch) <= MAX_CHANGES:
         out.append(f"settings.changes must be a list of 1 to {MAX_CHANGES} "
@@ -501,6 +525,7 @@ class Plan:
         self.children = False
         self.ident = None
         self.nothing = None
+        self.free_text = False   # sets text the Muse follows or shows
 
     @property
     def fingerprint(self):
@@ -621,7 +646,16 @@ def plan_action(ctx, st, inf, action, uid, names, people):
             errors.append(str(e).rstrip("."))
     if errors:
         raise MS.SettingsError("; ".join(errors))
-    return plan_apply(st, inf, built, names, people)
+    p = plan_apply(st, inf, built, names, people)
+    # Free text (Instructions, the status line, welcome notes) always
+    # needs Apply: words in it steer the Muse or show publicly, and an
+    # owner-DM run may have read other people's text.
+    p.free_text = any(
+        c["op"] in ("set", "add")
+        and (st.spec(c["key"]) is not None
+             and st.spec(c["key"]).type == "text")
+        for c in changes)
+    return p
 
 
 def change_dicts(changes):
@@ -704,6 +738,25 @@ def _add(ctx, state, kind, tok, rec):
     ctx.live.add(kind, tok, rec)
 
 
+def recover(ctx, state):
+    """Startup: Apply clicks the interaction thread wrote down but the
+    main loop never recorded (the monitor stopped in between). Applied
+    (its group is in the overlay's history): the card is used and its
+    Undo button is kept. Not applied: the card stays as it was."""
+    done = []
+    st = None
+    for tok, e in (ctx.journal_all() or {}).items():
+        st = st or ctx.reload()
+        if isinstance(e, dict) and group_written(st, e.get("group")):
+            (state.get("nl_pending") or {}).pop(tok, None)
+            if e.get("undo") and isinstance(e.get("urec"), dict):
+                state.setdefault("nl_undo", {})[e["undo"]] = e["urec"]
+        done.append(tok)
+    for tok in done:
+        ctx.journal_drop(tok)
+    return len(done)
+
+
 def apply_record(state, rec):
     """Main loop: what a button click changed (record() from on_button)."""
     for tok in rec.get("drop_pending") or []:
@@ -739,32 +792,51 @@ def _reply_target(state, item, iid):
 
 class Result:
     """What process() decided: the outcome record (text None: settle
-    silently), log lines, and an owner alert to send (or None)."""
+    silently), log lines, and an owner alert to send (or None). rec None
+    with reject set: refused WITHOUT settling the item (a forged or
+    misdirected action): the item stays open for its real reply."""
 
-    def __init__(self, rec, logs=(), alert=None):
+    def __init__(self, rec, logs=(), alert=None, reject=None):
         self.rec, self.logs, self.alert = rec, list(logs), alert
+        self.reject = reject
 
 
-def _refuse(state, item, iid, code, text, status, channel_id, reply_to,
-            now, alert=None):
-    where = item.get("channel_name") or item.get("channel_id")
-    raw = json.dumps(item.get("settings"), sort_keys=True)[:300]
+def _where(ctx, item, meta=None):
+    cid = (meta or {}).get("channel_id") or item.get("channel_id")
+    try:
+        return ctx.channel_label(str(cid or ""))
+    except Exception:
+        return f"channel {cid}"
+
+
+def _raw(item):
+    return json.dumps(item.get("settings"), sort_keys=True)[:300]
+
+
+def _refuse(ctx, state, item, iid, code, text, status, channel_id,
+            reply_to, now, alert=None, meta=None):
     rec = _outcome(status, f"settings refused: {code}", text, None,
                    channel_id, reply_to, code, now)
     state.setdefault("nl_outcomes", {})[iid] = rec
     return Result(rec, [f"Refused a settings action on item {iid} "
-                        f"({where}): {code}; action: {raw}"], alert)
+                        f"({_where(ctx, item, meta)}): {code}; action: "
+                        f"{_raw(item)}"], alert)
+
+
+def _drop(ctx, item, iid, code, meta=None):
+    """Refused, and the item is NOT settled or recorded: whoever wrote
+    this could not prove it answers the owner's DM, so the real reply
+    must still be able to go out."""
+    return Result(None, [f"Refused a settings action on item {iid} "
+                         f"({_where(ctx, item, meta)}): {code}; the item "
+                         f"stays open; action: {_raw(item)}"],
+                  reject=f"settings refused: {code}")
 
 
 def _alert_text(ctx, meta, item):
     who = f"<@{meta.get('author_id')}>" if meta.get("author_id") \
         else "someone"
-    if meta.get("dm"):
-        where = "a DM with me"
-    else:
-        where = item.get("channel_name") or "a server"
-        where = f"#{str(where).lstrip('#')}"
-    return ALERT.format(who=who, where=where)
+    return ALERT.format(who=who, where=_where(ctx, item, meta))
 
 
 def process(ctx, state, item):
@@ -785,6 +857,9 @@ def process(ctx, state, item):
             ctx.save(state)
         else:
             outs.pop(iid, None)
+            if rec.get("nonce"):   # not applied: the capability holds
+                state.setdefault("nl_nonces", {})[iid] = {
+                    "nonce": rec["nonce"], "at": now}
             if rec.get("undo_token"):
                 (state.get("nl_undo") or {}).pop(rec["undo_token"], None)
                 with ctx.live.lock:
@@ -799,10 +874,10 @@ def process(ctx, state, item):
     if meta is None:
         uid = ctx.dm_channel_user(cid)
         if uid and str(uid) in owners:
-            return _refuse(state, item, iid, "unknown item", UNKNOWN,
+            return _refuse(ctx, state, item, iid, "unknown item", UNKNOWN,
                            "replied", cid, None, now)
-        return _refuse(state, item, iid, "unknown item", None, "skipped",
-                       None, None, now)
+        return _refuse(ctx, state, item, iid, "unknown item", None,
+                       "skipped", None, None, now)
     uid = str(meta.get("author_id") or "")
     mcid = str(meta.get("channel_id") or "")
     if uid not in owners or meta.get("bot"):
@@ -811,35 +886,49 @@ def process(ctx, state, item):
         if now - last >= ALERT_EVERY:
             state["nl_alert_at"] = now
             alert = _alert_text(ctx, meta, item)
-        r = _refuse(state, item, iid, "not an owner", None, "skipped", None,
-                    None, now, alert)
+        r = _refuse(ctx, state, item, iid, "not an owner", None, "skipped",
+                    None, None, now, alert, meta)
         if alert is None:
             r.logs[0] += " (owners were alerted within the hour)"
         return r
     if cid != mcid:
-        return _refuse(state, item, iid, "wrong channel", None, "skipped",
-                       None, None, now)
+        return _drop(ctx, item, iid, "wrong channel", meta)
     target = _reply_target(state, item, iid)
     if not meta.get("dm") or meta.get("kind") != "dm":
-        return _refuse(state, item, iid, "not a DM", NOT_DM, "replied",
-                       mcid, target, now)
+        return _refuse(ctx, state, item, iid, "not a DM", NOT_DM, "replied",
+                       mcid, target, now, meta=meta)
     if str(ctx.dm_channel_user(cid) or "") != uid:
-        return _refuse(state, item, iid, "wrong channel", None, "skipped",
-                       None, None, now)
+        return _drop(ctx, item, iid, "wrong channel", meta)
+    # The capability: only the wake that was handed this owner DM knows
+    # its nonce (never in reply_queue.json). Used once.
+    want = ((state.get("nl_nonces") or {}).get(iid) or {}).get("nonce")
+    got = (item.get("settings") or {}).get("nonce")
+    if not want or not isinstance(got, str) \
+            or not hmac.compare_digest(str(want), got):
+        return _drop(ctx, item, iid, "bad nonce", meta)
+    state["nl_nonces"].pop(iid, None)
     if meta.get("forwarded"):
-        return _refuse(state, item, iid, "forwarded", FORWARDED, "replied",
-                       cid, target, now)
-    st = ctx.reload()
-    if group_written(st, f"nl-{iid}"):
-        return _refuse(state, item, iid, "already done", ALREADY, "replied",
-                       cid, target, now)
-    sent_at = snowflake_secs(iid) or now
-    age = now - sent_at
-    if age > MAX_AGE:
-        return _refuse(state, item, iid, "too old", TOO_OLD, "replied", cid,
-                       target, now)
-    return _decide(ctx, state, item, iid, meta, uid, cid, target, st, age,
-                   now)
+        return _refuse(ctx, state, item, iid, "forwarded", FORWARDED,
+                       "replied", cid, target, now, meta=meta)
+    with ctx.write_lock():
+        st = ctx.reload()
+        if group_written(st, f"nl-{iid}"):
+            return _refuse(ctx, state, item, iid, "already done", ALREADY,
+                           "replied", cid, target, now, meta=meta)
+        sent_at = snowflake_secs(iid) or now
+        age = now - sent_at
+        if age > MAX_AGE:
+            return _refuse(ctx, state, item, iid, "too old", TOO_OLD,
+                           "replied", cid, target, now, meta=meta)
+        return _decide(ctx, state, item, iid, meta, uid, cid, target, st,
+                       age, now)
+
+
+def _failed(e):
+    """A reason for an unexpected failure, short and without paths."""
+    if isinstance(e, MS.SettingsError):
+        return str(e).rstrip(".")
+    return f"something went wrong saving it ({type(e).__name__})"
 
 
 def _decide(ctx, state, item, iid, meta, uid, cid, target, st, age, now):
@@ -852,8 +941,8 @@ def _decide(ctx, state, item, iid, meta, uid, cid, target, st, age, now):
     try:
         plan = plan_action(ctx, st, inf, item["settings"], uid, names,
                            people)
-    except MS.SettingsError as e:
-        text = INVALID + str(e).rstrip(".") + "."
+    except Exception as e:
+        text = INVALID + _failed(e) + "."
         rec = _outcome("replied", "settings: refused (invalid)",
                        _clip(text), None, cid, target, "invalid", now)
         state.setdefault("nl_outcomes", {})[iid] = rec
@@ -871,6 +960,9 @@ def _decide(ctx, state, item, iid, meta, uid, cid, target, st, age, now):
     if meta.get("has_inputs"):
         why.append("Your message came with attachments or answered "
                    "someone else's message, so I want your OK.")
+    if plan.free_text:
+        why.append("This sets text I will follow or show, so I want your "
+                   "OK on the exact words.")
     group = f"nl-{iid}"
     if plan.warnings or why or plan.lockout:
         tok = new_token()
@@ -888,7 +980,7 @@ def _decide(ctx, state, item, iid, meta, uid, cid, target, st, age, now):
             pend["undo_id"] = group
         _add(ctx, state, "pending", tok, pend)
         rec = _outcome("replied", "settings: confirm asked",
-                       card_text(plan, lead, why), confirm_buttons(tok),
+                       card_text(plan, None, why), confirm_buttons(tok),
                        cid, target, "confirm", now)
         rec["pending"] = tok
         state.setdefault("nl_outcomes", {})[iid] = rec
@@ -900,23 +992,27 @@ def _decide(ctx, state, item, iid, meta, uid, cid, target, st, age, now):
         text = done_text(plan, "Done:", lead)
         rec = _outcome("replied", "settings: applied", text,
                        undo_button(tok), cid, target, "applied", now)
-        rec.update(phase="applying", group=group, undo_token=tok)
+        rec.update(phase="applying", group=group, undo_token=tok,
+                   nonce=(item.get("settings") or {}).get("nonce"))
         state.setdefault("nl_outcomes", {})[iid] = rec
         _add(ctx, state, "undo", tok, {"owner": uid, "group": group,
                                        "at": now, "channel_id": cid})
         ctx.save(state)
         try:
             ctx.apply(plan.changes, uid, role="owner", group=group)
-        except MS.SettingsError as e:
-            (state.get("nl_undo") or {}).pop(tok, None)
-            with ctx.live.lock:
-                ctx.live.undo.pop(tok, None)
-            rec.update(_outcome("replied", "settings: refused (invalid)",
-                                _clip(INVALID + str(e).rstrip(".") + "."),
-                                None, cid, target, "invalid", now))
-            ctx.save(state)
-            return Result(rec, [f"Settings (DM) from {who}: nothing changed "
-                                f"({e})"])
+        except Exception as e:
+            if not group_written(ctx.reload(), group):
+                (state.get("nl_undo") or {}).pop(tok, None)
+                with ctx.live.lock:
+                    ctx.live.undo.pop(tok, None)
+                rec.update(_outcome("replied", "settings: refused "
+                                    "(invalid)", _clip(INVALID + _failed(e)
+                                                       + "."),
+                                    None, cid, target, "invalid", now))
+                ctx.save(state)
+                return Result(rec, [f"Settings (DM) from {who}: nothing "
+                                    f"changed ({_failed(e)})"])
+            # Else written after all (the error came after the write).
         rec["phase"] = "ready"
         ctx.save(state)
         return Result(rec, [f"Settings (DM) from {who}: applied {group}: "
@@ -925,18 +1021,20 @@ def _decide(ctx, state, item, iid, meta, uid, cid, target, st, age, now):
     rec = _outcome("replied", "settings: applied",
                    done_text(plan, "Undone:", lead), None, cid, target,
                    "applied", now)
-    rec.update(phase="applying", group=group)
+    rec.update(phase="applying", group=group,
+               nonce=(item.get("settings") or {}).get("nonce"))
     state.setdefault("nl_outcomes", {})[iid] = rec
     ctx.save(state)
     try:
         _run_undo(ctx, plan, uid, group)
-    except MS.SettingsError as e:
-        rec.update(_outcome("replied", "settings: refused (invalid)",
-                            _clip(INVALID + str(e).rstrip(".") + "."), None,
-                            cid, target, "invalid", now))
-        ctx.save(state)
-        return Result(rec, [f"Settings (DM) from {who}: nothing changed "
-                            f"({e})"])
+    except Exception as e:
+        if not group_written(ctx.reload(), group):
+            rec.update(_outcome("replied", "settings: refused (invalid)",
+                                _clip(INVALID + _failed(e) + "."), None,
+                                cid, target, "invalid", now))
+            ctx.save(state)
+            return Result(rec, [f"Settings (DM) from {who}: nothing "
+                                f"changed ({_failed(e)})"])
     rec["phase"] = "ready"
     ctx.save(state)
     return Result(rec, [f"Settings (DM) from {who}: undid "
@@ -1006,7 +1104,8 @@ def on_button(ctx, ix, rest, uid, record):
             ctx.log(f"Settings (DM): {uid} cancelled mdnl {tok}; nothing "
                     f"changed")
             return _update(CANCELLED)
-        return _confirmed(ctx, tok, rec, uid, record, now)
+        with ctx.write_lock():
+            return _confirmed(ctx, tok, rec, uid, record, now)
     if verb == "undo":
         with live.lock:
             rec = live.undo.get(tok)
@@ -1019,7 +1118,8 @@ def on_button(ctx, ix, rest, uid, record):
             if rec is not None:
                 record({"kind": "nl", "drop_undo": [tok]})
             return _ephemeral(INACTIVE)
-        return _undo_clicked(ctx, ix, tok, rec, uid, record, now)
+        with ctx.write_lock():
+            return _undo_clicked(ctx, ix, tok, rec, uid, record, now)
     return _ephemeral(INACTIVE)
 
 
@@ -1045,33 +1145,42 @@ def _confirmed(ctx, tok, rec, uid, record, now):
     people = ctx.person_names() or {}
     try:
         plan = replan(ctx, st, inf, rec, names, people)
-    except MS.SettingsError as e:
+    except Exception as e:
         record({"kind": "nl", "drop_pending": [tok]})
-        return _update(INVALID + str(e).rstrip(".") + ".")
+        return _update(INVALID + _failed(e) + ".")
     if plan.nothing is not None:
         record({"kind": "nl", "drop_pending": [tok]})
         return _update(plan.nothing)
     if plan.fingerprint != rec.get("fp"):
         return _fresh_card(ctx, rec, plan, uid, record, now,
                            {"drop_pending": [tok]})
+    utok = new_token()
+    urec = {"owner": uid, "group": rec.get("group"), "at": now,
+            "channel_id": rec.get("channel_id")}
+    if plan.kind == "apply":
+        # Written down before the overlay write: a crash before the main
+        # loop records the Undo button is recovered at startup.
+        ctx.journal_put(tok, {"group": rec["group"], "undo": utok,
+                              "urec": urec, "at": now})
     try:
         if plan.kind == "apply":
             ctx.apply(plan.changes, uid, role="owner", group=rec["group"])
         else:
             _run_undo(ctx, plan, uid, rec.get("undo_id"))
-    except MS.SettingsError as e:
+    except Exception as e:
+        if plan.kind == "apply" and not group_written(ctx.reload(),
+                                                      rec["group"]):
+            ctx.journal_drop(tok)
         record({"kind": "nl", "drop_pending": [tok]})
-        return _update(INVALID + str(e).rstrip(".") + ".")
+        return _update(INVALID + _failed(e) + ".")
     if plan.kind != "apply":
         record({"kind": "nl", "drop_pending": [tok]})
         ctx.log(f"Settings (DM): {uid} chose Apply for mdnl {tok}; undid "
                 f"{plan.group or plan.ident}")
         return _update(done_text(plan, "Undone:"))
-    utok = new_token()
-    urec = {"owner": uid, "group": rec["group"], "at": now,
-            "channel_id": rec.get("channel_id")}
     ctx.live.add("undo", utok, urec)
-    record({"kind": "nl", "drop_pending": [tok], "undo": {utok: urec}})
+    record({"kind": "nl", "drop_pending": [tok], "undo": {utok: urec},
+            "journal": tok})
     ctx.log(f"Settings (DM): {uid} chose Apply for mdnl {tok}; applied "
             f"{rec['group']}")
     return _update(done_text(plan, "Applied:"), undo_button(utok))
@@ -1101,10 +1210,10 @@ def _undo_clicked(ctx, ix, tok, rec, uid, record, now):
         return _update(card_text(plan), confirm_buttons(ptok))
     try:
         ctx.undo_group(group, uid, f"nl-undo-{tok}")
-    except MS.SettingsError as e:
+    except Exception as e:
         record({"kind": "nl", "drop_undo": [tok]})
         return _update((original + "\n\n" if original else "")
-                       + f"Nothing was undone: {e}")
+                       + f"Nothing was undone: {_failed(e)}.")
     record({"kind": "nl", "drop_undo": [tok]})
     ctx.log(f"Settings (DM): {uid} undid {group}: " + "; ".join(plan.lines))
     return _update(done_text(plan, "Undone:"))
@@ -1150,26 +1259,65 @@ def _line_id(h):
                       sort_keys=True, default=str)
 
 
-def new_cli_groups(prev, cur, names=None):
-    """Change groups that appeared in config.discord.yaml's history
-    between two Settings and were made by a name, not a user id
-    (bin/settings.py: muse.ai, or another --by). [{group, by, lines,
-    undoable}], oldest first."""
-    before = {_line_id(h) for h in (prev.overlay_doc or {}).get("history")
-              or [] if isinstance(h, dict)}
-    groups = {}
-    order = []
-    for h in (cur.overlay_doc or {}).get("history") or []:
-        if not isinstance(h, dict) or "to" not in h or h.get("retired") \
-                or h.get("folded") or _line_id(h) in before:
-            continue
-        by = str(h.get("by") or "")
-        if not by or MS._id_str(by) is not None:
+def _layer_effective(st, place, key, path, v):
+    """What key resolves to at place when its layer (path) holds v (a
+    history line's from / to; "inherit": the layer sets nothing)."""
+    spec = st.spec(key)
+    if v == "inherit" or v is None:
+        if path == ("top",):
+            return MS.TOP[key].default if key in MS.TOP else None
+        sc = MS._scope_for(place, key, path)
+        return st.value_without(sc, key, path) if sc is not None else None
+    ok, norm = MS.normalize(spec, v) if spec is not None else (False, v)
+    return norm if ok else v
+
+
+def _cli_line(h):
+    """A history line the owners are told about: any line of a cli-*
+    group (bin/settings.py, whatever its --by), or any line written by a
+    name rather than a user id. Never retired or folded lines."""
+    if not isinstance(h, dict) or "to" not in h or h.get("retired") \
+            or h.get("folded"):
+        return False
+    g = str(h.get("group") or "")
+    if g.startswith("cli-"):
+        return True
+    by = str(h.get("by") or "")
+    return bool(by) and MS._id_str(by) is None and not g.startswith("nl-")
+
+
+def new_cli_groups(st, state, names=None):
+    """Change groups made with bin/settings.py since the last call, from
+    config.discord.yaml's history and the position saved in state.json
+    (nl_history_mark), so changes made while the monitor was down are
+    noticed at its start. The first time, only the position is saved
+    (no flood of old changes). [{group, by, lines, undoable}], oldest
+    first."""
+    hist = [h for h in (st.overlay_doc or {}).get("history") or []
+            if isinstance(h, dict)]
+    ids = [_line_id(h) for h in hist]
+    mark = state.get("nl_history_mark")
+    last = {"id": ids[-1] if ids else None,
+            "at": str(hist[-1].get("at") or "") if hist else None}
+    if not isinstance(mark, dict):
+        state["nl_history_mark"] = last
+        return []
+    if mark.get("id") in ids:
+        new = hist[len(ids) - ids[::-1].index(mark["id"]):]
+    else:
+        after = str(mark.get("at") or "")
+        new = [h for h in hist if str(h.get("at") or "") > after]
+    if last != mark:
+        state["nl_history_mark"] = last
+    groups, order = {}, []
+    for h in new:
+        if not _cli_line(h):
             continue
         gid = h.get("group") or "line:" + _line_id(h)
         if gid not in groups:
-            groups[gid] = {"group": h.get("group"), "by": by, "lines": [],
-                           "undoable": bool(h.get("group")), "keys": []}
+            groups[gid] = {"group": h.get("group"),
+                           "by": str(h.get("by") or "?"), "lines": [],
+                           "undoable": bool(h.get("group"))}
             order.append(gid)
         g = groups[gid]
         if h.get("undo"):
@@ -1182,11 +1330,11 @@ def new_cli_groups(prev, cur, names=None):
         if place is None:
             continue
         try:
-            old = MS.place_value(prev, place, key, path)
-            new = MS.place_value(cur, place, key, path)
+            old = _layer_effective(st, place, key, path, h.get("from"))
+            nw = _layer_effective(st, place, key, path, h.get("to"))
         except Exception:
-            old, new = h.get("from"), h.get("to")
-        g["lines"].append(MS.describe_change(place, key, old, new, names,
+            old, nw = h.get("from"), h.get("to")
+        g["lines"].append(MS.describe_change(place, key, old, nw, names,
                                              path))
     return [groups[g] for g in order]
 

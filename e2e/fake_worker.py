@@ -58,6 +58,7 @@ WORKER_ITEMS_KEEP = 200
 FLAGS = ("silent", "long", "everyone", "mention_a", "slow")
 SAY_RE = re.compile(r"\[\[say:([^\]]*)\]\]")
 SETTINGS_RE = re.compile(r"\[\[settings:([^\]]*)\]\]")
+NO_NONCE = "0" * 32
 
 
 def load_json(path, default):
@@ -218,7 +219,11 @@ def build_reply(item, a_id=None):
         text = text[:LONG_CHARS]
     out["text"] = text
     if "settings" in flags and settings_changes(item):
-        out["settings"] = {"v": 1, "changes": settings_changes(item)}
+        # The nonce comes in an owner-DM-only wake's payload; this
+        # worker reads the queue file, which never has it, so its
+        # actions only ever test the monitor's refusals.
+        out["settings"] = {"v": 1, "nonce": item.get("settings_nonce")
+                           or NO_NONCE, "changes": settings_changes(item)}
     return out, delay
 
 

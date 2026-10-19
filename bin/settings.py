@@ -50,7 +50,9 @@ they lead to: strangers' DMs, your memory in a big server, Pause
 everywhere, ...) are printed with a warning and NOT made unless --yes
 is given: only add --yes after the owner explicitly said yes (exit
 status 3 = needs --yes). --by NAME records who asked (default
-muse.ai); --category ID names a channel's category.
+muse.ai); it is a name, never a user id (ids are for changes made in
+Discord): every change made here is sent to the owners in a silent DM
+with an Undo button. --category ID names a channel's category.
 
 --config PATH picks the file (default: $MUSE_DISCORD_CONFIG, else
 config.yaml in the package directory).
@@ -493,6 +495,13 @@ def main(argv=None):
     pl.add_argument("--find", help="only names containing this text")
     pl.add_argument("--server", help="only this server id")
     args = ap.parse_args(argv)
+    by = getattr(args, "by", None)
+    if by is not None and (not str(by).strip()
+                           or MS._id_str(str(by)) is not None):
+        print(f"--by {by!r}: give a name (like muse.ai), not a user id; "
+              f"user ids are for changes made in Discord.",
+              file=sys.stderr)
+        return 2
     try:
         return {"validate": cmd_validate, "show": cmd_show,
                 "fold": cmd_fold, "migrate": cmd_migrate, "set": cmd_set,

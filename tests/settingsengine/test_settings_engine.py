@@ -1029,11 +1029,11 @@ class CLI(unittest.TestCase):
         self.assertEqual(rc, 3, out)   # undoing to Chatty in a big server
         self.assertIn("Warning: Chatty in Lounge", out)
         rc, out = self.run_cli("undo", "--place", f"server:{G1}", "--yes",
-                               "--by", OWNER)
+                               "--by", "zach")
         self.assertEqual(rc, 0, out)
         self.assertIn("Undo: In Lounge, When it answers → back to Chatty",
                       out)
-        self.assertEqual(doc(self.cfg)["history"][-1]["by"], OWNER)
+        self.assertEqual(doc(self.cfg)["history"][-1]["by"], "zach")
         rc, out = self.run_cli("undo", "--place", f"server:{G1}")
         self.assertIn("Nothing to undo in Lounge", out)
 
@@ -1486,9 +1486,15 @@ class ReviewLow(unittest.TestCase):
             rc, out = cli("set", "who.replies", "off", "--place",
                           f"channel:{G1}:{CH}", "--category", bad)
             self.assertEqual(rc, 1, out)
+        # --by is a name: a user id (an owner's or anyone's) is refused,
+        # so a CLI change can never pass for a Discord-side one.
+        for by in (ADMIN, OWNER, " "):
+            rc, out = cli("set", "style.length", "brief", "--place",
+                          f"server:{G1}", "--by", by)
+            self.assertEqual(rc, 2, out)
         rc, out = cli("set", "style.length", "brief", "--place",
-                      f"server:{G1}", "--by", ADMIN)
-        rc, out = cli("undo", "--place", f"server:{G1}", "--by", ADMIN)
+                      f"server:{G1}", "--by", "helper")
+        rc, out = cli("undo", "--place", f"server:{G1}", "--by", "helper")
         self.assertEqual(rc, 0, out)
         for h in doc(cfg)["history"]:
             self.assertNotIn("role", h)

@@ -70,7 +70,9 @@ class Directive(unittest.TestCase):
         self.assertIn("settings", fake_worker.directives(it))
         out, _ = fake_worker.build_reply(it)
         self.assertEqual(out["text"], "ack 3")
-        self.assertEqual(out["settings"], {"v": 1, "changes": [
+        self.assertEqual(out["settings"], {"v": 1,
+                                           "nonce": fake_worker.NO_NONCE,
+                                           "changes": [
             {"op": "set", "place": f"channel:{GID}:{CID}",
              "key": "who.replies", "value": "off"},
             {"op": "reset", "place": f"server:{GID}",
@@ -81,6 +83,11 @@ class Directive(unittest.TestCase):
         self.assertNotIn("settings", out)
         out, _ = fake_worker.build_reply(item("plain"))
         self.assertNotIn("settings", out)
+        # A payload nonce (owner-DM-only wakes) is echoed.
+        it = item("[[settings:undo]]")
+        it["settings_nonce"] = "ab" * 16
+        out, _ = fake_worker.build_reply(it)
+        self.assertEqual(out["settings"]["nonce"], "ab" * 16)
 
     def test_outbox_append_accepts_it(self):
         pkg = tempfile.mkdtemp(prefix="e2e-nl-")

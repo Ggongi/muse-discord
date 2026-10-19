@@ -120,11 +120,18 @@ class Base(unittest.TestCase):
         self.out += buf.getvalue()
         return buf.getvalue()
 
-    def action(self, msg, changes, text="Sure.", channel=None, **extra):
+    def nonce(self, mid):
+        """The capability the wake hook hands an owner-DM-only wake."""
+        return ((self.st.get("nl_nonces") or {}).get(mid) or {}).get(
+            "nonce") or "0" * 32
+
+    def action(self, msg, changes, text="Sure.", channel=None, nonce=None,
+               **extra):
         item = {"item": msg["id"], "channel_id": channel or msg["channel_id"],
                 "channel_name": "DM with owner", "author": "owner",
                 "reply_to": msg["id"],
-                "settings": {"v": 1, "changes": changes}}
+                "settings": {"v": 1, "nonce": nonce or self.nonce(msg["id"]),
+                             "changes": changes}}
         if text is not None:
             item["text"] = text
         item.update(extra)
@@ -339,6 +346,17 @@ class Eligibility(Base):
         self.st = state(self.mod)
         self.st["item_meta"] = {m["id"]: meta}
         self.st["replied_to"] = []
+        replay = self.action(m, [ch("set", GEN, "who.replies",
+                                    "when-addressed")])
+        n = len(self.sends())
+        self.outbox(replay)   # its nonce was spent (and is gone now)
+        self.assertEqual(self.overlay(), before)
+        self.assertEqual(len(self.sends()), n)
+        self.assertIn("bad nonce", self.rejected()[-1]["reason"])
+        # Even with a fresh capability (the sweep requeued the DM after
+        # state.json was lost), the overlay's history blocks it.
+        with quiet():
+            self.mod.nl_mint_nonce(self.st, m["id"])
         self.outbox(self.action(m, [ch("set", GEN, "who.replies",
                                        "when-addressed")]))
         self.assertEqual(self.overlay(), before)
@@ -502,9 +520,17 @@ class Meaning(Base):
         self.refused([ch("remove", f"server:{G1}", "who.allow", [a])],
                      "nobody")
 
+    def apply_card(self):
+        """Click Apply on the card just sent (free text always asks)."""
+        self.assertIn("needs your OK first", self.last()["content"])
+        r = self.click(self.custom_ids(self.last())[0])
+        self.assertTrue(r["data"]["content"].startswith("Applied:"), r)
+
     def test_notes_add_and_limit(self):
         self.ask([ch("add", GEN, "style.notes", "Be kind.")])
+        self.apply_card()
         self.ask([ch("add", GEN, "style.notes", "Use British spelling.")])
+        self.apply_card()
         self.assertEqual(self.value(GEN, "style.notes"),
                          "Be kind.\nUse British spelling.")
         self.refused([ch("add", GEN, "style.notes", "x" * 480)],
@@ -515,7 +541,7 @@ class Meaning(Base):
     def test_partial_and_all_noop(self):
         self.ask([ch("set", GEN, "who.replies", "off")])
         self.ask([ch("set", GEN, "who.replies", "off"),
-                  ch("set", GEN, "style.notes", "Short answers.")])
+                  ch("set", f"server:{G1}", "style.length", "brief")])
         text = self.last()["content"]
         self.assertIn("Done:", text)
         self.assertIn("(already so)", text)
@@ -896,11 +922,15 @@ class CliNotices(Base):
         self.assertNotIn("nl_notices", self.st)
 
     def test_settings_ui_changes_are_not_notices(self):
+        with quiet():
+            self.mod.nl_upkeep(self.st)
         ctx = self.mod.SettingsCtx()
         ctx.apply([MS.Change(MS.Place.server(G1), "style.length", "brief")],
                   OWNER, "owner")
         self.reload()
-        self.assertEqual(self.mod._NL_CLI_GROUPS, [])
+        with quiet():
+            self.mod.nl_upkeep(self.st)
+        self.assertNotIn("nl_notices", self.st)
 
 
 # ---------------------------------------------------------------------------
@@ -961,7 +991,7 @@ class Card(Base):
 class Shape(Base):
     def probs(self, changes=None, **item):
         it = {"item": "123", "channel_id": "4",
-              "settings": {"v": 1, "changes": changes or [
+              "settings": {"v": 1, "nonce": "ab" * 16, "changes": changes or [
                   ch("set", "dms", "who.replies", "off")]}}
         it.update(item)
         return self.mod.NL.shape_problems(it, self.mod.PLUGINS_DIR)
@@ -1020,8 +1050,16 @@ class Shape(Base):
         p = self.mod.NL.shape_problems(it)
         self.assertTrue(any("v must be 1" in x for x in p))
         it["settings"] = {"changes": []}
-        self.assertIn('settings must be {"v": 1, "changes": [...]}',
+        self.assertIn('settings must be {"v": 1, "nonce": "<the item\'s '
+                      'settings_nonce>", "changes": [...]}',
                       self.mod.NL.shape_problems(it))
+        for bad in (None, "", "xyz", "AB" * 16, 7):
+            it["settings"] = {"v": 1, "nonce": bad, "changes": [
+                ch("undo")]}
+            if bad is None:
+                del it["settings"]["nonce"]
+            self.assertTrue(any("settings_nonce" in x for x in
+                                self.mod.NL.shape_problems(it)), bad)
 
 
 if __name__ == "__main__":

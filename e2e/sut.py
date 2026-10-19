@@ -88,8 +88,8 @@ COPY_IGNORE = shutil.ignore_patterns(
     "reply_outbox*.json", "reply.lock", ".*.tmp", "quarantine.json",
     "mention_ledger.json", "monitor.pid", "monitor.heartbeat",
     "watchdog_state.json", "watchdog.lock", "update_check.json",
-    "update_request.json", "directory.json", "*.log", "*.log.1", "media",
-    "generated", "out")
+    "update_request.json", "directory.json", "owner_dm_nonces.json",
+    "nl_journal.json", "*.log", "*.log.1", "media", "generated", "out")
 READY_IDENTITY = "Bot user id: "
 READY_DISCOVERY = "muse-discord monitor starting."
 READY_GATEWAY_ON = "Gateway READY: realtime ingest live."

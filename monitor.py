@@ -209,10 +209,6 @@ def _on_settings_changed(prev, cur):
         load_plugins()  # a plugin turned on somewhere for the first time
     except Exception as e:
         print(f"Plugin load after reload failed: {e}", flush=True)
-    try:
-        nl_note_changes(prev, cur)  # changes made with bin/settings.py
-    except Exception as e:
-        print(f"Settings change notice failed: {e}", flush=True)
 
 
 def _cfg_num(section, key, default, cast, name, minimum=None,
@@ -1903,6 +1899,10 @@ def apply_record(state, rec):
     thread decided (it never writes state.json itself)."""
     if rec.get("kind") == "nl":   # plain-language settings buttons
         NL.apply_record(state, rec)
+        if rec.get("journal"):
+            # Recorded for good: the crash journal entry can go.
+            save_state(state)
+            nl_journal(drop=rec["journal"])
     elif rec.get("kind") == "update_choice":
         upd = state.setdefault("update_notice", {})
         if rec.get("version") == upd.get("version"):
@@ -2469,7 +2469,83 @@ register_interaction("/" + SETTINGS_COMMAND["name"], on_settings_interaction,
 # ---------------------------------------------------------------------------
 _nl_live = NL.Live()
 _NL_PEOPLE = {}        # user id -> name, from the conversation history
-_NL_CLI_GROUPS = []    # CLI change groups seen on reload (main loop)
+# Capability nonces of open owner-DM items (state["nl_nonces"]), for the
+# wake hook only: mode 600, never read by a worker (like the token).
+OWNER_DM_NONCES_FILE = os.path.join(BASE_DIR, "owner_dm_nonces.json")
+_NL_NONCES_WRITTEN = {"body": None}
+# Apply clicks written down before their overlay write (interaction
+# thread), recovered at startup (settings_nl.recover).
+NL_JOURNAL_FILE = os.path.join(BASE_DIR, "nl_journal.json")
+_NL_JOURNAL_LOCK = threading.Lock()
+_NL_UPKEEP = {"settings": None}
+
+
+def _write_private(path, obj):
+    """Atomic JSON write, mode 600 whatever the file had."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                               prefix="." + os.path.basename(path) + ".",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            os.fchmod(f.fileno(), 0o600)
+            json.dump(obj, f)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def nl_journal(put=None, drop=None):
+    """nl_journal.json: read it, or add (put=(token, entry)) or remove
+    (drop=token) one entry. Any thread."""
+    with _NL_JOURNAL_LOCK:
+        try:
+            with open(NL_JOURNAL_FILE) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        data = data if isinstance(data, dict) else {}
+        if put is not None:
+            data[put[0]] = put[1]
+        elif drop is not None and drop in data:
+            del data[drop]
+        else:
+            return data
+        _write_private(NL_JOURNAL_FILE, data)
+        return data
+
+
+def nl_mint_nonce(state, mid):
+    """A capability for one owner-DM queue item (see settings_nl): 128
+    random bits, kept in state and the hook's private file, never in
+    reply_queue.json."""
+    n = state.setdefault("nl_nonces", {})
+    n[str(mid)] = {"nonce": secrets.token_hex(16), "at": time.time()}
+    for old in list(n)[:-300]:
+        del n[old]
+    nl_write_nonces(state)
+
+
+def nl_write_nonces(state):
+    """owner_dm_nonces.json = the nonces of open owner-DM items (written
+    only when that changed; expired ones dropped)."""
+    n = state.get("nl_nonces") or {}
+    now = time.time()
+    for k in [k for k, v in n.items()
+              if not isinstance(v, dict) or now - v.get("at", 0)
+              > NL.MAX_AGE]:
+        del n[k]
+    body = {k: v["nonce"] for k, v in n.items()}
+    if body == _NL_NONCES_WRITTEN["body"]:
+        return
+    try:
+        _write_private(OWNER_DM_NONCES_FILE, body)
+        _NL_NONCES_WRITTEN["body"] = body
+    except OSError as e:
+        print(f"Could not write owner_dm_nonces.json: {e}", flush=True)
 
 
 def is_forwarded(msg):
@@ -2505,6 +2581,37 @@ class _NlCtx(SettingsCtx):
     def person_names(self):
         return dict(_NL_PEOPLE)
 
+    def channel_label(self, cid):
+        """A place name the monitor knows (never an outbox field)."""
+        cid = str(cid)
+        if cid in DM_CHANNELS:
+            return "a DM with me"
+        info = CHANNELS.get(cid)
+        if info:
+            name = str(info.get("name") or cid).lstrip("#")
+            g = info.get("guild_id")
+            gname = (GUILDS.get(g) or {}).get("name") \
+                or info.get("guild_name") or g
+            return f"#{name} in {gname}" if gname else f"#{name}"
+        return f"channel {cid}"
+
+    @contextlib.contextmanager
+    def write_lock(self):
+        """The overlay write lock (this process, then the file), held
+        across a decision and its write. Re-entrant."""
+        with _OVERLAY_LOCK:
+            with MS.overlay_lock(MS.overlay_path_for(_SETTINGS.config_path)):
+                yield
+
+    def journal_all(self):
+        return nl_journal()
+
+    def journal_put(self, tok, entry):
+        nl_journal(put=(tok, entry))
+
+    def journal_drop(self, tok):
+        nl_journal(drop=tok)
+
     def undo_changes(self, place, by, children, expect, undo_id):
         with _OVERLAY_LOCK:
             out = MS.undo_changes(_SETTINGS.config_path, place, by,
@@ -2530,14 +2637,27 @@ def _nl_note_people(state):
 
 def nl_outbox_item(state, item):
     """Decide and answer one settings request from the outbox. Returns
-    "settled" or "retry" (a failed send waits for its next try)."""
+    "settled", "retry" (a failed send waits for its next try) or
+    ("rejected", reason): refused without settling its queue item (a
+    forged or misdirected action), set aside for review."""
     retry = item.get("_retry") or {}
     if retry.get("next", 0) > time.time():
         return "retry"
     _nl_note_people(state)
-    res = NL.process(_NlCtx(state), state, item)
+    try:
+        res = NL.process(_NlCtx(state), state, item)
+    except Exception as e:
+        # Never wedge the outbox on one item.
+        print(f"Settings request for item {item.get('item')} failed: "
+              f"{type(e).__name__}: {e}", flush=True)
+        return ("rejected", f"settings: internal error "
+                            f"({type(e).__name__})")
+    finally:
+        nl_write_nonces(state)
     for line in res.logs:
         print(line, flush=True)
+    if res.rec is None:
+        return ("rejected", res.reject)
     if res.alert:
         ok = notify_owners(res.alert)
         print("Settings refusal alert: "
@@ -2584,12 +2704,26 @@ def on_nl_button(ix, rest, uid, record):
 register_interaction("mdnl", on_nl_button, owner_only=True)
 
 
-def nl_note_changes(prev, cur):
-    """Main loop, on a settings reload: change groups made by a name
-    (bin/settings.py, --by muse.ai) wait for the owners' notice."""
-    ctx = _NlCtx()
+def nl_note_changes(state):
+    """Main loop: change groups made with bin/settings.py since the
+    position saved in state.json wait for the owners' notice (so ones
+    made while the monitor was down are noticed too)."""
+    cur = settings()
+    if _NL_UPKEEP["settings"] is cur and "nl_history_mark" in state:
+        return
+    _NL_UPKEEP["settings"] = cur
+    ctx = _NlCtx(state)
     names = NL.names_for(ctx, MS._Info(ctx.info()), cur)
-    _NL_CLI_GROUPS.extend(NL.new_cli_groups(prev, cur, names))
+    NL.queue_notices(state, NL.new_cli_groups(cur, state, names),
+                     time.time())
+
+
+def nl_recover(state):
+    """Startup: settle Apply clicks a stop interrupted (settings_nl)."""
+    n = NL.recover(_NlCtx(state), state)
+    if n:
+        print(f"Settings requests: recovered {n} interrupted Apply "
+              f"click(s).", flush=True)
 
 
 def nl_upkeep(state):
@@ -2597,9 +2731,8 @@ def nl_upkeep(state):
     effort), prune, and send the batched notice of changes the owners'
     Muse made (silent DMs, with Undo)."""
     ctx = _NlCtx(state)
-    if _NL_CLI_GROUPS:
-        NL.queue_notices(state, list(_NL_CLI_GROUPS), time.time())
-        del _NL_CLI_GROUPS[:]
+    nl_note_changes(state)
+    nl_write_nonces(state)
     edits, logs = NL.expire(ctx, state)
     for line in logs:
         print(line, flush=True)
@@ -4592,6 +4725,10 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
                    forwarded=any(is_forwarded(m) for m in [msg] + fragments),
                    has_inputs=bool(media or documents) or bool(
                        reply_ctx and not reply_ctx.get("is_bot")))
+    if dm and str(author_id) in OWNER_USER_IDS and not from_bot:
+        # The settings-request capability for this owner DM (written
+        # for the wake hook before the item reaches the queue file).
+        nl_mint_nonce(state, msg["id"])
     print(f"Queued {item['kind']}{' (follow-up)' if item['follow_up'] else ''}"
           f" from {msg['author'].get('username')} in "
           f"{cname}{burst_note}: {content[:80]}", flush=True)
@@ -4856,8 +4993,11 @@ def process_outbox(state):
         if "settings" in item:
             # A settings request: the monitor decides and answers it
             # (settings_nl.py); the worker's text is a lead-in at most.
-            if nl_outbox_item(state, item) == "retry":
+            outcome = nl_outbox_item(state, item)
+            if outcome == "retry":
                 remaining.append(item)
+            elif isinstance(outcome, tuple):
+                rejects.append((item, outcome[1]))  # the item stays open
             else:
                 typing_clear(typing_keys)
                 settled.append(item)
@@ -5037,6 +5177,11 @@ def process_outbox(state):
         if not item.get("item") and item.get("reply_to"):
             done_ids.add(item["reply_to"])
             done_frags.add(item["reply_to"])
+
+    nonces = state.get("nl_nonces") or {}
+    for qid in done_ids & set(nonces):
+        del nonces[qid]   # answered: its capability is spent
+    nl_write_nonces(state)
 
     def answered(q):
         return q.get("message_id") in done_ids or any(
@@ -6088,6 +6233,7 @@ def main():
     # gateway inbox ("_record", applied by drain_gateway).
     _holds_live.update({hid: h.get("at", 0) for hid, h in
                         (state.get("holds") or {}).items()})
+    nl_recover(state)
     _nl_live.load(state)
     _update_announced["version"] = \
         (state.get("update_notice") or {}).get("version")

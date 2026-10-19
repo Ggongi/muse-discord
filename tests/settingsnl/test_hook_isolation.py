@@ -48,9 +48,33 @@ class OwnerDmWakesAlone(unittest.TestCase):
                            text=True, timeout=30)
         lines = r.stdout.splitlines()
         if not lines or not lines[0].startswith("WAKE:"):
+            self.payload = None
             return None, r.stderr
-        return [i["message_id"] for i in json.loads(lines[1])["items"]], \
-            r.stderr
+        self.payload = json.loads(lines[1])
+        return [i["message_id"] for i in self.payload["items"]], r.stderr
+
+    def test_nonce_only_in_an_owner_dm_only_wake(self):
+        with open(os.path.join(self.pkg, "owner_dm_nonces.json"), "w") as f:
+            json.dump({"2": "a" * 32, "5": "b" * 32}, f)
+        self.queue([item("1", "mention", "member"),
+                    item("2", "dm", "owner"),
+                    item("5", "dm", "owner")])
+        ids, _ = self.wake()
+        self.assertEqual(ids, ["2", "5"])
+        self.assertEqual([i.get("settings_nonce")
+                          for i in self.payload["items"]],
+                         ["a" * 32, "b" * 32])
+        ids, _ = self.wake()
+        self.assertEqual(ids, ["1"])
+        self.assertNotIn("settings_nonce", self.payload["items"][0])
+        self.assertNotIn("a" * 32, json.dumps(self.payload))
+        # A nonce file naming a server item never reaches its wake.
+        with open(os.path.join(self.pkg, "owner_dm_nonces.json"), "w") as f:
+            json.dump({"7": "c" * 32}, f)
+        self.queue([item("7", "mention", "owner")])
+        ids, _ = self.wake()
+        self.assertEqual(ids, ["7"])
+        self.assertNotIn("settings_nonce", self.payload["items"][0])
 
     def test_owner_dm_first_and_alone(self):
         self.queue([item("1", "mention", "member"),

@@ -65,7 +65,8 @@ def outbox(pkg):
 
 def settings_item(changes, **kw):
     it = {"item": "123", "channel_id": "456", "reply_to": "123",
-          "text": "Sure.", "settings": {"v": 1, "changes": changes}}
+          "text": "Sure.", "settings": {"v": 1, "nonce": "ab" * 16,
+                                        "changes": changes}}
     it.update(kw)
     return it
 
@@ -101,6 +102,11 @@ class OutboxAppend(unittest.TestCase):
             ([{"op": "set", "place": "dms", "key": "who.replies",
                "value": "off"}], {"text": "x" * 400}, "300 characters"),
         ]
+        it = settings_item([{"op": "undo"}])
+        del it["settings"]["nonce"]
+        rc, _out, err = append(self.pkg, [it])
+        self.assertEqual(rc, 1)
+        self.assertIn('copy the item\'s "settings_nonce"', err)
         for changes, extra, needle in cases:
             rc, out, err = append(self.pkg, [settings_item(changes,
                                                            **extra)])

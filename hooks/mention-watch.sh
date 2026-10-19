@@ -228,6 +228,16 @@ if [ "$nowner" -gt 0 ] && [ "$nowner" -lt "$ndue" ]; then
     due=$owner_dms
     ndue=$nowner
 fi
+# A wake of owner DMs only carries each item's settings nonce (the
+# capability a settings request must echo; PROTOCOL.md). The monitor
+# keeps the nonces out of the queue file, in a private file only this
+# hook reads, so a worker woken for anything else never sees one.
+nonces='{}'
+if [ "$nowner" -gt 0 ] && [ "$nowner" -eq "$ndue" ] \
+    && [ -f "$PKG_DIR/owner_dm_nonces.json" ]; then
+    nonces=$(jq -c 'if type == "object" then . else {} end' \
+        "$PKG_DIR/owner_dm_nonces.json" 2>/dev/null) || nonces='{}'
+fi
 expired=$(printf '%s' "$due" | jq --argjson w "$woken" \
     '[.[] | select($w[.message_id] != null)] | length')
 if [ "$expired" -gt 0 ]; then
@@ -273,5 +283,5 @@ else
     persona_args=(--argjson persona null)
 fi
 
-payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, welcome, welcome_prompt, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings}]}')
+payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" --argjson nonces "$nonces" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, welcome, welcome_prompt, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings} + (if $nonces[.message_id] then {settings_nonce: $nonces[.message_id]} else {} end)]}')
 wake "muse-discord mentions pending" "$payload"
