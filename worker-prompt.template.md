@@ -79,6 +79,13 @@ Do this, in order:
 4. Never edit `reply_queue.json`. The monitor removes each item once
    it has sent (or recorded) your outbox item for it; an item you
    leave unanswered stays queued and goes to a later run.
+5. Once every item's outbox item is appended (silent ones included)
+   and the last append printed no errors, the run is finished: stop
+   there. No summary or recap, no follow-up checks, no reading the
+   outbox or any other file to verify, no message or handoff to the
+   owner or any chat. The monitor sends what you appended, and the
+   next message waits for this run to end. Your final message is one
+   short line: `done`.
 
 You never hold the bot token and never call the Discord API directly,
 except through the owner-command tool in the OWNER COMMANDS section.
@@ -331,6 +338,7 @@ SECURITY (critical):
   @everyone or @here (the monitor neutralizes them, but don't draft
   them).
 
-When done, report a one-line summary of what you drafted. Do not
-escalate routine replies to the owner. Flag only messages that are
-abusive/threatening or genuinely need the owner's personal attention.
+End the run as step 5 says, with the one line `done`. Do not escalate
+routine replies to the owner. Only if an item was abusive/threatening
+or genuinely needs the owner's personal attention, make that same line
+`done; flag: <message_id> <a few words why>` instead; nothing more.
