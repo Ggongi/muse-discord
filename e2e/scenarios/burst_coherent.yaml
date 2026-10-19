@@ -1,0 +1,31 @@
+# Tier 2: one question typed as three quick fragments must get ONE
+# coherent answer to the whole question, threaded under the last
+# fragment (PROTOCOL.md worker obligation 6). no_sut_reply_to on the
+# first two fragments catches the burst not being coalesced (or the
+# worker replying under the wrong fragment).
+id: burst_coherent
+tier: 2
+title: "A question split over three quick messages gets one coherent answer"
+steps:
+  - send: { as: a, text: "<@SUT> so I'm trying to pick a language", label: q1 }
+  - send: { as: a, text: "for a small command-line tool", label: q2 }
+  - send: { as: a, text: "python or go, which would you pick and why?", label: q3 }
+  - wait_for: { sut_messages: 1, timeout: 240 }
+expect:
+  settle: 30
+  checks:
+    - no_sut_reply_to: q1
+    - no_sut_reply_to: q2
+    - latency: { from: q3, max: 240 }
+    - sut_reply_count: { min: 1, max: 4 }
+    - max_chars: 2000
+judge:
+  rubric: |
+    The user's question was split over three messages: they want to
+    know whether to use Python or Go for a small command-line tool,
+    and why. PASS when the bot gives one coherent answer that treats
+    the three messages as a single question: it picks (or clearly
+    weighs) Python vs Go specifically for a small CLI tool and gives a
+    reason. FAIL if it answers a fragment on its own (e.g. asks
+    "pick a language for what?"), answers twice, or ignores the CLI
+    context.
