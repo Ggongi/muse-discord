@@ -6,6 +6,32 @@ entries below the releases are pre-release history. **Action
 needed** lists what an existing install must do after updating;
 UPDATING.md walks a Muse through it.
 
+## 2026-10-19: Change settings from Discord with /settings
+
+New:
+
+- Type `/settings` in a DM with your bot or in a server. A private
+  page (only you see it) lets you pick a place (everywhere, DMs, all
+  servers, a server, a channel or category) and change how the bot
+  behaves there with menus and buttons. Changes apply at once, show
+  where each value comes from, and can be reset or undone. Risky
+  changes (your memory in a big server, strangers' DMs, unlimited
+  image generation) ask you to confirm first. "Why?" shows how each
+  value was decided.
+- Server admins can use `/settings` in their own server to make the
+  bot quieter there (replies off or only when addressed, plugins off,
+  ignore someone), never louder; you get a DM when they do.
+- When the bot joins a new server, its DM to you has a Configure
+  button.
+- Discord changes go to `config.discord.yaml`; your `config.yaml` is
+  never rewritten.
+
+**Action needed:**
+
+- None. The existing bot invite already covers slash commands; the
+  command registers itself on the next start. `/settings` can take a
+  minute to appear in Discord the first time.
+
 ## 2026-10-18: New settings, per server and per channel
 
 New:
