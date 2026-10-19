@@ -2760,7 +2760,7 @@ LABELS = {
     "plugins.welcome.notes": "Welcome notes",
     "plugins.media.enabled": "Image and video generation",
     "plugins.media.who": "Who can ask for images and video",
-    "plugins.media.per_day": "Images and video per day",
+    "plugins.media.per_day": "Generations per day",
     "presence.status": "Status line",
     "presence.kind": "Status kind",
     "updates.notify": "Update notices",
@@ -3819,29 +3819,34 @@ def _preset(name):
     return PRESETS[n]
 
 
-def preset_changes(st, name, place, info=None):
+def preset_changes(st, name, place, info=None, big="refuse"):
     """[Change] that apply preset name (friends | community | work) to a
     server place: one undo group when applied together. Keys a preset
     leaves unchanged are absent; Community's media cap only when media is
     on there; Work's instructions only when the server has none; changes
     that would change nothing are left out. Friends (anything it
     remembers) is refused for a server known to have more than 50
-    members. Presets are an owner's tool (admin_changes refuses them)."""
+    members; with big="skip" it is applied without that one key
+    instead (/settings' preview says so). Presets are an owner's tool
+    (admin_changes refuses them)."""
     title, values = _preset(name)
     if place.kind != "server":
         raise SettingsError("Presets apply to a whole server.")
     members = _Info(info).members(place.guild_id)
+    skip = set()
     if title == "Friends" and members is not None \
             and members > BIG_FOR_MEMORY:
-        raise SettingsError(
-            f"The Friends preset lets replies use anything it remembers "
-            f"about you, so it is only for servers of up to "
-            f"{BIG_FOR_MEMORY} members; this one has {members:,}.")
+        if big != "skip":
+            raise SettingsError(
+                f"The Friends preset lets replies use anything it "
+                f"remembers about you, so it is only for servers of up to "
+                f"{BIG_FOR_MEMORY} members; this one has {members:,}.")
+        skip.add("privacy.memory")
     out = []
     sc = Scope.server(place.guild_id)
     for key, value in values.items():
-        if st.spec(key) is None:
-            continue  # a plugin that is not installed
+        if st.spec(key) is None or key in skip:
+            continue  # a plugin that is not installed, or skipped
         if isinstance(value, tuple):
             cond, value = value
             if cond == _IF_MEDIA and not st.get("plugins.media.enabled", sc):
@@ -3953,7 +3958,7 @@ def _join(items):
     return ", ".join(items[:-1]) + " and " + items[-1]
 
 
-def assess(st, changes, info=None, names=None):
+def assess(st, changes, info=None, names=None, named=()):
     """Risk of changes judged by the OUTCOME: the settings in force after
     them against before, not the direction one key moved (an Undo is
     assessed the same way: pass undo_plan's changes). Only outcomes
@@ -3969,7 +3974,10 @@ def assess(st, changes, info=None, names=None):
     replies in a row to other bots unlimited or above 10; a plugin
     setting its manifest marks risky, loosened. Notes (not risky): Only
     answer these people in DMs while only owners can DM. info: member
-    counts and channel lists (see _Info); names: {id: name}."""
+    counts and channel lists (see _Info); names: {id: name}. named:
+    user ids the owner picked by name for this very change (a "who can
+    DM it" list): that those people can now DM the bot is what was
+    asked, so it is no warning."""
     inf = _Info(info)
     look_names = _chain_names(names, names_from(inf, st))
     look = _namer(look_names)
@@ -4012,6 +4020,8 @@ def assess(st, changes, info=None, names=None):
     # DMs open to more people.
     aud_b, aud_a = _dm_audience(st), _dm_audience(after)
     grew = _audience_grew(aud_b, aud_a)
+    if isinstance(grew, set) and named:
+        grew = grew - {str(n) for n in named} or None
     if grew is True and aud_a[0] == "any":
         out.warnings.append("Anyone on Discord, strangers included, can DM "
                             "the bot and get answers. Each answer costs a "
@@ -4094,7 +4104,7 @@ def assess(st, changes, info=None, names=None):
                                 f"can cost real money.")
         if uncapped:
             out.warnings.append(
-                f"Images and video per day: more than "
+                f"Generations per day: more than "
                 f"{MEDIA_PER_DAY_RISKY} (or no limit) for people other "
                 f"than you in {_join(uncapped)}. Generation can cost real "
                 f"money.")

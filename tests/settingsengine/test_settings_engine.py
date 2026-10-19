@@ -293,7 +293,7 @@ class Risk(unittest.TestCase):
                               C(S1, "plugins.media.who", "everyone")])
         self.assertTrue(any("Anyone in Lounge can ask for generated"
                             in w for w in a.warnings), a.warnings)
-        self.assertTrue(any("Images and video per day" in w
+        self.assertTrue(any("Generations per day" in w
                             for w in a.warnings))
         a = self.assess(cfg, [C(S1, "plugins.media.enabled", True),
                               C(S1, "plugins.media.who", [SAM]),
@@ -1579,6 +1579,50 @@ class FuzzAdmin(unittest.TestCase):
                 bad = {n: (er[n], et[n]) for n in _FUZZ_SCOPES
                        if _RANK[er[n]] > _RANK[et[n]]}
                 self.assertEqual(bad, {}, f"seed {seed}: " + "; ".join(log))
+
+
+# ---------------------------------------------------------------------------
+# 13. Engine additions for the /settings redesign (PR B)
+# ---------------------------------------------------------------------------
+class ForTheUI(unittest.TestCase):
+    def test_friends_skip_keeps_the_rest(self):
+        """The preview shows Friends in a big server without the one key
+        it may not set (big="skip"); the default still refuses."""
+        cfg = config(self)
+        apply(cfg, [C(S1, "who.replies", "when-addressed"),
+                    C(S1, "limits.per_day", 50)])
+        st = load(cfg)
+        with self.assertRaises(MS.SettingsError):
+            MS.preset_changes(st, "friends", S1, INFO)
+        ch = MS.preset_changes(st, "friends", S1, INFO, big="skip")
+        keys = {c.key for c in ch}
+        self.assertNotIn("privacy.memory", keys)
+        self.assertEqual(keys, {"who.replies", "limits.per_day"})
+        # a small server: nothing skipped
+        ch = MS.preset_changes(st, "friends", S3, INFO, big="skip")
+        self.assertIn("privacy.memory", {c.key for c in ch})
+
+    def test_named_people_are_no_warning(self):
+        """Picking Sam by name for Who can DM it: that Sam can DM the
+        bot is what was asked; anyone else still warns."""
+        cfg = config(self)
+        st = load(cfg)
+        ch = [C(DMS, "who.dms_from", [SAM])]
+        self.assertTrue(MS.assess(st, ch, INFO, NAMES).risky)
+        self.assertFalse(MS.assess(st, ch, INFO, NAMES,
+                                   named=[SAM]).risky)
+        ch = [C(DMS, "who.dms_from", [SAM, ANN])]
+        a = MS.assess(st, ch, INFO, NAMES, named=[SAM])
+        self.assertEqual(a.warnings, ["@Ann can DM the bot and get "
+                                      "answers."])
+        # an open audience is never "named"
+        a = MS.assess(st, [C(DMS, "who.dms_from", "anyone")], INFO, NAMES,
+                      named=[SAM])
+        self.assertTrue(a.risky)
+
+    def test_generations_label(self):
+        self.assertEqual(MS.label("plugins.media.per_day"),
+                         "Generations per day")
 
 
 if __name__ == "__main__":
