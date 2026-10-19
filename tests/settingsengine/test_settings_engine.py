@@ -1502,6 +1502,34 @@ class ReviewLow(unittest.TestCase):
         self.assertEqual(doc(cfg)["history"][-1]["group"], "nl-undo-555")
         self.assertTrue(doc(cfg)["history"][-1]["undo"])
 
+    def test_group_undo_plan(self):
+        cfg = config(self)
+        apply(cfg, [C(GEN, "who.replies", "off"),
+                    C(S1, "style.length", "brief")], group="nl-600")
+        plan = MS.group_undo_plan(load(cfg), "nl-600")
+        self.assertEqual([(c.place, c.key, c.value) for c in plan],
+                         [(S1, "style.length", "inherit"),
+                          (P.channel(G1, CH), "who.replies", "inherit")])
+        self.assertEqual(plan[1].path, ("servers", G1, "channels", CH))
+        # Judged by outcome: back to Chatty in Lounge (1,240 members).
+        risk = MS.assess(load(cfg), plan, INFO)
+        self.assertTrue(any("Chatty in #general" in w
+                            for w in risk.warnings), risk.warnings)
+        self.assertEqual(MS.group_undo_plan(load(cfg), "nl-nope"), [])
+        MS.undo_group(cfg, "nl-600", OWNER, PLUGINS, role="owner")
+        self.assertEqual(value(cfg, GEN, "who.replies"), "conversational")
+
+    def test_undo_changes_names_its_undo(self):
+        cfg = config(self)
+        apply(cfg, [C(S1, "who.replies", "off")])
+        MS.undo_changes(cfg, S1, OWNER, PLUGINS, role="owner",
+                        undo_id="nl-700")
+        last = doc(cfg)["history"][-1]
+        self.assertEqual((last["group"], last["undo"]), ("nl-700", True))
+        with self.assertRaises(MS.SettingsError):
+            MS.undo_changes(cfg, S1, OWNER, PLUGINS, role="owner",
+                            undo_id="not a group id!")
+
     def test_no_change_is_a_sentinel(self):
         self.assertNotEqual(MS.NO_CHANGE, "no change")
         self.assertFalse(isinstance(MS.NO_CHANGE, str))
