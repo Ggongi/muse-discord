@@ -86,8 +86,6 @@ fields:
 | `follow_up`                | True when only the conversational follow-up window queued it: no @mention, reply, or DM (see Follow-ups under Server safety)                                            |
 | `settings`                 | The settings card for the item's place: where, who is speaking, audience, memory, length, house rules (see The settings card)                                           |
 
-<!-- VERIFY: follow_up field location (item.follow_up or item.settings.follow_up) -->
-
 ### reply_outbox.json (worker -> monitor)
 
 A JSON array of drafted replies. Workers append to it under the lock.
@@ -204,9 +202,8 @@ with the matched pattern and where it matched, kept for the owner's
 review (last 100). A burst is held whole: its fragments are listed
 under the trigger's entry. Quarantined messages are never queued and
 never auto-replied. This is `privacy.suspicious: hold-for-review`
-(the default); with `ignore`, such messages are dropped instead.
-
-<!-- VERIFY: whether `ignore` still records the message here -->
+(the default); with `ignore`, such messages are dropped instead:
+not written here, only ledgered as `skipped`.
 
 ### state.json (monitor-internal)
 
@@ -398,10 +395,8 @@ history: [] # the last 100 changes and retired entries
   the bot from starting.
 - `bin/settings.py fold` copies every overlay value into config.yaml
   and clears the overlay. It rewrites config.yaml, keeping the old
-  one as `config.yaml.bak`; comments in the file are lost, so it
-  warns first. Never automatic.
-
-<!-- VERIFY: fold backup name and whether it asks before writing -->
+  one as `config.yaml.bak-<UTC time>`; comments in the file are
+  lost. It does not prompt: `--dry-run` previews. Never automatic.
 
 ### never_share holds
 
@@ -417,9 +412,10 @@ same interaction dispatch as the update DM):
 - **Discard** settles the item as skipped.
 - A hold nobody answers within 24 hours is discarded.
 
-The phrase list is never written to any log.
-
-<!-- VERIFY: hold custom-id prefix, where holds are stored, and the ledger status while held -->
+The phrase list is never written to any log. A held reply leaves
+the queue (so no worker is woken for it again), is ledgered
+`skipped` while held, and waits in state.json under `holds`. The
+buttons' custom ids start with `mdhold:`.
 
 ### Engine settings
 
@@ -429,8 +425,6 @@ them, and most installs never set them. They are read from an
 Values below a floor are raised with a warning in monitor.log (10
 for the poll, 1 for the other cadences and backoff); 0 is honored
 where it means something (coalesce, grace, max_age, max_recoveries).
-
-<!-- VERIFY: new names of the three moved keys (engine.coalesce_seconds, engine.max_reply_chars, engine.guild_ids) -->
 
 | setting                            | old location                | default | meaning                                                              |
 | ---------------------------------- | --------------------------- | ------- | -------------------------------------------------------------------- |
@@ -481,7 +475,13 @@ and refuses to write when there is one, except the new
 | `media_generation.allowed_user_ids`   | `plugins.media.who` (empty = `owners`)                           |
 | `media_generation.daily_cap`          | `plugins.media.per_day` (`null` = `none`)                        |
 
-<!-- VERIFY: mapping of `safety.injection_quarantine: false` and `presence.enabled: false`; where welcome `daily_cap` / `max_age_hours` live now -->
+Three old values have no everyday equivalent and map to hidden
+settings, so an old config behaves exactly as before:
+`safety.injection_quarantine: false` maps to
+`privacy.suspicious: answer` (no check), `presence.enabled: false`
+to a hidden `presence.enabled: off`, and the welcome plugin's
+`prompt`, `daily_cap` and `max_age_hours` stay plugin settings of
+the same names (not editable from Discord).
 
 ## Plugin hooks
 
@@ -493,7 +493,8 @@ setting, down to a channel). The `api` object passed to `register`
 gives the plugin its own resolved settings for the event's place,
 never core settings or other plugins', plus `api.log(...)`.
 
-<!-- VERIFY: plugin api for resolved values (api.param or a new name) -->
+A plugin reads a resolved value with
+`api.param(key, guild_id, guild_name)`.
 
 Hooks the core calls:
 

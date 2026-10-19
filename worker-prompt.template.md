@@ -221,8 +221,6 @@ room you are in.
 
 FOLLOW-UPS (items with `follow_up: true`):
 
-<!-- VERIFY: follow_up field location (item.follow_up or item.settings.follow_up) -->
-
 - The person you just answered kept talking within a couple of
   minutes, without @mentioning you or using Discord's reply. It was
   queued because it is probably for you: answer it like any message

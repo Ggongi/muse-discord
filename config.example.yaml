@@ -11,7 +11,7 @@
 # copy one, turn on Developer Mode in Discord (Settings > Advanced),
 # then right-click the server, channel or person and pick Copy ID.
 
-version: 1                # VERIFY: confirm the loader expects this key
+version: 1
 
 # --- Set during setup ---------------------------------------------
 owners: []                # your Discord user id, in quotes:
@@ -59,15 +59,16 @@ everywhere:
                           # likely prompt-injection: hold-for-review (you
                           # decide) or ignore (dropped)
   limits:
-    per_day: none         # replies per day: a number, or none. Each
-                          # server counts on its own; DMs count
-                          # together.
+    per_day: none         # replies per day: a number, or none. A cap
+                          # counts the place it is set: here, one
+                          # total for all DMs and servers; under a
+                          # server, that server only.
     per_person_per_day: none
                           # replies per day to any one person. Owners are
                           # never limited.
   plugins:
     media:                # images and video, if your Muse can make
-                          # them. VERIFY: plugin id media, off by default
+                          # them; off by default
       enabled: off
       who: owners         # owners, everyone, or a list like allow
       per_day: none       # generated replies per day: a number, or none

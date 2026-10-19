@@ -140,8 +140,6 @@ Both plugins are off by default. Turn on only what the owner wants:
   `channel: system` is the server's Discord system channel.
   `notes` tells the Muse what to mention to newcomers.
 
-  <!-- VERIFY: welcome.channel default is `system` -->
-
 - **media**: lets the owners (or anyone listed in
   `plugins.media.who`) have the worker generate images/video, up to
   `plugins.media.per_day` a day (`none` = no cap). Requires the

@@ -183,7 +183,9 @@ converting is optional, and never done without the owner.
    conversational replies above; it refuses to write if anything
    else would change.
 
-   <!-- VERIFY: backup file name, and whether migrate prompts or needs a flag -->
+   The backup is `config.yaml.bak-<UTC time>`. migrate does not
+   prompt, so ask the owner before running it; `--dry-run` shows
+   what it would write without writing.
 
 3. Show the owner the new `config.yaml` and what migrate printed,
    then run `python3 bin/settings.py validate`.
