@@ -62,6 +62,11 @@ python3 bin/settings.py resume --place PLACE --by muse.ai
 python3 bin/settings.py explain --place PLACE        # what it does now
 ```
 
+`--by` names who asked: always a name such as `muse.ai` (the default),
+never a Discord user id. The command refuses an id: ids are for
+changes made in Discord. Every change made this way reaches the
+owners in their Discord DMs, without a ping, with an **Undo** button.
+
 Each command prints the change in plain words ("In #general, When it
 answers: Chatty → Only when @mentioned") and any warnings, and makes
 it, unless it is risky. A risky change (judged by what it leads to:
@@ -108,8 +113,8 @@ A channel takes only When it answers, Instructions and Extras on/off
 Tell the owner what the command printed: the change in its own words,
 or why it did not happen. Mention that they will also see it in their
 Discord DMs, without a ping, with an **Undo** button: every change
-made with `bin/settings.py` (a `--by` that is a name, like
-`muse.ai`) is sent to the owners that way.
+made with `bin/settings.py` is sent to the owners that way (also when
+the bot was stopped at the time: it is sent when it starts).
 
 ## 5. What the commands do not change
 

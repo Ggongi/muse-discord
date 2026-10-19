@@ -235,7 +235,8 @@ whether it was forwarded or carried attachments or a reply to someone
 else's message; the last 300), and the settings-request records
 `nl_outcomes` (the outcome of each request, so one is never applied
 twice, 48 hours), `nl_pending` (Apply / Cancel cards, 10 minutes),
-`nl_undo` (Undo buttons, 24 hours), `nl_alert_at` and `nl_notices`. Those feed the latency line monitor.log prints for
+`nl_undo` (Undo buttons, 24 hours), `nl_nonces` (the owner-DM
+capabilities), `nl_alert_at`, `nl_notices` and `nl_history_mark`. Those feed the latency line monitor.log prints for
 each answered item, `Latency <id>: ingest 0.4s, hold 1.6s, worker
 30.1s, send 2.0s, total 34.1s`: ingest is from the message's creation
 to the monitor first processing it, hold is the burst coalescing,
@@ -503,7 +504,8 @@ owners' own DMs only. (The owner's Muse in its main chat uses
 ```json
 {"item": "<DM message_id>", "channel_id": "<DM channel id>",
  "reply_to": "<message_id>", "text": "Sure.",
- "settings": {"v": 1, "changes": [
+ "settings": {"v": 1, "nonce": "<the item's settings_nonce>",
+  "changes": [
    {"op": "set", "place": "channel:111:222", "key": "who.replies",
     "value": "when-addressed"},
    {"op": "reset", "place": "server:111", "key": "style.length"},
@@ -515,13 +517,16 @@ Shape rules (checked by `bin/outbox-append.py`, which then appends
 nothing and prints why, and again by the monitor, which rejects the
 item as above):
 
-- `settings` has exactly `v` (1) and `changes` (1 to 10).
+- `settings` has exactly `v` (1), `nonce` and `changes` (1 to 10).
+- `nonce` is the item's `settings_nonce` from the wake payload, echoed
+  as is (see "The capability" below).
 - `op` is `set` (place, key, value), `reset` (place, key), `add` /
   `remove` (place, key, value: 1 to 25 `"<user id>"` or
   `"role:<id>"` strings, user ids only for `who.dms_from`; `add` on
   `style.notes` takes one line of text to append), `undo` (no place:
-  this owner's latest change made by message or by their Muse that
-  is still in effect; with a place: the newest change there),
+  the newest change still in effect that this owner made by message,
+  or that their Muse made with `bin/settings.py`; with a place: the
+  newest change there),
   `preset` (`server:<id>`, name `friends` | `community` | `work`),
   `pause` or `resume` (place). Each change has only the keys its op
   takes; `undo`, `preset`, `pause` and `resume` go alone.
@@ -532,24 +537,36 @@ item as above):
   `standalone` or `silent`, and `text` (optional) is at most 300
   characters: a lead-in before the monitor's own lines.
 
+The capability: when the monitor queues an owner's DM it mints a
+random nonce (128 bits) for that item, kept in `state.json`
+(`nl_nonces`) and in `owner_dm_nonces.json` (mode 600, the open
+owner-DM items only), never in `reply_queue.json`. The wake hook adds
+it to each item as `settings_nonce` only in a wake that holds nothing
+but owner DMs, and the worker echoes it. A worker woken for anything
+else therefore cannot attach a settings action to an owner's DM, even
+if it reads the queue file. The nonce is used once. A worker never
+reads `owner_dm_nonces.json` or `state.json`: like the token, they are
+not the worker's files.
+
 Who may: the monitor never trusts what the worker wrote about the
 message (author, kind, server, channel). It uses its own record of
 the queue item (`item_meta`): the author must be an owner now, not a
 bot, the message a DM, the outbox `channel_id` that DM's channel (one
-the monitor resolved for that owner), and the message not forwarded.
-One action per item, ever (`nl_outcomes`, and the overlay history
-group `nl-<item>`, which survives a lost state.json); a request over
-24 hours old is refused. Outcomes:
+the monitor resolved for that owner), the nonce right, and the
+message not forwarded. One action per item, ever (`nl_outcomes`, and
+the overlay history group `nl-<item>`, which survives a lost
+state.json); a request over 24 hours old is refused. Outcomes:
 
 | Case | What happens |
 | --- | --- |
+| A missing or wrong nonce, or a `channel_id` that is not the item's own | Nothing changes and the item is NOT settled: the outbox item is set aside in `reply_outbox.rejected.json` and logged, and the real reply for that item still goes out |
 | Not an owner (in a DM or a server) | Nothing changes, nothing is said to them (the worker's text is not sent either); ledgered `skipped`, `settings refused: not an owner`. The owners get an alert DM, at most one per hour |
 | An owner, in a server | Nothing changes; the reply is the fixed "I only change settings in a DM with me, or with /settings." |
 | Forwarded, over a day old, already acted on, an unknown item | A fixed line in the owner's DM; nothing changes |
 | A change that does not make sense (unknown or wrong server's channel, a thread or category, a key not offered there, a setting only config.yaml changes) | Nothing is applied: "I couldn't change that, so nothing changed: ..." |
 | Already in force | "Nothing to change: ..." (or listed as "(already so)" beside the rest) |
 | Safe (judged by outcome, as /settings does) | Applied at once as one undo group `nl-<item>` by the owner's id: "Done: In #general in Work, When it answers: Chatty → Only when @mentioned." with **Undo** |
-| Risky by outcome, over an hour old, from a message with attachments or a reply to someone else's message, or turning DMs off (then the owner could not undo it by message) | Nothing yet: what it would do and the warnings, with **Apply** and **Cancel**; it expires after 10 minutes |
+| Risky by outcome, free text (Instructions, the status line, welcome notes: set or add), over an hour old, from a message with attachments or a reply to someone else's message, or turning DMs off (then the owner could not undo it by message) | Nothing yet: what it would do and the warnings, with **Apply** and **Cancel**; it expires after 10 minutes. The card never carries the worker's text |
 
 Places are ids only (from the card's `places`); the monitor names
 every one in its reply ("#general in Work"), so a wrong pick shows,
@@ -564,20 +581,33 @@ since, it shows a fresh card instead. Undo checks that the change is
 still in effect (nothing changed those settings since) and is judged
 by outcome too: an Undo that opens the bot up asks first.
 
-Changes made with `bin/settings.py` (a `--by` that is a name, such as
-`muse.ai`, not a user id): every owner gets a silent DM (no ping)
-listing them, with **Undo** for each; changes within a minute of each
-other share one DM.
+Changes made with `bin/settings.py` (every `cli-*` group; its `--by`
+must be a name such as `muse.ai`, never a user id, which the CLI
+refuses): every owner gets a silent DM (no ping) listing them, with
+**Undo** for each; changes within a minute of each other share one
+DM. The monitor keeps its place in the overlay's history in
+`state.json` (`nl_history_mark`), so changes made while it was down
+are sent when it starts (the very first start only records the
+place). An Apply click is written to `nl_journal.json` before its
+change, so a stop before the Undo button is recorded loses nothing.
+
+Every message the monitor writes here (replies, cards, alerts) uses
+names it knows itself (its channel list, discovery); the outbox's
+`channel_name`, `author` and `text` never reach an alert or a card.
 
 `directory.json` (monitor-internal): the servers the bot is in (name,
 member count) and their channels (id, name, type, parent), written
 when they change. `bin/settings.py` reads it for names and `places`.
 
 Security: these rules hold for what reaches the monitor through the
-outbox. A worker given a general-purpose shell could edit
-`config.discord.yaml` directly; the boundary against that is the
-worker runtime's tool allowlist (the outbox append and
-`bin/discord-api.py` only).
+outbox. A worker given a general-purpose shell is out of scope: it
+could read `owner_dm_nonces.json` or edit `config.discord.yaml`
+directly. The boundary against that is the worker runtime's tool
+allowlist (the outbox append, `bin/discord-api.py`, and reading the
+queue, persona and listed media files only). Also outside these rules:
+any outbox item (a reply, or `silent`) settles the item it names, so
+a worker could still answer another wake's item; the nonce keeps it
+from changing settings that way.
 
 ### never_share holds
 

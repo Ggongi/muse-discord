@@ -20,7 +20,11 @@ New:
   changes and you get a DM about it (at most one an hour).
 - Your Muse can change settings from its main chat too (SETTINGS.md).
   Each change it makes shows up in your DMs with an Undo button,
-  without a ping.
+  without a ping, also one made while the bot was stopped.
+  `bin/settings.py --by` takes a name (default `muse.ai`), not a user
+  id.
+- Instructions, the status line and welcome notes always wait for
+  your Apply when you change them by DM, so you see the exact words.
 - `bin/settings.py places` lists your servers and channels with their
   ids, and `bin/settings.py` names channels in what it prints.
 
