@@ -1,7 +1,10 @@
 # Changelog
 
-Newest first. **Action needed** lists what an existing install must
-do after updating; UPDATING.md walks a Muse through it.
+Newest first. Each release is headed `## vX.Y.Z (YYYY-MM-DD): Title`
+and is published as a GitHub Release (see RELEASING.md). The dated
+entries below the releases are pre-release history. **Action
+needed** lists what an existing install must do after updating;
+UPDATING.md walks a Muse through it.
 
 ## 2026-10-18: One slow reply no longer holds back the rest
 
