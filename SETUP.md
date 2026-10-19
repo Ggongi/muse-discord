@@ -395,7 +395,9 @@ the bot. Only the person who typed it sees the pages it opens.
 - **Why no reply?** lists the last messages that addressed the bot
   there and got no answer, why, and a fix button where one helps.
   Right-click a message, Apps, **Why no reply?** does the same for one
-  message.
+  message. That menu entry shows only for people with Manage Server
+  (server admins, and the owner in their own servers); elsewhere, use
+  the **Why no reply?** button on the `/settings` pages.
 - When the bot joins a new server, the owner's DM about it has a
   **Configure** button that opens that server's page.
 - Server admins (Manage Server) who type `/settings` in their own

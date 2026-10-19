@@ -186,7 +186,8 @@ Registration:
 - [ ] *client* Right-click (long-press) a message, Apps: **Why no
       reply?** is there, with the "?". If the log says `Discord
       refused the command name 'Why no reply?'`, it is "Why no reply";
-      note it, and the spec's fallback is working.
+      note it, and the spec's fallback is working. The second account
+      without Manage Server does not see it in the menu.
 - [ ] Restart again: no `created` / `updated` line (no needless
       write).
 

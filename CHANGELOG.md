@@ -26,16 +26,19 @@ New:
 - **Why no reply?** on a channel, server or DMs page lists the last
   messages that addressed the bot and got no answer, with the reason
   in plain words and a fix where there is one ("Remove Sam" from Never
-  answer, "Change cap"). Right-click any message, Apps, **Why no
-  reply?** for that one message. In DMs it checks whether a person can
-  DM the bot.
+  answer, "Change cap"). Server admins can also right-click a
+  message, Apps, **Why no reply?** for that one message (the menu
+  entry is for people with Manage Server). In DMs it checks whether a
+  person can DM the bot.
 - After every change, a **Done** line says what changed, with an
   **Undo** button. Pages also show the last change made there, with
   Undo; on a server page that includes changes in its channels.
 - Server admins (Manage Server) get a **Quiet the bot** panel: make the
   bot answer only @mentions or nothing, here or in the whole server,
   add people to Never answer, turn extras off, and undo what admins
-  changed. They still can never make it louder than you set it.
+  changed. They still can never make it louder than you set it, and
+  the summary DM you get of their changes now says them in plain words
+  ("In #general, When it answers: Chatty → Off").
 
 Changed:
 

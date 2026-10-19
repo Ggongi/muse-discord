@@ -185,7 +185,11 @@ and the reason as a code for /settings' **Why no reply?**:
 counter, cap}`: which cap, and where it is set), `bot-exchange`
 (`detail` `{limit}`), `suspicious-ignored`, `predates-join`,
 `no-send`, `internal`, `worker-skipped`, `send-failed`,
-`never-share` or `other`. Every mention/DM that reaches a terminal
+`never-share` or `other`. Entries also keep `guild_id` (and a
+thread's `parent_id`), or `dm: true`, as the monitor knew them when
+writing: the page explains a message with the settings of the server
+the interaction is in, and an entry for another server counts as not
+recorded. Every mention/DM that reaches a terminal
 state is recorded: `queued` (in flight), `replied`, `quarantined`, or
 `skipped` with a reason (`"no send permission in channel"`,
 `"403 missing access"`, `"recovery cap reached"`, `"enqueue failed
@@ -425,7 +429,11 @@ a message, Apps). It reads the command list (`GET
 does nothing when it matches. It never bulk-overwrites, so other
 commands of the application survive. If Discord refuses the "?" in
 the message command's name (HTTP 400), it is registered as "Why no
-reply" instead, and either name counts as registered later. A failure
+reply" instead, and either name counts as registered later. The
+message command's `default_member_permissions` is `"32"` (Manage
+Server), so ordinary members do not see it; owners have the **Why no
+reply?** button on the pages, and settings_ui checks who may use it
+on every interaction anyway. A failure
 is logged and retried a minute later; it never stops the monitor. The
 application id comes from the gateway's READY (else `GET
 /applications/@me`).
