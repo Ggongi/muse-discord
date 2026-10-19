@@ -1103,38 +1103,51 @@ class CLI(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 11. The current /settings still works on the new engine
+# 11. /settings (settings_ui, Components V2) on the engine
 # ---------------------------------------------------------------------------
-class SettingsUIStillWorks(unittest.TestCase):
+def ui_text(resp):
+    """Every text display of a /settings page, joined."""
+    out = []
+
+    def walk(comps):
+        for c in comps or []:
+            if isinstance(c, dict):
+                if c.get("type") == 10:
+                    out.append(c.get("content") or "")
+                walk(c.get("components"))
+    walk(resp.get("data", {}).get("components"))
+    return "\n".join(out)
+
+
+class SettingsUIOnTheEngine(unittest.TestCase):
     def test_dms_page_with_a_list(self):
         import settings_ui as UI
         cfg = config(self, BASE + f'dms:\n  who:\n    dms_from: ["{SAM}"]\n')
         ctx = FakeCtx(cfg)
         ix = {"type": 3, "id": "1", "token": "t", "user": {"id": OWNER},
-              "data": {"custom_id": "mdset:d:d:who", "component_type": 2}}
+              "data": {"custom_id": "mdset:2:pg:d:b", "component_type": 2}}
         r = UI.handle(ix, ctx)
         self.assertEqual(r["type"], 7, r)
-        self.assertIn("DMs from", r["data"]["content"])
+        self.assertIn("Who can DM it", ui_text(r))
+        self.assertIn(f"<@{SAM}>", ui_text(r))
         self.assertEqual(ctx.logs, [])
-        ix["data"] = {"custom_id": "mdset:s:d:df", "component_type": 3,
+        ix["data"] = {"custom_id": "mdset:2:set:d:df", "component_type": 3,
                       "values": ["owners"]}
         r = UI.handle(ix, ctx)
-        self.assertIn("Saved", r["data"]["content"])
+        self.assertIn("**Done:**", ui_text(r))
         self.assertEqual(value(cfg, DMS, "who.dms_from"), "owners")
         # an admin's /settings write is recorded as an admin's
         ix = {"type": 3, "id": "1", "token": "t", "guild_id": G1,
               "member": {"user": {"id": ADMIN}, "permissions": str(1 << 5)},
               "channel_id": CH, "data": {"custom_id":
-                                         f"mdset:s:c{G1}.{CH}:r",
-                                         "component_type": 3,
-                                         "values": ["off"]}}
+                                         f"mdset:2:val:c{G1}.{CH}:r:off:q",
+                                         "component_type": 2}}
         r = UI.handle(ix, ctx)
-        self.assertIn("Saved", r["data"]["content"])
+        self.assertIn("**Done:**", ui_text(r))
         self.assertEqual(doc(cfg)["values"][KS_GEN]["role"], "admin")
         self.assertEqual(MS.undo_plan(load(cfg), S1, True, admin_gid=G1),
                          [C(P.channel(G1, CH), "who.replies", "inherit",
                             path=("servers", G1, "channels", CH))])
-
 
 
 # ---------------------------------------------------------------------------
@@ -1235,18 +1248,18 @@ class ReviewHigh(unittest.TestCase):
         ix = {"type": 3, "id": "1", "token": "t", "guild_id": G1,
               "member": {"user": {"id": ADMIN},
                          "permissions": str(1 << 5)},
-              "channel_id": CH, "data": {"custom_id": f"mdset:u:s{G1}",
+              "channel_id": CH, "data": {"custom_id": f"mdset:2:un:s{G1}",
                                          "component_type": 2}}
         r = UI.handle(ix, FakeCtx(cfg))
-        self.assertIn("Nothing to undo", r["data"]["content"])
+        self.assertIn("Nothing to undo", ui_text(r))
         self.assertEqual(value(cfg, DMS, "who.dms_from"), "owners")
         self.assertEqual(value(cfg, S1, "who.replies"), "conversational")
         # the admin's own change is undone, and only that
         admin_apply(cfg, [C(GEN, "who.replies", "off")])
-        ix["data"] = {"custom_id": f"mdset:u:c{G1}.{CH}",
+        ix["data"] = {"custom_id": f"mdset:2:un:c{G1}.{CH}",
                       "component_type": 2}
         r = UI.handle(ix, FakeCtx(cfg))
-        self.assertIn("Undone", r["data"]["content"])
+        self.assertIn("Undone", ui_text(r))
         self.assertEqual(value(cfg, GEN, "who.replies"), "conversational")
         self.assertEqual(value(cfg, DMS, "who.dms_from"), "owners")
 
@@ -1257,11 +1270,11 @@ class ReviewHigh(unittest.TestCase):
                     C(S1, "style.length", "brief")])
         ix = {"type": 3, "id": "1", "token": "t", "guild_id": G1,
               "member": {"user": {"id": OWNER}, "permissions": "0"},
-              "channel_id": CH, "data": {"custom_id": f"mdset:u:s{G1}",
+              "channel_id": CH, "data": {"custom_id": f"mdset:2:un:s{G1}",
                                          "component_type": 2}}
         r = UI.handle(ix, FakeCtx(cfg))
-        self.assertIn("Are you sure", r["data"]["content"])
-        self.assertIn("Anyone on Discord", r["data"]["content"])
+        self.assertIn("Check before undoing", ui_text(r))
+        self.assertIn("Anyone on Discord", ui_text(r))
         self.assertEqual(value(cfg, DMS, "who.dms_from"), "owners")
 
     def test_h3_roles_are_explicit(self):

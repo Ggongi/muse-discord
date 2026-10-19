@@ -114,7 +114,47 @@ class FakeCtx:
         MS.reset(self.cfg, key, by, PLUGINS)
 
     def undo(self, prefix, by, **kw):
+        if kw.get("admin_gid"):
+            kw.setdefault("info", self)
         return MS.undo(self.cfg, prefix, by, PLUGINS, **kw)
+
+    def apply(self, changes, by, role, group=None, admin_gid=None):
+        return MS.apply(self.cfg, changes, by, group, PLUGINS, role=role,
+                        admin_gid=admin_gid, info=self)
+
+    def names(self, some_id):
+        for g in GUILDS:
+            if g["id"] == str(some_id):
+                return g["name"]
+        for chans in CHANNELS.values():
+            for c in chans:
+                if c["id"] == str(some_id):
+                    return c["name"]
+        return None
+
+    def display_name(self, uid):
+        return NAMES.get(str(uid))
+
+    def recent_outcomes(self, place, limit=20):
+        return []
+
+    def outcome(self, message_id):
+        return None
+
+    def stash_put(self, uid, payload, ttl=900):
+        self.stash = getattr(self, "stash", {})
+        tok = f"t{len(self.stash):09d}"
+        self.stash[tok] = (str(uid), payload)
+        return tok
+
+    def stash_take(self, uid, tok):
+        e = getattr(self, "stash", {}).get(tok)
+        if e is None:
+            return None
+        if e[0] != str(uid):
+            raise PermissionError("not yours")
+        del self.stash[tok]
+        return e[1]
 
     def notify_owners_admin_change(self, *a):
         self.notified.append(a)
