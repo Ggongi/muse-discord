@@ -20,9 +20,20 @@ fragments), unless the item's text (any fragment) carries a directive:
   [[slow]]       wait 15 s before writing the outbox item
   [[say:<text>]] the reply goes on with " <text>" after `ack <n>` (the
                  never_share scenario plants a listed phrase this way)
+  [[settings:<op> <key>=<value> @<place>]]
+                 the reply carries a settings action (PROTOCOL.md,
+                 Settings requests) with this change: <op> is set,
+                 reset, add, remove, undo, preset, pause or resume;
+                 <place> is here (the item's channel), server (its
+                 server), dms or defaults (a literal place works too).
+                 reset and undo take no "=<value>"; preset takes the
+                 preset's name instead of <key>=<value>; add/remove
+                 take comma-separated ids. Several directives make
+                 several changes. The monitor decides what happens;
+                 the reply still says `ack <n>`.
 
 Directives combine ([[slow]] [[long]] is a slow long reply); [[silent]]
-wins over the rest.
+wins over the rest (a silent item carries no settings action).
 
 Every queue item it handles is also recorded in
 <pkg>/e2e_worker_items.json (its ids, kind, follow_up, from_bot,
@@ -46,6 +57,7 @@ WORKER_ITEMS = "e2e_worker_items.json"
 WORKER_ITEMS_KEEP = 200
 FLAGS = ("silent", "long", "everyone", "mention_a", "slow")
 SAY_RE = re.compile(r"\[\[say:([^\]]*)\]\]")
+SETTINGS_RE = re.compile(r"\[\[settings:([^\]]*)\]\]")
 
 
 def load_json(path, default):
@@ -85,7 +97,55 @@ def directives(item):
     found = {d for d in FLAGS if f"[[{d}]]" in text}
     if SAY_RE.search(text):
         found.add("say")
+    if SETTINGS_RE.search(text):
+        found.add("settings")
     return found
+
+
+def settings_place(word, item):
+    """A directive's @<place> as the outbox's place syntax."""
+    gid, cid = item.get("guild_id"), item.get("channel_id")
+    if word == "here":
+        return f"channel:{gid}:{cid}" if gid else "dms"
+    if word == "server":
+        return f"server:{gid}" if gid else "dms"
+    return word
+
+
+def settings_change(text, item):
+    """One [[settings:...]] directive as an outbox change, or None."""
+    words = text.split()
+    if not words:
+        return None
+    change = {"op": words[0]}
+    for w in words[1:]:
+        if w.startswith("@"):
+            change["place"] = settings_place(w[1:], item)
+        elif change["op"] == "preset":
+            change["name"] = w
+        else:
+            key, eq, value = w.partition("=")
+            change["key"] = key
+            if eq:
+                if change["op"] in ("add", "remove") \
+                        and key != "style.notes":
+                    value = [v for v in value.split(",") if v]
+                change["value"] = value
+    return change
+
+
+def settings_changes(item):
+    """Every distinct [[settings:...]] directive, in order."""
+    out, seen = [], set()
+    for raw in SETTINGS_RE.findall(item_texts(item)):
+        raw = raw.strip()
+        if raw in seen:
+            continue
+        seen.add(raw)
+        c = settings_change(raw, item)
+        if c:
+            out.append(c)
+    return out
 
 
 def say_text(item):
@@ -157,6 +217,8 @@ def build_reply(item, a_id=None):
             text += filler
         text = text[:LONG_CHARS]
     out["text"] = text
+    if "settings" in flags and settings_changes(item):
+        out["settings"] = {"v": 1, "changes": settings_changes(item)}
     return out, delay
 
 
