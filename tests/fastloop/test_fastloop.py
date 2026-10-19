@@ -119,12 +119,16 @@ class Bursts(unittest.TestCase):
         enq = {mid: t for mid, t, ok in r["enqueued"] if ok}
         # put order: DM at 1s, server mention at 1s, held DM at 4s
         dm1, srv, dm2 = [mid for mid, _ in r["put"]]
-        self.assertTrue(0.5 <= enq[dm1] - st[dm1] < 0.8,
+        # The times are rounded to the millisecond, so a wait of exactly
+        # the window can come out a hair under it (2.502 - 1.002 is
+        # 1.4999999999999998): allow EPS below each lower bound.
+        EPS = 0.001
+        self.assertTrue(0.5 - EPS <= enq[dm1] - st[dm1] < 0.8,
                         (st[dm1], enq[dm1]))
-        self.assertTrue(1.5 <= enq[srv] - st[srv] < 1.8,
+        self.assertTrue(1.5 - EPS <= enq[srv] - st[srv] < 1.8,
                         (st[srv], enq[srv]))
         # the owner kept typing: the DM burst waits the 5s window
-        self.assertTrue(5.0 <= enq[dm2] - st[dm2] < 5.6,
+        self.assertTrue(5.0 - EPS <= enq[dm2] - st[dm2] < 5.6,
                         (st[dm2], enq[dm2]))
         self.assertIn("queued=True (author stopped typing)", r["out"])
 
