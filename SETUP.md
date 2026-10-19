@@ -281,12 +281,13 @@ see working before calling the install done.
 
 ## Step 10: Register the update hook
 
-When a new muse-discord version ships, the bot DMs each owner what is
-new, with **Update now** and **Later** buttons. **Update now** writes
-`update_request.json` in `<package dir>`; this hook turns that into a
-wake of the owner's Muse in its main chat, which then updates the
-install by following UPDATING.md. Without the hook, the button does
-nothing. The DMs follow `updates.check` in config.yaml.
+When a new muse-discord release (a version tag such as `v1.2.0`)
+ships, the bot DMs each owner what is new, with **Update now** and
+**Later** buttons. **Update now** writes `update_request.json` in
+`<package dir>`; this hook turns that into a wake of the owner's Muse
+in its main chat, which then updates the install to that release by
+following UPDATING.md. Without the hook, the button does nothing. The
+DMs follow `updates.check` in config.yaml.
 
 - **Muse hook runtime**: register `hooks/update-watch.sh` as a
   polling hook (every ~60 seconds is plenty) delivered to the
@@ -295,14 +296,15 @@ nothing. The DMs follow `updates.check` in config.yaml.
 
   ```
   An owner pressed "Update now" on muse-discord's update DM. The wake
-  payload names the package dir and the requested commit. Update this
-  install by following UPDATING.md in that package dir, from step 1,
-  with the owner in this chat; it asks before touching anything they
+  payload names the package dir and the requested release (a version
+  tag like v1.2.0). Update this install to exactly that release by
+  following UPDATING.md in that package dir, from step 1, with the
+  owner in this chat; it asks before touching anything they
   customized. When you are done, or if you stop early (merge
-  conflicts, local changes the owner has not approved, nothing new
-  upstream), delete update_request.json in the package dir and report
-  here in a few lines: the version now running, or why you stopped and
-  what is waiting on the owner.
+  conflicts, local changes the owner has not approved, already on
+  that version), delete update_request.json in the package dir and
+  report here in a few lines: the version now running, or why you
+  stopped and what is waiting on the owner.
   ```
 
   The script never runs git and holds no secrets; it reads only
@@ -313,8 +315,10 @@ nothing. The DMs follow `updates.check` in config.yaml.
   above.
 
 To check it: run `bash watchdog.sh` (or wait for the daily check);
-when an update exists, each owner gets one DM about it. Pressing
-**Later** leaves the install as it is.
+when a newer release exists, each owner gets one DM about it. Pressing
+**Later** leaves the install as it is. An install with no release yet
+(tracking main) is offered the newest release, unless it already
+contains it.
 
 ## Troubleshooting
 

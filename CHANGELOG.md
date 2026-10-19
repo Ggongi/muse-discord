@@ -7,12 +7,17 @@ do after updating; UPDATING.md walks a Muse through it.
 
 New:
 
-- When a new version is out, the bot DMs its owners what's new, with
+- Updates now come as releases: version tags such as `v1.0.0`, each
+  with its own CHANGELOG entry, instead of every commit on main. When
+  a new release is out, the bot DMs its owners what's new in it, with
   **Update now** and **Later** buttons. Update now wakes your Muse in
-  its main chat to follow UPDATING.md and report back; Later skips
-  that version (a newer one asks again). Before, the daily check only
-  printed a line to the watchdog's scheduler, which owners never saw.
+  its main chat to update to exactly that release (following
+  UPDATING.md) and report back; Later skips that version (a newer one
+  asks again). Before, the daily check only printed a line to the
+  watchdog's scheduler, which owners never saw, and counted commits.
   `updates.check: false` turns the DMs off.
+- The first release, v1.0.0, is tagged right after this change. An
+  install on main is then offered it, unless it already has it.
 
 **Action needed:**
 

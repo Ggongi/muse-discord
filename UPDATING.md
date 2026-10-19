@@ -1,7 +1,7 @@
 # UPDATING.md: updating muse-discord
 
 Like SETUP.md, this guide is written to be executed BY a Muse working
-with the owner. The goal: the newest version running, the owner's
+with the owner. The goal: the chosen release running, the owner's
 customizations intact, and nothing of theirs discarded without their
 say-so.
 
@@ -25,18 +25,42 @@ a **local modification**, handled in step 3b. When the owner wants a
 new customization, steer it to `config.yaml`, `persona.md`, or a
 plugin where possible: those never conflict with an update.
 
-## Step 1: Look before touching anything
+## Step 1: Pick the release, and look before touching anything
+
+Updates come as releases: semver tags `vX.Y.Z` on origin (the
+CHANGELOG has one `## vX.Y.Z (date): title` entry per release). Set
+`TAG` to the release to install:
+
+- **Started from the bot's update DM**: the release the owner chose,
+  the `version` in the wake payload (also in `update_request.json`).
+- **By hand** ("update to the latest release"): the newest release
+  tag on origin, skipping pre-releases such as `v1.2.0-rc.1`:
+
+  ```bash
+  git ls-remote --tags --refs origin 'v*' | sed 's#.*refs/tags/##' \
+    | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+    | sort -V | tail -1
+  ```
+
+  If it prints nothing, there is no release yet: tell the owner, and
+  stop (or see "Tracking main instead" below).
+
+Then:
 
 ```bash
-git fetch
+TAG=vX.Y.Z                           # the release picked above
+git fetch --no-tags origin tag "$TAG"
 OLD=$(git rev-parse HEAD)            # keep this for steps 4 and 6
-git log --oneline HEAD..@{upstream}  # what is new
-git diff HEAD @{upstream} -- CHANGELOG.md
+git describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null \
+  || echo unreleased                 # the version running now
+git log --oneline HEAD.."$TAG"       # what is new
+git diff HEAD "$TAG" -- CHANGELOG.md
 git status --short --untracked-files=no
-git log --oneline @{upstream}..HEAD  # local commits, if any
+git log --oneline "$TAG"..HEAD       # local commits, if any
 ```
 
-If nothing is new upstream, tell the owner it is up to date and stop.
+If `git merge-base --is-ancestor "$TAG" HEAD` succeeds, the install
+already has that release: tell the owner it is up to date and stop.
 Otherwise read the CHANGELOG diff and note every **Action needed**
 item; they are handled in step 4.
 
@@ -49,7 +73,7 @@ item; they are handled in step 4.
 ## Step 3a: Clean install
 
 ```bash
-git pull --ff-only
+git merge --ff-only "$TAG"
 ```
 
 ## Step 3b: Customized install
@@ -58,7 +82,7 @@ git pull --ff-only
 
    ```bash
    git diff --stat                      # their uncommitted changes
-   git diff --stat HEAD @{upstream}     # the update
+   git diff --stat HEAD "$TAG"          # the update
    ```
 
    Files in both lists may conflict. Explain it in plain words and
@@ -75,19 +99,34 @@ git pull --ff-only
 
    ```bash
    git stash push -m "local changes before update"
-   git pull --rebase          # replays any local commits on top
+   git merge --ff-only "$TAG"
+   # or, when there are local commits (a merge commit):
+   # git merge --no-edit "$TAG"
    git stash pop
    ```
 
-4. If anything conflicts, go through it file by file with the owner:
-   keep what their change was for, and take upstream's fixes. When a
-   conflict is not obviously resolvable, stop and ask. To back out
-   entirely: `git rebase --abort` if a rebase is in progress, then
+   Skip the two stash lines when there are no uncommitted changes.
+   A merge commit needs a git identity; if git asks for one, set it
+   for this repo only (`git config user.name`, `git config
+   user.email`) with the owner's OK.
+
+4. If anything conflicts, stop and go through it file by file with
+   the owner: keep what their change was for, and take the release's
+   fixes. When a conflict is not obviously resolvable, ask. To back
+   out entirely: `git merge --abort` if a merge is in progress, then
    `git reset --keep "$OLD"` and `git stash pop`.
 
 Never run `git reset --hard`, `git checkout -- <file>`, `git clean`,
 or `git stash drop` on the owner's work unless they ask for exactly
 that.
+
+### Tracking main instead
+
+An install that wants every commit on main, not just releases, uses
+`@{upstream}` where the steps say `"$TAG"`: in step 1, `git fetch`
+instead of fetching a tag; in step 3, `git pull --ff-only` (clean) or
+`git pull --no-rebase` (local commits). The update DM still offers
+only releases, and skips any release HEAD already contains.
 
 ## Step 4: Bring the rest of the install along
 
@@ -125,10 +164,10 @@ bash watchdog.sh
 
 1. Run smoke test 1 from SETUP.md (owner @mentions the bot; expect a
    reply).
-2. Tell the owner, briefly: the version now running
-   (`git log -1 --format='%h %cs'`), what changed in a few sentences,
-   which Action needed items were done, and anything still waiting
-   on them.
+2. Tell the owner, briefly: the version now running (`$TAG`;
+   `git describe --tags` shows it, plus any local commits on top),
+   what changed in a few sentences, which Action needed items were
+   done, and anything still waiting on them.
 
 If `update_request.json` exists (the owner started this update from
 the bot's update DM), delete it now. Delete it too if you stop at an
@@ -142,5 +181,12 @@ If the new version misbehaves and the owner wants to roll back:
 - Never edit `persona.md` upstream: it is the owner's file.
 - Every user-visible change gets a CHANGELOG entry, with an **Action
   needed** list whenever an existing install must do something.
+- Installs are offered releases: semver tags `vX.Y.Z` (pre-release
+  tags are ignored), each with a `## vX.Y.Z (YYYY-MM-DD): Short
+  title` CHANGELOG entry, newest first. The update DM lists those
+  titles and flags Action needed from those entries, so a release's
+  changes go under its version heading. The first release, `v1.0.0`,
+  is tagged once the update DM ships; installs then on main are
+  offered it unless their HEAD already contains it.
 - Every new config setting gets a default in `DEFAULT_CONFIG`
   (monitor.py) so existing `config.yaml` files keep working.

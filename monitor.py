@@ -1314,24 +1314,25 @@ def on_guild_event(state, ev):
 
 
 # ---------------------------------------------------------------------------
-# Update notices and interactions. watchdog.sh records a new upstream
-# version in update_check.json (upstream, behind, entries,
-# action_needed; see PROTOCOL.md). The monitor DMs each owner about it
-# once, with [Update now] / [Later] buttons. A click arrives as a gateway
-# INTERACTION_CREATE and is answered on its own thread, never behind the
-# main loop's REST work: Discord fails an interaction that is not
-# acknowledged within 3 seconds. "Update now" writes update_request.json,
-# which hooks/update-watch.sh turns into a wake of the owner's Muse in its
-# main chat (it follows UPDATING.md). "Later" only declines: a version is
+# Update notices and interactions. Versions are releases: semver tags
+# vX.Y.Z. watchdog.sh records a new release in update_check.json
+# (latest, installed, entries, action_needed; see PROTOCOL.md). The
+# monitor DMs each owner about it once, with [Update now] / [Later]
+# buttons. A click arrives as a gateway INTERACTION_CREATE and is
+# answered on its own thread, never behind the main loop's REST work:
+# Discord fails an interaction that is not acknowledged within 3 seconds.
+# "Update now" writes update_request.json, which hooks/update-watch.sh
+# turns into a wake of the owner's Muse in its main chat (it follows
+# UPDATING.md to that exact release). "Later" only declines: a version is
 # offered once, and a newer one is offered again.
 # ---------------------------------------------------------------------------
 UPDATE_CHECK_FILE = os.path.join(BASE_DIR, "update_check.json")
 UPDATE_REQUEST_FILE = os.path.join(BASE_DIR, "update_request.json")
 UPDATE_ENTRIES_SHOWN = 5
 UPDATE_DM_TRIES = 10  # owed DMs retried once per cycle, then given up
-# The newest announced commit, mirrored from state.json for the
+# The newest announced version, mirrored from state.json for the
 # interaction thread (only the main loop touches state).
-_update_announced = {"commit": None}
+_update_announced = {"version": None}
 _updates_cfg = {"mtime": None,
                 "check": (CFG.get("updates") or {}).get("check") is not False}
 
@@ -1356,9 +1357,13 @@ def updates_enabled():
     return _updates_cfg["check"]
 
 
-def _is_commit(value):
-    return isinstance(value, str) \
-        and re.fullmatch(r"[0-9a-f]{7,64}", value) is not None
+def release_version(value):
+    """(major, minor, patch) for a release tag "vX.Y.Z", else None
+    (pre-releases such as v1.2.0-rc.1 and other tags are not releases)."""
+    if not isinstance(value, str):
+        return None
+    m = re.fullmatch(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", value)
+    return tuple(int(x) for x in m.groups()) if m else None
 
 
 def _read_json_dict(path):
@@ -1370,80 +1375,92 @@ def _read_json_dict(path):
     return d if isinstance(d, dict) else {}
 
 
-def _commit_installed(commit):
-    """True when HEAD already contains commit (updated by hand before the
-    notice went out). False when git cannot tell."""
+def _version_installed(tag, timeout=5):
+    """True when HEAD already contains the release tag (updated by hand
+    before the notice went out, or since). False when git cannot tell,
+    e.g. the tag was never fetched."""
     try:
         r = subprocess.run(["git", "-C", BASE_DIR, "merge-base",
-                            "--is-ancestor", commit, "HEAD"],
-                           capture_output=True, timeout=5)
+                            "--is-ancestor", f"refs/tags/{tag}", "HEAD"],
+                           capture_output=True, timeout=timeout)
     except Exception:
         return False
     return r.returncode == 0
 
 
+def _entry_line(heading):
+    """A CHANGELOG release heading "vX.Y.Z (YYYY-MM-DD): Title" as
+    "vX.Y.Z: Title"; anything else as is."""
+    m = re.fullmatch(r"(v\S+)\s+\([^)]*\):\s*(.+)", heading)
+    return f"{m.group(1)}: {m.group(2)}" if m else heading
+
+
 def update_notice_text(info):
-    commit = info["upstream"]
-    behind = info.get("behind")
-    count = (f", {behind} new commit{'s' if behind != 1 else ''}"
-             if isinstance(behind, int) and behind > 0 else "")
-    lines = [f"**A muse-discord update is available** "
-             f"(`{commit[:7]}`{count})."]
-    entries = [str(e)[:150] for e in info.get("entries") or [] if e]
+    version = info["latest"]
+    installed = info.get("installed")
+    on = (f"you're on {installed}" if release_version(installed)
+          else "you're on an unreleased version")
+    lines = [f"**muse-discord {version} is out** ({on})."]
+    entries = [_entry_line(str(e))[:150]
+               for e in info.get("entries") or [] if e]
     if entries:
         lines.append("What's new:")
         lines += ["- " + e for e in entries[:UPDATE_ENTRIES_SHOWN]]
         if len(entries) > UPDATE_ENTRIES_SHOWN:
             lines.append(f"- +{len(entries) - UPDATE_ENTRIES_SHOWN} more")
     else:
-        lines.append("No new CHANGELOG entries, only smaller changes.")
+        lines.append("What's new is in CHANGELOG.md.")
     if info.get("action_needed"):
         lines.append("Some changes need a step from you; your Muse walks "
                      "you through them.")
-    lines.append("**Update now**: your Muse applies it in its main chat "
-                 "by following UPDATING.md, and asks before touching "
-                 "anything you customized. **Later**: skip this version; "
-                 "you are asked again when a newer one ships.")
+    lines.append(f"**Update now**: your Muse updates to {version} in its "
+                 "main chat by following UPDATING.md, and asks before "
+                 "touching anything you customized. **Later**: skip "
+                 f"{version}; you are asked again when a newer version "
+                 "ships.")
     return "\n".join(lines)[:1990]
 
 
-def update_buttons(commit):
+def update_buttons(version):
     return [{"type": 1, "components": [
         {"type": 2, "style": 1, "label": "Update now",
-         "custom_id": f"mdupd:now:{commit}"},
+         "custom_id": f"mdupd:now:{version}"},
         {"type": 2, "style": 2, "label": "Later",
-         "custom_id": f"mdupd:later:{commit}"}]}]
+         "custom_id": f"mdupd:later:{version}"}]}]
 
 
 def announce_update(state):
-    """DM the owners about the version in update_check.json, once per
-    upstream commit. Owners whose DM failed are retried each cycle."""
+    """DM the owners about the release in update_check.json, once per
+    version: only a version newer than the last one announced is
+    offered. Owners whose DM failed are retried each cycle."""
     upd = state.setdefault("update_notice", {})
-    _update_announced["commit"] = upd.get("commit")
+    _update_announced["version"] = upd.get("version")
     if not updates_enabled():
         return
     info = _read_json_dict(UPDATE_CHECK_FILE)
-    commit = info.get("upstream")
-    if _is_commit(commit) and commit != upd.get("commit"):
+    version = info.get("latest")
+    new = release_version(version)
+    last = release_version(upd.get("version"))
+    if new and (last is None or new > last):
         upd.clear()
-        upd.update(commit=commit, at=int(time.time()), owed=[], tries=0)
-        if _commit_installed(commit):
-            print(f"Update {commit[:7]} is already installed; no notice.",
+        upd.update(version=version, at=int(time.time()), owed=[], tries=0)
+        if _version_installed(version):
+            print(f"Update {version} is already installed; no notice.",
                   flush=True)
         elif not OWNER_USER_IDS:
-            print(f"Update {commit[:7]} available (no owners configured "
-                  f"to tell).", flush=True)
+            print(f"Update {version} available (no owners configured to "
+                  f"tell).", flush=True)
         else:
             upd.update(owed=sorted(OWNER_USER_IDS),
                        text=update_notice_text(info))
-            print(f"Update {commit[:7]} available: DMing the owners.",
+            print(f"Update {version} available: DMing the owners.",
                   flush=True)
-        _update_announced["commit"] = commit
+        _update_announced["version"] = version
     owed = upd.get("owed") or []
     if not owed or rest_backing_off():
         return
     payload = {"content": upd.get("text") or "", "allowed_mentions":
-               {"parse": []}, "components": update_buttons(upd["commit"])}
+               {"parse": []}, "components": update_buttons(upd["version"])}
     upd["owed"] = [uid for uid in owed if not dm_owner(uid, payload)]
     upd["tries"] = upd.get("tries", 0) + 1
     if upd["owed"] and upd["tries"] >= UPDATE_DM_TRIES:
@@ -1457,11 +1474,11 @@ def apply_record(state, rec):
     thread decided (it never writes state.json itself)."""
     if rec.get("kind") == "update_choice":
         upd = state.setdefault("update_notice", {})
-        if rec.get("commit") == upd.get("commit"):
+        if rec.get("version") == upd.get("version"):
             upd["choice"] = {k: rec.get(k) for k in ("action", "by", "at")}
         print(f"Owner {rec.get('by')} chose "
               f"{'Update now' if rec.get('action') == 'now' else 'Later'} "
-              f"for update {str(rec.get('commit'))[:7]}.", flush=True)
+              f"for update {rec.get('version')}.", flush=True)
 
 
 # Interaction dispatch: one handler per key, the custom_id prefix (the
@@ -1540,30 +1557,38 @@ def _interaction_thread_main(ix_inbox, record):
 
 
 def on_update_button(ix, rest, uid, record):
-    action, _, commit = rest.partition(":")
-    if action not in ("now", "later") or not _is_commit(commit):
+    action, _, version = rest.partition(":")
+    if action not in ("now", "later") or not release_version(version):
         return ephemeral("That control is no longer active.")
-    if commit != _update_announced["commit"]:
-        return ephemeral("That update prompt is out of date: a newer "
-                         "version was announced since. Use the newest "
-                         "prompt.")
+    announced = _update_announced["version"]
+    if version != announced:
+        if release_version(announced) \
+                and release_version(version) < release_version(announced):
+            return ephemeral(f"That update prompt is out of date: "
+                             f"{announced} is out since. Use the newest "
+                             f"prompt.")
+        return ephemeral("That control is no longer active.")
+    # Short timeout: the whole answer must land within Discord's 3s.
+    if _version_installed(version, timeout=1):
+        return ephemeral(f"{version} is already installed; nothing to "
+                         f"do.")
     now = int(time.time())
     if action == "now":
-        if _read_json_dict(UPDATE_REQUEST_FILE).get("commit") != commit:
+        if _read_json_dict(UPDATE_REQUEST_FILE).get("version") != version:
             try:
                 atomic_write(UPDATE_REQUEST_FILE, {
-                    "commit": commit, "requested_at": now, "by": uid})
+                    "version": version, "requested_at": now, "by": uid})
             except OSError as e:
                 print(f"Could not write update_request.json: {e}",
                       flush=True)
                 return ephemeral("I could not record the request; try "
                                  "again in a moment.")
-        line = ("**Update now** chosen. Your Muse is starting the update "
-                "in its main chat.")
+        line = (f"**Update now** chosen. Your Muse is starting the update "
+                f"to {version} in its main chat.")
     else:
-        line = ("**Later** chosen. This version will not be offered "
-                "again; a newer one will be.")
-    record({"kind": "update_choice", "commit": commit, "action": action,
+        line = (f"**Later** chosen. {version} will not be offered again; "
+                f"a newer version will be.")
+    record({"kind": "update_choice", "version": version, "action": action,
             "by": uid, "at": now})
     original = (ix.get("message") or {}).get("content") or ""
     return {"type": 7, "data": {
@@ -4652,8 +4677,8 @@ def main():
     # the gateway thread: the 3s acknowledgement deadline never waits on
     # the main loop. What they change in state comes back through the
     # gateway inbox ("_record", applied by drain_gateway).
-    _update_announced["commit"] = \
-        (state.get("update_notice") or {}).get("commit")
+    _update_announced["version"] = \
+        (state.get("update_notice") or {}).get("version")
     threading.Thread(
         target=_interaction_thread_main,
         args=(_ix_inbox, lambda rec: _gateway_inbox.put({"_record": rec})),

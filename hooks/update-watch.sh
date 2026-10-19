@@ -2,14 +2,15 @@
 # muse-discord update watcher (update wake hook).
 # Wakes the owner's Muse, in its main chat, after an owner pressed
 # [Update now] on the bot's update DM: the monitor then writes
-# update_request.json ({commit, requested_at, by}) in the package dir.
+# update_request.json ({version, requested_at, by}; version is a release
+# tag such as v1.2.0) in the package dir.
 # Zero tokens otherwise: this script only reads that one file. It never
 # runs git or pulls, and it holds no secrets; the woken Muse does the
-# update by following UPDATING.md and deletes the file when it is done
-# (or stops early).
+# update to that exact release by following UPDATING.md and deletes the
+# file when it is done (or stops early).
 #
 # Each request is handed out once: a lease in hook state, keyed by the
-# request's commit and time. A request still on disk LEASE_SECS after
+# request's version and time. A request still on disk LEASE_SECS after
 # its wake (the woken run died before deleting it) is handed out again.
 #
 # Like hooks/mention-watch.sh, this targets Muse's hook runtime (it
@@ -27,13 +28,16 @@ LEASE_SECS=21600
 if [ ! -f "$REQUEST" ]; then
     silent "no update requested" '{}'
 fi
-req=$(jq -c 'select(type == "object" and (.commit | type) == "string")
-    | {commit, requested_at, by}' "$REQUEST" 2>/dev/null) || req=""
+# Only a release tag (vX.Y.Z) is handed on: the woken Muse puts it in git
+# commands.
+req=$(jq -c 'select(type == "object" and (.version | type) == "string"
+        and (.version | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")))
+    | {version, requested_at, by}' "$REQUEST" 2>/dev/null) || req=""
 if [ -z "$req" ]; then
     silent "update request unreadable" '{}'
 fi
 
-key=$(printf '%s' "$req" | jq -r '"\(.commit):\(.requested_at)"')
+key=$(printf '%s' "$req" | jq -r '"\(.version):\(.requested_at)"')
 now=$(date +%s)
 at=$(hook_state_get | jq -r --arg k "$key" \
     '(.handed // {})[$k] // 0 | numbers | floor' 2>/dev/null) || at=0
