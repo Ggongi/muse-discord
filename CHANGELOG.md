@@ -6,6 +6,42 @@ entries below the releases are pre-release history. **Action
 needed** lists what an existing install must do after updating;
 UPDATING.md walks a Muse through it.
 
+## 2026-10-18: New settings, per server and per channel
+
+New:
+
+- A simpler `config.yaml`: settings grouped by what you think about
+  (who it talks to, how it talks, what it may do, privacy, limits),
+  set for everywhere, DMs, all servers, one server, or one channel or
+  category. The most specific place wins; threads follow their
+  channel. `bin/settings.py show --explain` shows what the bot does in
+  any place and where each value comes from.
+- Conversational replies (the default): after the bot answers you,
+  your next messages in that channel within about 2 minutes count as
+  talking to it, even without an @mention or Discord's reply. Set
+  `who.replies: when-addressed` for the old, strict behavior.
+- Your Muse's memory stays private: `privacy.memory` (default
+  `public-only`) tells it what it may draw on outside your own DMs,
+  and `privacy.never_share` holds any reply containing a listed
+  phrase for you to Send anyway or Discard.
+- Strangers' DMs are not answered by default (`who.dms_from: owners`).
+- Every cap accepts `none`, the default.
+- Changes made from Discord (coming with `/settings`) will live in
+  `config.discord.yaml`, never rewriting your file.
+
+**Action needed:**
+
+- Nothing breaks: an old `config.yaml` keeps working, with one notice
+  line in monitor.log. It also gets conversational replies, the one
+  intended change in behavior.
+- Optional: convert the file with `bin/settings.py migrate` (keeps a
+  backup; refuses if anything else would change). UPDATING.md has
+  your Muse offer it and ask you first.
+- Reinstall the worker prompt from `worker-prompt.template.md`.
+- A config with a mistake now stops the bot with a message naming the
+  setting, instead of quietly guessing. Run
+  `bin/settings.py validate` after editing.
+
 ## 2026-10-18: Updates arrive as a DM with an Update button
 
 New:
