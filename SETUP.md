@@ -196,7 +196,8 @@ behavior comes from `worker-prompt.template.md`.
      owner's main chat, so routine replies don't spam it). The script
      resolves the package dir from its own location; set
      `MUSE_DISCORD_DIR` if the package lives elsewhere. It needs
-     `jq` and `python3` on PATH.
+     `jq` and `python3` on PATH. The hook also restarts a dead
+     monitor within seconds, without waking a worker (step 8).
    - **Any other runtime**: schedule a poller that checks
      `reply_queue.json` every few seconds and, when it holds items no
      running worker was handed (re-handing an item out after ~10
@@ -221,11 +222,30 @@ bash watchdog.sh
 
 Then schedule `watchdog.sh` to run every ~10 minutes in whatever
 scheduler the environment has (cron, a scheduled agent job, systemd
-timer). The watchdog is idempotent and safe to run any time; it
-alerts only on NEW failures (its output contract is documented at the
-top of the script). Once a day it also checks for a new muse-discord
-version and prints one `UPDATE:` line when there is one; tell the
-owner, and update by following UPDATING.md when they say so. To stop everything: kill the PIDs in
+timer). The watchdog is idempotent and safe to run any time (runs
+never overlap: each holds a lock on `watchdog.lock`); it alerts only
+on NEW failures (its output contract is documented at the top of the
+script). Once a day it also checks for a new muse-discord version and
+prints one `UPDATE:` line when there is one; tell the owner, and
+update by following UPDATING.md when they say so.
+
+The wake hook (step 7) restarts a dead monitor much sooner. Every
+5 seconds it checks that the monitor process exists; when it does not
+(say, the VM was replaced and every process died), it starts
+`watchdog.sh --from-hook` detached, so the bot is back within seconds
+instead of at the next scheduled run. That costs no tokens and wakes
+no worker. While restarts keep failing it backs off (1, 2, 5, then
+every 10 minutes), and after a token rejection it leaves the restart
+to the scheduled run. Keep the schedule anyway: it is the backstop
+that restarts presence and a stuck monitor (alive, stale heartbeat),
+raises alerts, and checks for updates. A hook-triggered run leaves
+alerts to it, so a failure that run hit is still reported by the next
+scheduled run. With `bot.token_env` (no token file), the variable must
+also be set where the hook runs, or only the scheduled run can restart
+the monitor.
+
+To stop everything: unregister the wake hook and the watchdog schedule
+first (either one restarts a dead monitor), then kill the PID in
 `monitor.pid` and the presence process (`pkill -f presence.py`).
 
 Equivalent manual start (no watchdog):
@@ -249,9 +269,10 @@ see working before calling the install done.
    mention it. Expect: no reply, one log line `Skipping replies in
 ...: the bot cannot send messages there.`, and a `skipped` entry
    in `mention_ledger.json` for that message.
-5. **Catch-up**: stop the monitor (`kill $(cat monitor.pid)`), post a
-   mention, wait a minute, run `bash watchdog.sh`. Expect the reply
-   after restart: `last_seen` never advanced while it was down.
+5. **Catch-up**: stop the monitor (`kill $(cat monitor.pid)`) and post
+   a mention right away. Expect the wake hook to restart it within
+   ~10s (`watchdog.log`: `run triggered by the wake hook`) and the
+   reply right after: `last_seen` never advanced while it was down.
 6. **Sweep recovery** (the deep guarantee): the sweep runs every
    ~3 min and logs `Sweep recovered lost mention ...` only when it
    finds a mention no record accounts for. No log lines about it in
@@ -279,6 +300,47 @@ see working before calling the install done.
     to wind down on its own (silence or a reaction) instead of
     bouncing confirmations back and forth.
 
+## Step 10: Register the update hook
+
+When a new muse-discord release (a version tag such as `v1.2.0`)
+ships, the bot DMs each owner what is new, with **Update now** and
+**Later** buttons. **Update now** writes `update_request.json` in
+`<package dir>`; this hook turns that into a wake of the owner's Muse
+in its main chat, which then updates the install to that release by
+following UPDATING.md. Without the hook, the button does nothing. The
+DMs follow `updates.check` in config.yaml.
+
+- **Muse hook runtime**: register `hooks/update-watch.sh` as a
+  polling hook (every ~60 seconds is plenty) delivered to the
+  owner's **main chat** (not the worker's chat: updating needs the
+  full agent and the owner's answers), with this wake prompt:
+
+  ```
+  An owner pressed "Update now" on muse-discord's update DM. The wake
+  payload names the package dir and the requested release (a version
+  tag like v1.2.0). Update this install to exactly that release by
+  following UPDATING.md in that package dir, from step 1, with the
+  owner in this chat; it asks before touching anything they
+  customized. When you are done, or if you stop early (merge
+  conflicts, local changes the owner has not approved, already on
+  that version), delete update_request.json in the package dir and
+  report here in a few lines: the version now running, or why you
+  stopped and what is waiting on the owner.
+  ```
+
+  The script never runs git and holds no secrets; it reads only
+  `update_request.json` and wakes once per request. It needs `jq` on
+  PATH, and `MUSE_DISCORD_DIR` if the package lives elsewhere.
+- **Any other runtime**: poll for `update_request.json` and, once per
+  request, start a session in the owner's main chat with the prompt
+  above.
+
+To check it: run `bash watchdog.sh` (or wait for the daily check);
+when a newer release exists, each owner gets one DM about it. Pressing
+**Later** leaves the install as it is. An install with no release yet
+(tracking main) is offered the newest release, unless it already
+contains it.
+
 ## Troubleshooting
 
 - **No welcomes in a server**: the server is in observe mode. Add
@@ -290,7 +352,8 @@ see working before calling the install done.
   blind; fix the intent and restart.
 - **`TOKEN REJECTED` in monitor.log / watchdog says token
   rejected**: the token was reset in the portal. Repeat step 3 with
-  the fresh token; the watchdog starts the bot on its next run.
+  the fresh token; the watchdog starts the bot on its next scheduled
+  run (the wake hook never retries a rejected token itself).
 - **Watchdog kills the monitor at startup**: the monitor prints the
   `Bot user id` marker (or `Bot identity pending` while Discord rate
   limits it) BEFORE discovery on purpose; if monitor.log has neither

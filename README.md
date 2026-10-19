@@ -30,8 +30,13 @@ Send your Muse this message:
 Update muse-discord by following UPDATING.md
 ```
 
-It asks before touching anything you customized. See
-[CHANGELOG.md](CHANGELOG.md) for what changed.
+It updates to the latest release (a version tag such as `v1.2.0`) and asks
+before touching anything you customized. See [CHANGELOG.md](CHANGELOG.md) for
+what changed.
+
+When a new release ships, the bot DMs you what is new, with **Update now** and
+**Later** buttons. **Update now** has your Muse update to that release in its
+main chat. To turn the check off, set `updates.check: false` in `config.yaml`.
 
 ## 🤝 Join the community
 

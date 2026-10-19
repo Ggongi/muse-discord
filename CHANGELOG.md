@@ -1,7 +1,115 @@
 # Changelog
 
-Newest first. **Action needed** lists what an existing install must
-do after updating; UPDATING.md walks a Muse through it.
+Newest first. Each release is headed `## vX.Y.Z (YYYY-MM-DD): Title`
+and is published as a GitHub Release (see RELEASING.md). The dated
+entries below the releases are pre-release history. **Action
+needed** lists what an existing install must do after updating;
+UPDATING.md walks a Muse through it.
+
+## 2026-10-18: Updates arrive as a DM with an Update button
+
+New:
+
+- Updates now come as releases: version tags such as `v1.0.0`, each
+  with its own CHANGELOG entry, instead of every commit on main. When
+  a new release is out, the bot DMs its owners what's new in it, with
+  **Update now** and **Later** buttons. Update now wakes your Muse in
+  its main chat to update to exactly that release (following
+  UPDATING.md) and report back; Later skips that version (a newer one
+  asks again). Before, the daily check only printed a line to the
+  watchdog's scheduler, which owners never saw, and counted commits.
+  `updates.check: false` turns the DMs off.
+- The first release, v1.0.0, is tagged right after this change. An
+  install on main is then offered it, unless it already has it.
+
+**Action needed:**
+
+- This update itself is applied by hand, the last one: tell your Muse
+  "Update muse-discord by following UPDATING.md". Its step 4 now
+  registers the new update hook (`hooks/update-watch.sh`, SETUP.md
+  step 10), and the restart in step 5 turns the DMs on.
+
+## 2026-10-18: Back online in seconds after a crash
+
+Fixed:
+
+- When the machine running the bot was replaced or the monitor died,
+  the bot stayed offline until the next watchdog run, up to 10
+  minutes. The wake hook, which already runs every few seconds, now
+  starts the watchdog as soon as it sees no monitor, so the bot is
+  back within seconds. The watchdog cron stays as the backstop. A
+  rejected token never causes a restart loop.
+- Two watchdog runs at once could start two monitors; the watchdog
+  now holds a lock.
+
+Faster:
+
+- The reply worker ends its run as soon as its replies are written:
+  no summary or follow-up checks. A message that arrives right after
+  a reply no longer waits for that wrap-up. It still flags abusive
+  messages for you in its one final line.
+
+**Action needed:**
+
+- Reinstall the worker prompt from `worker-prompt.template.md`.
+- If your hook runs a copy of `hooks/mention-watch.sh` rather than the
+  package's own file, update the copy. If the bot uses `bot.token_env`,
+  set that variable where the hook runs too, or only the cron can
+  restart it.
+
+## 2026-10-18: One slow reply no longer holds back the rest
+
+Faster:
+
+- When one wake carries several messages (say a DM plus two welcomes),
+  the worker now answers DMs and mentions first and sends each reply
+  as soon as it is written, instead of writing them all at the end.
+  Replies in the same channel keep their order.
+
+Fixed:
+
+- A reply to a message that was deleted before the reply went out
+  failed on every retry until it was dropped. It now posts as a
+  normal message.
+- The latency log could show a negative `ingest` when the machine's
+  clock trailed Discord's by a fraction of a second.
+
+**Action needed:**
+
+- Reinstall the worker prompt from `worker-prompt.template.md` (the
+  faster ordering only takes effect then). If your agent runtime
+  limits tool calls per run, allow `bin/outbox-append.py` to run once
+  per reply.
+
+## 2026-10-18: Realtime messages no longer wait for the REST poll
+
+Fixed:
+
+- A DM or mention the gateway delivered at once could wait 25-95s
+  before the monitor even looked at it, because the main loop read
+  every channel over REST (and ran the sweep and channel refreshes)
+  in one go before handling it; behind a slow proxy that took most of
+  each 30s cycle. The REST work is now done in short slices between
+  the realtime work, so new messages are picked up within a second.
+  Every channel is still read about every `rest_poll_seconds`, the
+  sweep and refreshes keep their cadence, and the catch-up after a
+  restart still reads everything.
+- A Discord read that hangs gives up after 8s instead of 20s.
+
+Faster:
+
+- A DM burst goes out 0.5s after its author stops (servers stay at
+  1.5s, bots at 5s; typing still holds a burst open).
+- A reply the worker writes is picked up within about 0.25s instead
+  of up to 2s.
+- The latency line splits the old "coalesce" figure into ingest (until
+  the monitor first saw the message) and hold (the burst wait):
+  `Latency <id>: ingest 0.4s, hold 1.6s, worker 30.1s, send 2.0s,
+  total 34.1s`.
+
+**Action needed:**
+
+- None; the monitor restarts with the update.
 
 ## 2026-10-17: Less code: three features removed
 

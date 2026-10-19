@@ -1,6 +1,23 @@
 #!/bin/bash
 # muse-discord watchdog: keeps the monitor and presence processes alive.
 #
+# Who runs it:
+#   - A scheduler (cron, a scheduled agent job) every ~10 minutes: the
+#     full run, and the only one whose output anyone reads. It is the
+#     backstop for everything: presence restarts, stuck-heartbeat
+#     restarts, alerts, update checks.
+#   - The wake hook (hooks/mention-watch.sh), as `watchdog.sh
+#     --from-hook`, within seconds of seeing the monitor process gone
+#     (say, after the VM was replaced). Same checks and restarts, but
+#     its output goes nowhere, so it leaves the alert state and the
+#     update check to the scheduled run: a failure it hits is still
+#     announced by the next scheduled run, and a recovery it makes is
+#     reported there as "recovered".
+#   - Runs never overlap: each holds an flock on watchdog.lock, so two
+#     runs can never start two monitors (or two presence clients). A
+#     scheduled run waits up to LOCK_WAIT_SECS for a running one to
+#     finish; a hook run just leaves the work to the run in progress.
+#
 # Fully automatic: both processes read the bot token themselves from the
 # configured token file (bot.token_file in config.yaml, mode 600), or
 # from the environment variable named by bot.token_env, which must then
@@ -13,8 +30,8 @@
 #   - "ALERT: ..." printed ONLY on a NEW failure needing the operator's
 #     attention. Repeat runs while the same failure persists print
 #     "OK (already alerted)".
-#   - "UPDATE: ..." printed ONCE per new upstream version (checked at
-#     most daily; updates.check in config.yaml turns it off). Never an
+#   - "UPDATE: ..." printed ONCE per new release, a vX.Y.Z tag (checked
+#     at most daily; updates.check in config.yaml turns it off). Never an
 #     alert, and the watchdog never applies updates: see UPDATING.md.
 #   - State lives in watchdog_state.json and update_check.json; log in
 #     watchdog.log.
@@ -43,8 +60,46 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG="$DIR/watchdog.log"
 STATE="$DIR/watchdog_state.json"
 CONFIG="$DIR/config.yaml"
+FROM_HOOK=0
+if [ "${1:-}" = "--from-hook" ]; then
+  FROM_HOOK=1
+fi
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+
+# ---------------- one run at a time ----------------
+# fd 9 holds an exclusive flock on watchdog.lock until this script
+# exits. The lock belongs to the open file, which this shell keeps, so
+# it outlives the python3 that takes it. Long-lived children must not
+# inherit fd 9 (they would hold the lock forever): daemonize and git
+# fetch close it.
+LOCK_WAIT_SECS=300
+lock_wait=$LOCK_WAIT_SECS
+[ "$FROM_HOOK" = "1" ] && lock_wait=0
+exec 9>>"$DIR/watchdog.lock"
+if ! python3 - "$lock_wait" <<'PYEOF'
+import fcntl, sys, time
+deadline = time.time() + float(sys.argv[1])
+while True:
+    try:
+        fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        sys.exit(0)
+    except OSError:
+        if time.time() >= deadline:
+            sys.exit(1)
+        time.sleep(1)
+PYEOF
+then
+  if [ "$FROM_HOOK" = "1" ]; then
+    log "wake hook asked for a restart; another watchdog run is in progress, leaving it to that run"
+  else
+    log "another watchdog run held the lock for ${LOCK_WAIT_SECS}s; skipping this run"
+    echo "OK another watchdog run is still in progress; skipped this one"
+  fi
+  exit 0
+fi
+[ "$FROM_HOOK" = "1" ] && log "run triggered by the wake hook (monitor process not found)"
+
 alive() { pgrep -f "^python3 $1" >/dev/null 2>&1; }
 get_state() { python3 -c "import json;print(json.load(open('$STATE')).get('last_alert',''))" 2>/dev/null || echo ""; }
 set_state() { python3 -c "import json;json.dump({'last_alert':\"$1\"},open('$STATE','w'))" 2>/dev/null; }
@@ -129,7 +184,7 @@ daemonize() {
   if [ -f "$2" ]; then
     mv -f "$2" "$2.1"
   fi
-  python3 - "$DIR" "$1" "$2" <<'EOF'
+  python3 - "$DIR" "$1" "$2" 9>&- <<'EOF'
 import os, sys
 d, script, logf = sys.argv[1], sys.argv[2], sys.argv[3]
 if os.fork() > 0:
@@ -279,6 +334,14 @@ else
   fi
 fi
 
+# A hook-triggered run has no reader for its output. It leaves the alert
+# state and the update check to the scheduled run, which then announces
+# a failure this run hit (as a new alert) or a recovery it made.
+if [ "$FROM_HOOK" = "1" ]; then
+  [ -n "$ALERT_SIG" ] && log "hook-triggered run: leaving this alert for the scheduled run to announce"
+  exit 0
+fi
+
 # ---------------- transition-based alerting ----------------
 # A degraded-but-running monitor alerts only when nothing is down.
 if [ -z "$ALERT_SIG" ] && [ -n "$DEGRADED_SIG" ]; then
@@ -301,10 +364,23 @@ else
 fi
 
 # ---------------- updates ----------------
-# At most once a day, fetch the upstream branch and print ONE "UPDATE:"
-# line per new upstream version. Never pulls: applying an update is the
-# owner's call, and their Muse does it by following UPDATING.md. Skipped
-# quietly for installs that are not a git clone with an upstream.
+# At most once a day, look for a new muse-discord RELEASE and print ONE
+# "UPDATE:" line per new version. A release is a semver tag vX.Y.Z on
+# origin (pre-release tags like v1.2.0-rc.1 and other tags are ignored).
+# The installed version is the newest release tag HEAD contains, or
+# "unreleased" before the first one. Tags are listed with
+# `git ls-remote` (not the GitHub API, whose unauthenticated rate limit
+# is per IP and shared on hosted VMs); only the newest release's tag is
+# fetched. Never merges: applying an update is the owner's call, and
+# their Muse does it by following UPDATING.md. Skipped quietly for
+# installs that are not a git clone with an origin.
+# Each check also records the version in update_check.json for the
+# monitor, which DMs the owners once per new version with [Update now]
+# / [Later] buttons (PROTOCOL.md, "Update notices"): latest (the new
+# release's tag, "" when nothing is new), installed, entries (headings
+# of that release's CHANGELOG entries newer than installed, newest
+# first) and action_needed (true when one of them lists something to
+# do).
 UPDATE_STATE="$DIR/update_check.json"
 upd_get() {
   python3 - "$UPDATE_STATE" "$1" <<'PYEOF' 2>/dev/null || echo ""
@@ -312,32 +388,140 @@ import json, sys
 print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))
 PYEOF
 }
-upd_set() {
-  python3 - "$UPDATE_STATE" "$1" "$2" <<'PYEOF' 2>/dev/null
-import json, sys
-json.dump({"checked": int(sys.argv[2]), "announced": sys.argv[3]},
-          open(sys.argv[1], "w"))
+# upd_py COMMAND ARGS: the version logic.
+#   installed                 newest release tag HEAD contains, or
+#                             "unreleased"
+#   latest REFS               newest release in REFS (`git ls-remote
+#                             --tags` output) newer than installed and
+#                             not already in HEAD, as "TAG COMMIT";
+#                             nothing when there is none
+#   record CHECKED ANNOUNCED [LATEST INSTALLED]
+#                             rewrite update_check.json atomically. With
+#                             LATEST, also record that release's entries
+#                             (from CHANGELOG.md at its tag); with
+#                             LATEST empty, clear them. With no third
+#                             argument (the check failed), keep them.
+UPD_PY=$(cat <<'PYEOF'
+import json, os, re, subprocess, sys, tempfile
+d, path, cmd, args = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+SEMVER = re.compile(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)")
+
+
+def ver(tag):
+    m = SEMVER.fullmatch(tag or "")
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def git(*a):
+    return subprocess.run(["git", "-C", d, *a], capture_output=True,
+                          text=True, timeout=30)
+
+
+def installed():
+    tags = git("tag", "--merged", "HEAD", "--list", "v*").stdout.split()
+    tags = [t for t in tags if ver(t)]
+    return max(tags, key=ver) if tags else "unreleased"
+
+
+def entries(text):
+    out = []
+    for line in text.splitlines():
+        if line.startswith("## "):
+            out.append((line[3:].strip(), []))
+        elif out:
+            out[-1][1].append(line)
+    return out
+
+
+def action_needed(body):
+    m = re.search(r"\*\*Action needed:?\*\*:?[ \t]*\n(.*)", "\n".join(body),
+                  re.S)
+    items = [ln.strip()[2:] for ln in (m.group(1) if m else "").splitlines()
+             if ln.strip().startswith("- ")]
+    return any(not i.lower().startswith("none") for i in items)
+
+
+if cmd == "installed":
+    print(installed())
+elif cmd == "latest":
+    commits = {}
+    for line in args[0].splitlines():
+        sha, _, ref = line.partition("\t")
+        name = ref[len("refs/tags/"):]
+        peeled = name.endswith("^{}")
+        name = name[:-3] if peeled else name
+        if ver(name) and (peeled or name not in commits):
+            commits[name] = sha  # an annotated tag's commit is its ^{}
+    if commits:
+        tag = max(commits, key=ver)
+        have = ver(installed())
+        contained = git("merge-base", "--is-ancestor", commits[tag],
+                        "HEAD").returncode == 0
+        if (have is None or ver(tag) > have) and not contained:
+            print(tag, commits[tag])
+elif cmd == "record":
+    try:
+        with open(path) as f:
+            cur = json.load(f)
+        if not isinstance(cur, dict):
+            cur = {}
+    except Exception:
+        cur = {}
+    for k in ("upstream", "behind"):  # pre-release fields
+        cur.pop(k, None)
+    cur.update(checked=int(args[0]), announced=args[1])
+    if len(args) > 3:
+        latest, have = args[2], args[3]
+        new = []
+        if latest:
+            text = git("show", f"refs/tags/{latest}:CHANGELOG.md").stdout
+            for title, body in entries(text):
+                v = ver(re.split(r"[\s:(]", title, maxsplit=1)[0])
+                if v and v <= ver(latest) and (
+                        v > ver(have) if ver(have) else v == ver(latest)):
+                    new.append((title, body))
+        cur.update(latest=latest, installed=have,
+                   entries=[t for t, _ in new],
+                   action_needed=any(action_needed(b) for _, b in new))
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path),
+                               prefix=".update_check.json.", suffix=".tmp")
+    with os.fdopen(fd, "w") as f:
+        json.dump(cur, f)
+    os.replace(tmp, path)
 PYEOF
-}
+)
+upd_py() { python3 -c "$UPD_PY" "$DIR" "$UPDATE_STATE" "$@" 2>/dev/null; }
 if [ "$(cfg_get updates.check true)" = "true" ] \
-    && git -C "$DIR" rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then
+    && git -C "$DIR" remote get-url origin >/dev/null 2>&1; then
   now=$(date +%s)
   last_check="$(upd_get checked)"
   announced="$(upd_get announced)"
   if [ $(( now - ${last_check:-0} )) -ge 86400 ]; then
     to=""
     command -v timeout >/dev/null 2>&1 && to="timeout 60"
-    if GIT_TERMINAL_PROMPT=0 $to git -C "$DIR" fetch --quiet >>"$LOG" 2>&1; then
-      behind=$(git -C "$DIR" rev-list --count 'HEAD..@{upstream}' 2>/dev/null || echo 0)
-      upstream_head=$(git -C "$DIR" rev-parse '@{upstream}' 2>/dev/null || echo "")
-      if [ "${behind:-0}" -gt 0 ] && [ "$upstream_head" != "$announced" ]; then
-        log "update available: $behind new commit(s) upstream"
-        echo "UPDATE: muse-discord has $behind new commit(s) upstream. Ask your Muse to update it by following UPDATING.md."
-        announced="$upstream_head"
+    installed=$(upd_py installed || echo unreleased)
+    if refs=$(GIT_TERMINAL_PROMPT=0 $to git -C "$DIR" ls-remote --tags \
+        origin 2>>"$LOG" 9>&-); then
+      read -r latest _ <<<"$(upd_py latest "$refs")"
+      if [ -z "$latest" ]; then
+        upd_set_args=("" "$installed")  # nothing new
+      elif GIT_TERMINAL_PROMPT=0 $to git -C "$DIR" fetch --quiet --no-tags \
+          origin "+refs/tags/$latest:refs/tags/$latest" >>"$LOG" 2>&1 9>&-; then
+        upd_set_args=("$latest" "$installed")
+        if [ "$latest" != "$announced" ]; then
+          log "update available: $latest (installed: $installed)"
+          echo "UPDATE: muse-discord $latest is out (installed: $installed). Ask your Muse to update it by following UPDATING.md."
+          announced="$latest"
+        fi
+      else
+        log "update check: fetching tag $latest failed; retrying tomorrow"
+        upd_set_args=()
       fi
     else
-      log "update check: git fetch failed; retrying tomorrow"
+      log "update check: listing upstream tags failed; retrying tomorrow"
+      upd_set_args=()
     fi
-    upd_set "$now" "$announced"
+    upd_py record "$now" "$announced" \
+      ${upd_set_args[@]+"${upd_set_args[@]}"}
   fi
 fi

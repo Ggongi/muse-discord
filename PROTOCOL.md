@@ -13,10 +13,11 @@ that can read and write these files can implement a worker.
   component that holds the bot token.
 - **Worker** (an LLM agent session, woken on demand): takes its items
   from the wake payload (or the queue), drafts replies, and appends
-  them to the outbox in one locked write. It never edits the queue: the
-  monitor removes each item once it settles its reply. It NEVER holds
-  the token and never calls the Discord API except through the
-  allowlisted `bin/discord-api.py` tool on owner-command items.
+  each one to the outbox (a locked append) as soon as it is drafted.
+  It never edits the queue: the monitor removes each item once it
+  settles its reply. It NEVER holds the token and never calls the
+  Discord API except through the allowlisted `bin/discord-api.py` tool
+  on owner-command items.
 - **Wake mechanism**: something must notice a non-empty queue and start
   a worker session. The package ships `hooks/mention-watch.sh` for
   Muse's hook runtime (5s poll). Each wake hands out only the open
@@ -24,8 +25,12 @@ that can read and write these files can implement a worker.
   holds a lease on, so a second worker never redoes a busy worker's
   items; an item still open after its 10-minute lease is handed out
   again in case its worker died. The payload carries those items plus
-  the persona text. Other runtimes can poll `reply_queue.json`
-  themselves; the files are the contract, not the hook.
+  the persona text. The shipped hook also restarts a dead monitor:
+  when the monitor process is gone, it runs `watchdog.sh --from-hook`
+  detached (rate limited with backoff, never after a token rejection,
+  and never a wake). Other runtimes can poll `reply_queue.json`
+  themselves and leave restarts to the scheduled watchdog; the files
+  are the contract, not the hook.
 
 ## Files
 
@@ -40,10 +45,11 @@ in the package dir: take the lock, re-read the file, apply only your
 own change (append new items, or remove specific ids), write it
 atomically, release. Never write back a copy read before taking the
 lock, and never hold the lock across network calls or model turns. The
-worker's only write is an outbox append, which `bin/outbox-append.py`
-does in one step (a JSON array on stdin; it refuses obviously
-malformed items and prints why). A runtime that cannot run it wraps its
-own append in `flock <package dir>/reply.lock <command>`.
+worker's only write is an outbox append, one per item it answers,
+which `bin/outbox-append.py` does in one step (an item or a JSON array
+on stdin; it refuses obviously malformed items and prints why). A
+runtime that cannot run it wraps its own append in
+`flock <package dir>/reply.lock <command>`.
 
 ### reply_queue.json (monitor -> worker)
 
@@ -200,8 +206,13 @@ epoch seconds), `guild_first_seen` (fallback watermark when Discord
 has not reported the join time), `known_guilds` and `join_notices`
 (new-server detection and owed owner DMs), `reply_aliases`
 (burst fragment id -> trigger id, so a reply under the last fragment
-settles the whole burst in the ledger), and `queued_at` (when each
-recent item was queued, for the latency log).
+settles the whole burst in the ledger), and `ingested_at` and
+`queued_at` (when the monitor first processed each recent trigger, and
+when it queued it). Those feed the latency line monitor.log prints for
+each answered item, `Latency <id>: ingest 0.4s, hold 1.6s, worker
+30.1s, send 2.0s, total 34.1s`: ingest is from the message's creation
+to the monitor first processing it, hold is the burst coalescing,
+worker is from queued to the outbox pickup, and send is the delivery.
 Safe to delete while the monitor is stopped: the cost is re-seeding
 `last_seen` (history, DMs included, is treated as already seen) and
 losing rate-limit and plugin counters. Join watermarks are re-read
@@ -230,9 +241,11 @@ Enforced by the monitor before anything reaches the queue:
    records the decision). Set `item` to the queue item's
    `message_id`. Never edit the queue: the monitor removes answered
    items.
-2. Append all your outbox items in one write under the lock
-   (`bin/outbox-append.py`); never rewrite the outbox, and never edit
-   the monitor's files (state, ledger, quarantine).
+2. Append each outbox item under the lock (`bin/outbox-append.py`)
+   as soon as it is drafted, so a slow item never delays the rest:
+   DMs and mentions first, then welcomes and other plugin items, but
+   items in the same channel in queue order. Never rewrite the outbox,
+   and never edit the monitor's files (state, ledger, quarantine).
 3. Never hold or request the bot token. Your only Discord write path
    is the outbox, plus `bin/discord-api.py` on items stamped
    `owner_command: true`.
@@ -285,3 +298,80 @@ Resolution for a param `key` for one guild (implemented by the core's
 
 per_guild keys may be guild IDs (preferred, names can collide) or
 server names.
+
+## Update notices
+
+How an owner hears about a new release and starts the update from
+Discord. None of it involves the reply worker.
+
+### Versions
+
+A release is a semver tag `vMAJOR.MINOR.PATCH` on origin. Other tags,
+including pre-releases such as `v1.2.0-rc.1`, are ignored. The
+installed version is the newest release tag HEAD contains, or
+`unreleased` before an install has one. A release's CHANGELOG entry
+has the heading `## vX.Y.Z (YYYY-MM-DD): Short title`, newest first;
+the older dated headings (`## 2026-10-18: ...`) are pre-release
+history.
+
+### update_check.json (watchdog -> monitor)
+
+Written by `watchdog.sh` at most once a day (`updates.check: false`
+turns the check, and the DMs, off). It lists origin's tags with
+`git ls-remote --tags origin` (never the GitHub API, whose
+unauthenticated rate limit is per IP), takes the highest release, and
+fetches only that tag when it is newer than the installed version and
+HEAD does not already contain its commit. The fields the monitor
+reads:
+
+| Field           | Meaning                                             |
+| --------------- | --------------------------------------------------- |
+| `latest`        | the new release's tag; `""` when nothing is new     |
+| `installed`     | the installed version, or `unreleased`              |
+| `entries`       | headings of the release entries new to this install |
+| `action_needed` | true when one of those lists **Action needed**      |
+
+`entries` come from CHANGELOG.md at the `latest` tag, newest first:
+every version heading above `installed` up to `latest`, or only
+`latest`'s when `installed` is `unreleased`. `checked` (epoch seconds)
+and `announced` (the tag of the last `UPDATE:` line) are the
+watchdog's own.
+
+### The DM and its buttons
+
+For each new `latest` version, the monitor DMs every owner once:
+"**muse-discord vX.Y.Z is out**" with the installed version, the
+entries (up to 5, then "+N more"), a note when action is needed, and
+an action row with two buttons, custom ids `mdupd:now:<version>` and
+`mdupd:later:<version>`. Only a version newer than the last one
+announced is offered, and the DM is skipped when HEAD already contains
+the tag. In `state.json`, `update_notice` holds the announced
+`version`, the owners still owed the DM (retried each poll cycle, up
+to 10 times), and the owner's `choice`.
+
+A click reaches the monitor as a gateway `INTERACTION_CREATE` (no
+intent needed; the application must not have an Interactions Endpoint
+URL set, or Discord sends clicks there instead). A dedicated thread
+answers it at once, independent of the main loop, because Discord
+fails an interaction not acknowledged within 3 seconds. Interactions
+are dispatched by custom id prefix (`mdupd` here; a slash command
+would register as `/<name>`):
+
+- From a non-owner, for a version other than the newest announced one,
+  or for a version HEAD already contains: an ephemeral reply (only the
+  clicker sees it), nothing else.
+- **Update now**: writes `update_request.json`, then edits the DM to
+  show the choice and drop the buttons.
+- **Later**: records the choice and edits the DM the same way. That
+  version is not offered again; a newer version gets a new DM.
+
+### update_request.json (monitor -> update hook)
+
+`{"version": "<release tag>", "requested_at": <epoch seconds>,
+"by": "<owner user id>"}`, written atomically on **Update now**.
+`hooks/update-watch.sh` wakes the owner's Muse in its main chat once
+per request, keyed on `version` and `requested_at` (it re-wakes only
+if the file is still there 6 hours later). The Muse updates to exactly
+that tag by following UPDATING.md, then deletes the file, also when it
+stops early. The hook never runs git, holds no secrets, and hands on
+only a `vX.Y.Z` version.
