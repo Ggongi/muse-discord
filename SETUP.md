@@ -196,7 +196,8 @@ behavior comes from `worker-prompt.template.md`.
      owner's main chat, so routine replies don't spam it). The script
      resolves the package dir from its own location; set
      `MUSE_DISCORD_DIR` if the package lives elsewhere. It needs
-     `jq` and `python3` on PATH.
+     `jq` and `python3` on PATH. The hook also restarts a dead
+     monitor within seconds, without waking a worker (step 8).
    - **Any other runtime**: schedule a poller that checks
      `reply_queue.json` every few seconds and, when it holds items no
      running worker was handed (re-handing an item out after ~10
@@ -221,11 +222,30 @@ bash watchdog.sh
 
 Then schedule `watchdog.sh` to run every ~10 minutes in whatever
 scheduler the environment has (cron, a scheduled agent job, systemd
-timer). The watchdog is idempotent and safe to run any time; it
-alerts only on NEW failures (its output contract is documented at the
-top of the script). Once a day it also checks for a new muse-discord
-version and prints one `UPDATE:` line when there is one; tell the
-owner, and update by following UPDATING.md when they say so. To stop everything: kill the PIDs in
+timer). The watchdog is idempotent and safe to run any time (runs
+never overlap: each holds a lock on `watchdog.lock`); it alerts only
+on NEW failures (its output contract is documented at the top of the
+script). Once a day it also checks for a new muse-discord version and
+prints one `UPDATE:` line when there is one; tell the owner, and
+update by following UPDATING.md when they say so.
+
+The wake hook (step 7) restarts a dead monitor much sooner. Every
+5 seconds it checks that the monitor process exists; when it does not
+(say, the VM was replaced and every process died), it starts
+`watchdog.sh --from-hook` detached, so the bot is back within seconds
+instead of at the next scheduled run. That costs no tokens and wakes
+no worker. While restarts keep failing it backs off (1, 2, 5, then
+every 10 minutes), and after a token rejection it leaves the restart
+to the scheduled run. Keep the schedule anyway: it is the backstop
+that restarts presence and a stuck monitor (alive, stale heartbeat),
+raises alerts, and checks for updates. A hook-triggered run leaves
+alerts to it, so a failure that run hit is still reported by the next
+scheduled run. With `bot.token_env` (no token file), the variable must
+also be set where the hook runs, or only the scheduled run can restart
+the monitor.
+
+To stop everything: unregister the wake hook and the watchdog schedule
+first (either one restarts a dead monitor), then kill the PID in
 `monitor.pid` and the presence process (`pkill -f presence.py`).
 
 Equivalent manual start (no watchdog):
@@ -249,9 +269,10 @@ see working before calling the install done.
    mention it. Expect: no reply, one log line `Skipping replies in
 ...: the bot cannot send messages there.`, and a `skipped` entry
    in `mention_ledger.json` for that message.
-5. **Catch-up**: stop the monitor (`kill $(cat monitor.pid)`), post a
-   mention, wait a minute, run `bash watchdog.sh`. Expect the reply
-   after restart: `last_seen` never advanced while it was down.
+5. **Catch-up**: stop the monitor (`kill $(cat monitor.pid)`) and post
+   a mention right away. Expect the wake hook to restart it within
+   ~10s (`watchdog.log`: `run triggered by the wake hook`) and the
+   reply right after: `last_seen` never advanced while it was down.
 6. **Sweep recovery** (the deep guarantee): the sweep runs every
    ~3 min and logs `Sweep recovered lost mention ...` only when it
    finds a mention no record accounts for. No log lines about it in
@@ -290,7 +311,8 @@ see working before calling the install done.
   blind; fix the intent and restart.
 - **`TOKEN REJECTED` in monitor.log / watchdog says token
   rejected**: the token was reset in the portal. Repeat step 3 with
-  the fresh token; the watchdog starts the bot on its next run.
+  the fresh token; the watchdog starts the bot on its next scheduled
+  run (the wake hook never retries a rejected token itself).
 - **Watchdog kills the monitor at startup**: the monitor prints the
   `Bot user id` marker (or `Bot identity pending` while Discord rate
   limits it) BEFORE discovery on purpose; if monitor.log has neither

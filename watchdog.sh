@@ -1,6 +1,23 @@
 #!/bin/bash
 # muse-discord watchdog: keeps the monitor and presence processes alive.
 #
+# Who runs it:
+#   - A scheduler (cron, a scheduled agent job) every ~10 minutes: the
+#     full run, and the only one whose output anyone reads. It is the
+#     backstop for everything: presence restarts, stuck-heartbeat
+#     restarts, alerts, update checks.
+#   - The wake hook (hooks/mention-watch.sh), as `watchdog.sh
+#     --from-hook`, within seconds of seeing the monitor process gone
+#     (say, after the VM was replaced). Same checks and restarts, but
+#     its output goes nowhere, so it leaves the alert state and the
+#     update check to the scheduled run: a failure it hits is still
+#     announced by the next scheduled run, and a recovery it makes is
+#     reported there as "recovered".
+#   - Runs never overlap: each holds an flock on watchdog.lock, so two
+#     runs can never start two monitors (or two presence clients). A
+#     scheduled run waits up to LOCK_WAIT_SECS for a running one to
+#     finish; a hook run just leaves the work to the run in progress.
+#
 # Fully automatic: both processes read the bot token themselves from the
 # configured token file (bot.token_file in config.yaml, mode 600), or
 # from the environment variable named by bot.token_env, which must then
@@ -43,8 +60,46 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG="$DIR/watchdog.log"
 STATE="$DIR/watchdog_state.json"
 CONFIG="$DIR/config.yaml"
+FROM_HOOK=0
+if [ "${1:-}" = "--from-hook" ]; then
+  FROM_HOOK=1
+fi
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+
+# ---------------- one run at a time ----------------
+# fd 9 holds an exclusive flock on watchdog.lock until this script
+# exits. The lock belongs to the open file, which this shell keeps, so
+# it outlives the python3 that takes it. Long-lived children must not
+# inherit fd 9 (they would hold the lock forever): daemonize and git
+# fetch close it.
+LOCK_WAIT_SECS=300
+lock_wait=$LOCK_WAIT_SECS
+[ "$FROM_HOOK" = "1" ] && lock_wait=0
+exec 9>>"$DIR/watchdog.lock"
+if ! python3 - "$lock_wait" <<'PYEOF'
+import fcntl, sys, time
+deadline = time.time() + float(sys.argv[1])
+while True:
+    try:
+        fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        sys.exit(0)
+    except OSError:
+        if time.time() >= deadline:
+            sys.exit(1)
+        time.sleep(1)
+PYEOF
+then
+  if [ "$FROM_HOOK" = "1" ]; then
+    log "wake hook asked for a restart; another watchdog run is in progress, leaving it to that run"
+  else
+    log "another watchdog run held the lock for ${LOCK_WAIT_SECS}s; skipping this run"
+    echo "OK another watchdog run is still in progress; skipped this one"
+  fi
+  exit 0
+fi
+[ "$FROM_HOOK" = "1" ] && log "run triggered by the wake hook (monitor process not found)"
+
 alive() { pgrep -f "^python3 $1" >/dev/null 2>&1; }
 get_state() { python3 -c "import json;print(json.load(open('$STATE')).get('last_alert',''))" 2>/dev/null || echo ""; }
 set_state() { python3 -c "import json;json.dump({'last_alert':\"$1\"},open('$STATE','w'))" 2>/dev/null; }
@@ -129,7 +184,7 @@ daemonize() {
   if [ -f "$2" ]; then
     mv -f "$2" "$2.1"
   fi
-  python3 - "$DIR" "$1" "$2" <<'EOF'
+  python3 - "$DIR" "$1" "$2" 9>&- <<'EOF'
 import os, sys
 d, script, logf = sys.argv[1], sys.argv[2], sys.argv[3]
 if os.fork() > 0:
@@ -279,6 +334,14 @@ else
   fi
 fi
 
+# A hook-triggered run has no reader for its output. It leaves the alert
+# state and the update check to the scheduled run, which then announces
+# a failure this run hit (as a new alert) or a recovery it made.
+if [ "$FROM_HOOK" = "1" ]; then
+  [ -n "$ALERT_SIG" ] && log "hook-triggered run: leaving this alert for the scheduled run to announce"
+  exit 0
+fi
+
 # ---------------- transition-based alerting ----------------
 # A degraded-but-running monitor alerts only when nothing is down.
 if [ -z "$ALERT_SIG" ] && [ -n "$DEGRADED_SIG" ]; then
@@ -327,7 +390,7 @@ if [ "$(cfg_get updates.check true)" = "true" ] \
   if [ $(( now - ${last_check:-0} )) -ge 86400 ]; then
     to=""
     command -v timeout >/dev/null 2>&1 && to="timeout 60"
-    if GIT_TERMINAL_PROMPT=0 $to git -C "$DIR" fetch --quiet >>"$LOG" 2>&1; then
+    if GIT_TERMINAL_PROMPT=0 $to git -C "$DIR" fetch --quiet >>"$LOG" 2>&1 9>&-; then
       behind=$(git -C "$DIR" rev-list --count 'HEAD..@{upstream}' 2>/dev/null || echo 0)
       upstream_head=$(git -C "$DIR" rev-parse '@{upstream}' 2>/dev/null || echo "")
       if [ "${behind:-0}" -gt 0 ] && [ "$upstream_head" != "$announced" ]; then
