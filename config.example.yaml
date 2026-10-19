@@ -7,6 +7,10 @@
 #   Check your edits:          python3 bin/settings.py validate
 #   What does the bot do here: python3 bin/settings.py show --explain
 #
+# Changes made from Discord with /settings are saved in
+# config.discord.yaml next to this file, never in it. Editing a
+# setting here later wins over the Discord change.
+#
 # Servers, channels, people and roles are Discord ids, in quotes. To
 # copy one, turn on Developer Mode in Discord (Settings > Advanced),
 # then right-click the server, channel or person and pick Copy ID.

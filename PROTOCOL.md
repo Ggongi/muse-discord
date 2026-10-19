@@ -398,6 +398,69 @@ history: [] # the last 100 changes and retired entries
   one as `config.yaml.bak-<UTC time>`; comments in the file are
   lost. It does not prompt: `--dry-run` previews. Never automatic.
 
+### /settings (the slash command)
+
+The monitor registers one global application command, `settings`
+(chat input, no options), once per start, after it knows the bot's
+identity. It reads the command list (`GET
+/applications/<app id>/commands`), creates the command when missing
+(`POST`), edits it when it differs (`PATCH .../commands/<id>`), and
+does nothing when it matches. It never bulk-overwrites, so other
+commands of the application survive. A failure is logged and retried
+a minute later; it never stops the monitor. The application id comes
+from the gateway's READY (else `GET /applications/@me`).
+
+| Field                        | Value    | Meaning                                    |
+| ---------------------------- | -------- | ------------------------------------------ |
+| `contexts`                   | `[0, 1]` | servers (GUILD) and the bot's DMs (BOT_DM) |
+| `integration_types`          | `[0]`    | GUILD_INSTALL only, no user installs       |
+| `default_member_permissions` | `null`   | visible to every member; see below         |
+
+The `bot` invite scope includes `applications.commands`, so the
+invite URL in SETUP.md step 2 needs no other scope.
+
+Who may use it (checked on every interaction, never trusted from a
+custom id):
+
+- **Owners**: everything editable from Discord, at any scope, from a
+  DM or any server.
+- **Server admins** (Manage Server in that server, from the
+  interaction's member permissions): their own server only, and only
+  quieter: `replies` off or when-addressed for the server or a
+  channel, plugins off, additions to `ignore`. Never loosening,
+  never privacy or limits, never another server.
+- **Anyone else**: an ephemeral "Only the bot's owners can change
+  its settings."
+
+The pages are rendered by `settings_ui.py` (next to `monitor.py`).
+The command and every component or modal whose custom id starts with
+`mdset:` reach `settings_ui.handle` on the interaction thread, which
+answers within Discord's 3 seconds whatever the main loop is doing;
+its return value is posted as the interaction callback. Every
+response is ephemeral. Without `settings_ui.py` the monitor logs it
+once and answers "Settings UI unavailable."
+
+- Writes go through `muse_settings.set_value` / `reset` into
+  `config.discord.yaml` (above), with `by` = the user's id, and
+  apply at once (the same live reload as a file edit). **Undo last
+  change** reverts the newest change still in effect at that one
+  scope (not the channels under a server; Everywhere includes the
+  bot-wide settings) to its previous value; pressing it again goes
+  one change further back.
+- The join notice the owners get for a new server carries a
+  **Configure** button, custom id `mdset:open:server:<server id>`,
+  which opens that server's page.
+- **Admin digest**: each server-admin change is queued, and the
+  owners get one DM per server summing up that server's admin
+  changes (who, which setting, old and new value) a minute after
+  the first one. A digest that cannot be delivered is retried; one
+  queued when the monitor restarts is lost, but the change itself
+  stays in the overlay's history with the admin's id.
+- Server names and member counts on the pages come from discovery
+  (`approximate_member_count`) and the gateway's GUILD_CREATE; the
+  channel and category lists from discovery. No page waits on a
+  Discord request.
+
 ### never_share holds
 
 `privacy.never_share` (a list of phrases, `everywhere` only) is an
@@ -595,8 +658,9 @@ intent needed; the application must not have an Interactions Endpoint
 URL set, or Discord sends clicks there instead). A dedicated thread
 answers it at once, independent of the main loop, because Discord
 fails an interaction not acknowledged within 3 seconds. Interactions
-are dispatched by custom id prefix (`mdupd` here; a slash command
-would register as `/<name>`):
+(button clicks and modal submits) are dispatched by custom id prefix
+(`mdupd` here, `mdhold` for never_share holds, `mdset` for
+/settings); slash commands by name (`/settings`):
 
 - From a non-owner, for a version other than the newest announced one,
   or for a version HEAD already contains: an ephemeral reply (only the

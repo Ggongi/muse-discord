@@ -130,6 +130,91 @@ What the settings scenarios cannot cover on Discord:
   `tests/test_settings_layout.py` covers it offline.
 - `role:<id>` entries in `who.allow` / `who.ignore`: the drivers hold
   no roles in the test server.
+- `/settings`. Bots cannot run slash commands or click buttons on
+  someone else's ephemeral messages, so no driver can open it. The
+  offline suites cover its routing and pages; on Discord it is tested
+  by hand with the checklist below.
+
+## Manual checklist: /settings
+
+Run it before a release that touches `/settings`, `settings_ui.py`,
+or the interaction code, with a real install (or `muse-test`), your
+own account as an owner, and a second account that is not an owner.
+Keep `monitor.log` open (`tail -f`) and `config.discord.yaml` at hand.
+
+Registration:
+
+- [ ] Start the monitor: the log says `/settings command created` (or
+      `updated`), or nothing on a restart with the command unchanged.
+      No `registration failed` line.
+- [ ] `/settings` appears in the bot's DM and in a server channel,
+      and not in a group DM.
+- [ ] Restart again: no `created` / `updated` line (no needless
+      write).
+
+Owner, in a DM:
+
+- [ ] `/settings` opens Home, visible only to you: Everywhere, DMs,
+      All servers, then each server by name with its member count.
+      With more than 25 servers the picker pages.
+- [ ] Open a scope; every drawer opens (Who it talks to, How it
+      talks, What it may do, Privacy, Limits, Plugins), each value
+      with its source tag.
+- [ ] Change a choice (e.g. How it talks, length): the page updates
+      in place, `config.discord.yaml` gains the entry with your id as
+      `by`, the log says `Settings reloaded`, and the bot's next reply
+      follows it without a restart.
+- [ ] A number (Limits): the modal accepts a number and `none`,
+      rejects text, and the value shows after submitting.
+- [ ] Edit house rules: the modal is prefilled; inherited notes show
+      as the placeholder.
+- [ ] Reset next to a changed value writes `inherit`; the source tag
+      falls back to the broader scope.
+- [ ] Undo last change reverts the newest change at that scope; a
+      second Undo goes one further back.
+- [ ] Why? lists the chain for each setting on the page.
+- [ ] A risky change (privacy memory loosened in a server, DMs from
+      anyone, media for everyone) shows a confirmation with a red
+      "Yes, change it"; backing out writes nothing.
+- [ ] Not offered: owners, token, persona, never_share (shown as "N
+      phrases set in config.yaml", read-only), plugin installation.
+- [ ] Pause everywhere, then Resume: the bot stops and resumes
+      answering.
+
+Owner, in a server:
+
+- [ ] `/settings` opens that server's page; This channel shows only
+      replies, notes and plugin on/off (and This category when the
+      channel has one).
+
+Server admin (the second account, with Manage Server in one server,
+not an owner):
+
+- [ ] `/settings` there shows only the quieter controls (replies off
+      or when-addressed, plugins off, add to ignore); no privacy or
+      limits; no other server.
+- [ ] Make a change: about a minute later the owner gets one DM
+      summing up the admin's changes in that server (several changes
+      in that minute arrive together).
+
+Anyone else (the second account, no Manage Server):
+
+- [ ] `/settings` answers "Only the bot's owners can change its
+      settings." and nothing is written.
+
+Owner DMs:
+
+- [ ] Invite the bot to a new server: the join DM has a **Configure**
+      button that opens that server's page.
+- [ ] Change a setting with `/settings`, then edit the same setting
+      in `config.yaml`: the owner gets one DM saying the file wins.
+
+Robustness:
+
+- [ ] Click through pages while the bot is busy replying: every
+      click answers at once ("This interaction failed" never shows).
+- [ ] Move `settings_ui.py` away and restart: `/settings` answers
+      "Settings UI unavailable." and the log says why, once.
 
 ## Running locally
 
