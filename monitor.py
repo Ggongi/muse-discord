@@ -1439,26 +1439,37 @@ def shares_server(user_id):
     return False
 
 
-def dm_sender_allowed(author):
-    """Whether a DM from author is read and answered: who.replies (off =
-    no DMs at all), who.dms_from (owners | shared-servers | anyone),
-    who.bots, and who.allow / who.ignore at the DM scope."""
+def dm_refusal(author):
+    """Why a DM from author is not read and answered, or None when it is:
+    who.replies (off = no DMs at all), who.dms_from (owners |
+    shared-servers | anyone | a list of user ids: the owners plus those
+    people), who.bots, and who.allow / who.ignore at the DM scope."""
     res = settings().resolve(MS.Scope.dm())
     if res["who.replies"] == "off":
-        return False
+        return "who.replies is off for DMs"
     uid = str((author or {}).get("id") or "")
     bot = is_bot_author(author)
     if uid in OWNER_USER_IDS and not bot:
-        return True
+        return None
     if bot and res["who.bots"] == "ignore":
-        return False
+        return "who.bots is ignore"
     policy = res["who.dms_from"]
     if policy == "owners":
-        return False
-    if people_match(res["who.ignore"], uid) \
-            or not people_match(res["who.allow"], uid):
-        return False
-    return policy == "anyone" or shares_server(uid)
+        return "who.dms_from is owners"
+    if isinstance(policy, list) and uid not in policy:
+        return "not in who.dms_from"
+    if people_match(res["who.ignore"], uid):
+        return "on who.ignore"
+    if not people_match(res["who.allow"], uid):
+        return "not in who.allow"
+    if policy == "shared-servers" and not shares_server(uid):
+        return "shares no server with the bot"
+    return None
+
+
+def dm_sender_allowed(author):
+    """Whether a DM from author is read and answered (see dm_refusal)."""
+    return dm_refusal(author) is None
 
 
 def retire_overlay_changes():
@@ -1631,6 +1642,9 @@ def sync_guilds(state, guilds, channels):
     first_run = "known_guilds" not in state
     known = state.setdefault("known_guilds", {})
     notices = state.setdefault("join_notices", [])
+    # Approximate member counts, for bin/settings.py's risk checks.
+    state["guild_members"] = {gid: _MEMBER_COUNTS[gid] for gid in guilds
+                              if isinstance(_MEMBER_COUNTS.get(gid), int)}
     for gid, ginfo in guilds.items():
         note_guild_joined(state, gid, ginfo.get("joined_at"))
         is_new = gid not in known
@@ -2041,7 +2055,8 @@ def never_share_hit(state, item, qid, parts):
         owner_dm = bool(meta.get("dm")) \
             and str(meta.get("author_id")) in OWNER_USER_IDS
     else:
-        owner_dm = item.get("channel_id") in DM_CHANNELS
+        owner_dm = DM_CHANNEL_USER.get(item.get("channel_id")) \
+            in OWNER_USER_IDS
     if owner_dm:
         return False
     text = "\n".join(parts)
@@ -2214,17 +2229,55 @@ class SettingsCtx:
             MS.reset(_SETTINGS.config_path, key, by, PLUGINS_DIR)
         settings()
 
-    def undo(self, scope_prefix, by):
-        """muse_settings.undo: revert the newest change at one scope
-        (scope_prefix as muse_settings.scope_prefix gives it); the key
-        reverted, or None."""
+    def undo(self, scope_prefix, by, **kw):
+        """muse_settings.undo: revert the newest change (and the rest of
+        its group) at one scope (scope_prefix as muse_settings.
+        scope_prefix gives it, or a Place); the key reverted, or None.
+        kw: children, admin_gid, expect (see muse_settings.undo)."""
         fn = getattr(MS, "undo", None)
         if fn is None:
             raise MS.SettingsError("undo is not available in this version")
+        if kw.get("admin_gid"):
+            kw.setdefault("info", self)
         with _OVERLAY_LOCK:
-            out = fn(_SETTINGS.config_path, scope_prefix, by, PLUGINS_DIR)
+            out = fn(_SETTINGS.config_path, scope_prefix, by, PLUGINS_DIR,
+                     **kw)
         settings()
         return out
+
+    def apply(self, changes, by, role, group=None, admin_gid=None):
+        """muse_settings.apply: several changes in one write and one undo
+        group. role ("owner" or "admin") is required; an admin's changes
+        are checked against the admin rule with admin_gid and this ctx's
+        channel lists."""
+        with _OVERLAY_LOCK:
+            out = MS.apply(_SETTINGS.config_path, changes, by, group,
+                           PLUGINS_DIR, role=role, admin_gid=admin_gid,
+                           info=self)
+        settings()
+        return out
+
+    def undo_group(self, group, by, undo_id=None):
+        """muse_settings.undo_group: undo one specific group (owners
+        only)."""
+        with _OVERLAY_LOCK:
+            out = MS.undo_group(_SETTINGS.config_path, group, by,
+                                PLUGINS_DIR, role="owner", undo_id=undo_id)
+        settings()
+        return out
+
+    def names(self, some_id):
+        """A server's or channel's name for muse_settings' sentences."""
+        some_id = str(some_id)
+        with _DIRECTORY_LOCK:
+            for g in _DIRECTORY["guilds"]:
+                if g["id"] == some_id:
+                    return g.get("name")
+            for chans in _DIRECTORY["channels"].values():
+                for c in chans:
+                    if str(c.get("id")) == some_id:
+                        return c.get("name")
+        return settings().labels.get(some_id)
 
     def reload(self):
         """A fresh Settings through the monitor's own watcher, so the
@@ -3908,21 +3961,37 @@ def is_join_message(msg):
 # existing channel if there is one, creates an empty one otherwise, and never
 # sends a message).
 #
-# The owners' DM channels are resolved for REST polling (gap repair and
+# The owners' DM channels, and those of the people who.dms_from names
+# (a list of user ids), are resolved for REST polling (gap repair and
 # the sweep) unless DMs are off (dms.who.replies: off). Anyone else's DMs
 # cannot be enumerated (there is no DM list endpoint for bots), so they
 # arrive via the gateway only, and only as who.dms_from allows: under the
 # default (owners) the bot never even records a stranger's DM, so there
 # is nothing to decline or deflect.
+def dm_listed_people():
+    """The people who.dms_from names (a list of user ids), else []."""
+    v = settings().get("who.dms_from", MS.Scope.dm())
+    return [str(u) for u in v] if isinstance(v, list) else []
+
+
 def dm_poll_user_ids():
     if not dms_enabled():
         return []
-    return sorted(OWNER_USER_IDS)
+    return sorted(set(OWNER_USER_IDS) | set(dm_listed_people()))
+
+
+def dm_swept_author(uid):
+    """Whose DMs the poll and the sweep cover (and so whose refused DMs
+    are ledgered): the owners and the people who.dms_from names."""
+    return str(uid) in OWNER_USER_IDS or str(uid) in dm_listed_people()
 
 
 # The DM channels the poll has resolved, {channel_id: recipient name}:
 # the reconciliation sweep covers these as well as server channels.
+# DM_CHANNEL_USER: {channel_id: recipient user id} (an owner's DM or a
+# listed person's: never_share treats only the owners' as private).
 DM_CHANNELS = {}
+DM_CHANNEL_USER = {}
 
 
 def list_dm_channels():
@@ -3939,6 +4008,7 @@ def list_dm_channels():
             name = recips[0].get("username", uid) if recips else uid
             out.append((c["id"], name))
             DM_CHANNELS[c["id"]] = name
+            DM_CHANNEL_USER[c["id"]] = str(uid)
     return out
 
 
@@ -3990,12 +4060,13 @@ def check_dm_channel(dm_id, dm_name, state):
 
 def note_dm_refused(msg):
     """A DM the DM settings decline (dm_sender_allowed). Only an owner's
-    is ledgered (see note_refused): the sweep covers the owners' DM
-    channels only, and a stranger's DMs stay unrecorded."""
+    or a who.dms_from-listed person's is ledgered (see note_refused): the
+    sweep covers only their DM channels, and a stranger's DMs stay
+    unrecorded."""
     author = msg.get("author", {}) or {}
-    if author.get("id") in OWNER_USER_IDS and not is_bot_author(author):
+    if dm_swept_author(author.get("id")) and not is_bot_author(author):
         note_refused(msg, "DM with " + (author.get("username") or "?"),
-                     "who.replies is off for DMs")
+                     dm_refusal(author) or "who.replies is off for DMs")
 
 
 def bot_run_length(history, msg):
@@ -5193,7 +5264,7 @@ def sweep_mentions(state, queue, channels, dms=True):
             if dm:
                 # Owner DM channels: every owner message is a trigger.
                 if is_bot_author(author) \
-                        or author.get("id") not in OWNER_USER_IDS \
+                        or not dm_swept_author(author.get("id")) \
                         or not dm_sender_allowed(author):
                     continue
             # Direct address only: follow-ups are never requeued.

@@ -185,7 +185,8 @@ message of a burst is recorded with its trigger's status, and an
 outcome under any of them (a reply under the last fragment, a
 `silent` item naming any fragment) settles them all. The
 reconciliation sweep diffs the recent history of every monitored
-channel, and of the owners' DM channels, against this ledger (plus
+channel, and of the DM channels of the owners and of the people
+`who.dms_from` names, against this ledger (plus
 queue, outbox, quarantine, and replied records) and requeues any
 mention or owner DM unaccounted for. DMs that only the gateway sees
 (`who.dms_from: shared-servers` or `anyone`) are not swept.
@@ -317,6 +318,12 @@ the monitor and `bin/settings.py` both use it. The CLI:
   place; `--explain` adds where each value came from.
 - `bin/settings.py fold`: copy the overlay into config.yaml.
 - `bin/settings.py migrate`: convert an old-layout config.yaml.
+- `bin/settings.py set|reset|undo|preset|pause|resume|explain
+  --place PLACE`: change settings the way /settings does (written to
+  config.discord.yaml, one undo group per command), in plain words.
+  PLACE is `defaults`, `dms`, `server:<id>` or
+  `channel:<id>:<id>`. Risky changes need `--yes`; `--by` records who
+  asked (default `muse.ai`). `bin/settings.py --help` has the details.
 
 ### Scopes
 

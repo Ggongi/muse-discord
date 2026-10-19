@@ -22,12 +22,37 @@
         who.replies: conversational). Saves a timestamped backup first;
         comments in the old file are not carried over. Does not prompt.
 
+Changing settings (the muse.ai path; writes config.discord.yaml, as
+/settings does, and prints each change in plain words):
+
+    bin/settings.py set KEY VALUE --place PLACE
+    bin/settings.py reset KEY --place PLACE
+    bin/settings.py undo --place PLACE
+    bin/settings.py preset friends|community|work --place server:ID
+    bin/settings.py pause --place PLACE
+    bin/settings.py resume --place PLACE
+    bin/settings.py explain [--place PLACE] [KEY ...]
+
+PLACE is defaults (every server and DM without its own setting), dms,
+server:<server id> or channel:<server id>:<channel id>. KEY is a
+setting's key (who.replies) or its name ("When it answers"); VALUE a
+value or its name (when-addressed, "Only when @mentioned", none, on,
+a list of user ids separated by commas). Undo reverts the newest
+change at that place with everything applied together with it (a
+server's Undo includes its channels). Risky changes (judged by what
+they lead to: strangers' DMs, your memory in a big server, Pause
+everywhere, ...) are printed with a warning and NOT made unless --yes
+is given: only add --yes after the owner explicitly said yes (exit
+status 3 = needs --yes). --by NAME records who asked (default
+muse.ai); --category ID names a channel's category.
+
 --config PATH picks the file (default: $MUSE_DISCORD_CONFIG, else
 config.yaml in the package directory).
 """
 import argparse
 import json
 import os
+import secrets
 import sys
 
 PKG = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -42,13 +67,32 @@ def _cfg_path(args):
         or os.path.join(PKG, "config.yaml")
 
 
-def _known_guilds(cfg):
+def _state(cfg):
     try:
         with open(os.path.join(os.path.dirname(os.path.abspath(cfg)),
                                "state.json")) as f:
-            return (json.load(f) or {}).get("known_guilds") or {}
-    except (OSError, ValueError, AttributeError):
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
         return {}
+
+
+def _known_guilds(cfg):
+    known = _state(cfg).get("known_guilds")
+    return known if isinstance(known, dict) else {}
+
+
+def _info(cfg):
+    """What the monitor last saw (state.json): server names and member
+    counts, for the risk checks and the sentences."""
+    state = _state(cfg)
+    known = state.get("known_guilds")
+    counts = state.get("guild_members")
+    known = known if isinstance(known, dict) else {}
+    counts = counts if isinstance(counts, dict) else {}
+    return {"guilds": [{"id": str(g), "name": n,
+                        "member_count": counts.get(g)}
+                       for g, n in known.items()]}
 
 
 def _fmt(spec, value):
@@ -172,6 +216,151 @@ def cmd_migrate(args):
     return 0
 
 
+class NeedsYes(Exception):
+    pass
+
+
+def _place(args, info):
+    place = MS.parse_place(args.place or "defaults", info)
+    if getattr(args, "category", None):
+        if place.kind != "channel":
+            raise MS.SettingsError("--category goes with a channel place")
+        cat = str(args.category).strip()
+        if not cat.isdigit() or len(cat) > 25 or cat == place.channel_id:
+            raise MS.SettingsError(f"--category {cat}: expected the "
+                                   f"channel's category id (digits)")
+        place.category_id = cat
+    return place
+
+
+def _run(args, st, cfg, info, changes, by):
+    """Print the changes and their risks; make them unless they are risky
+    and --yes is missing."""
+    names = MS.names_from(info, st)
+    rows = MS.plan_changes(st, changes)
+    todo = [r for r in rows if not r.noop]
+    for r in rows:
+        if r.noop:
+            print("No change: " + r.describe(names) + ".")
+    if not todo:
+        return 0
+    risk = MS.assess(st, [r.change for r in todo], info)
+    for r in todo:
+        print(r.describe(names))
+    for n in risk.notes:
+        print("Note: " + n)
+    for w in risk.warnings:
+        print("Warning: " + w)
+    if risk.risky and not args.yes:
+        raise NeedsYes()
+    MS.apply(cfg, [r.change for r in todo], by,
+             group=f"cli-{secrets.token_hex(4)}", plugins_dir=PLUGINS,
+             role="owner")
+    print("Done.")
+    return 0
+
+
+def cmd_set(args, reset=False):
+    cfg = _cfg_path(args)
+    st = MS.load(cfg, PLUGINS)
+    info = _info(cfg)
+    place = _place(args, info)
+    key = MS.key_from_text(st, args.key)
+    if reset:
+        changes = [MS.Change(place, key, "inherit")]
+    elif key == "who.dms_from" and place.kind in ("dms", "defaults"):
+        raw = args.value.strip()
+        if raw.lower() in ("nobody", "off"):
+            changes = MS.dms_from_changes(st, "nobody")
+        else:
+            value = MS.parse_value(st, key, raw)
+            changes = MS.dms_from_changes(
+                st, "list" if isinstance(value, list) else value,
+                value if isinstance(value, list) else None)
+    else:
+        changes = [MS.Change(place, key, MS.parse_value(st, key,
+                                                        args.value))]
+    return _run(args, st, cfg, info, changes, args.by)
+
+
+def cmd_reset(args):
+    return cmd_set(args, reset=True)
+
+
+def cmd_preset(args):
+    cfg = _cfg_path(args)
+    st = MS.load(cfg, PLUGINS)
+    info = _info(cfg)
+    place = _place(args, info)
+    changes = MS.preset_changes(st, args.name, place, info)
+    if not changes:
+        print(f"No change: {MS.place_name(place, MS.names_from(info, st))} "
+              f"already matches {args.name.capitalize()}.")
+        return 0
+    return _run(args, st, cfg, info, changes, args.by)
+
+
+def cmd_pause(args, resume=False):
+    cfg = _cfg_path(args)
+    st = MS.load(cfg, PLUGINS)
+    info = _info(cfg)
+    place = _place(args, info)
+    names = MS.names_from(info, st)
+    if resume:
+        changes = MS.resume_changes(st, place)
+        if not changes:
+            print(f"No change: {MS.place_name(place, names)} is not paused "
+                  f"there.")
+            return 0
+    else:
+        changes = MS.pause_changes(place)
+    return _run(args, st, cfg, info, changes, args.by)
+
+
+def cmd_resume(args):
+    return cmd_pause(args, resume=True)
+
+
+def cmd_undo(args):
+    cfg = _cfg_path(args)
+    st = MS.load(cfg, PLUGINS)
+    info = _info(cfg)
+    place = _place(args, info)
+    names = MS.names_from(info, st)
+    children = place.kind == "server"
+    text, ident = MS.undo_preview(st, place, children, names)
+    if text is None:
+        print(f"Nothing to undo in {MS.place_name(place, names)}.")
+        return 0
+    print(text)
+    risk = MS.assess(st, MS.undo_plan(st, place, children), info)
+    for w in risk.warnings:
+        print("Warning: " + w)
+    if risk.risky and not args.yes:
+        raise NeedsYes()
+    MS.undo_changes(cfg, place, args.by, PLUGINS, children=children,
+                    role="owner", expect=ident)
+    print("Done.")
+    return 0
+
+
+def cmd_explain(args):
+    cfg = _cfg_path(args)
+    st = MS.load(cfg, PLUGINS)
+    info = _info(cfg)
+    place = _place(args, info)
+    names = MS.names_from(info, st)
+    keys = [MS.key_from_text(st, k) for k in args.keys] or None
+    print(f"{MS.place_name(place, names)}:")
+    if MS.is_paused(st, place):
+        print("  Paused here.")
+    if place.kind == "server" and not keys:
+        print(f"  Matches: {MS.matching_preset(st, place) or 'Custom'}")
+    for line in MS.explain_lines(st, place, keys, names):
+        print(f"  {line}")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="settings.py", description="muse-discord settings tool")
@@ -192,10 +381,44 @@ def main(argv=None):
     mi.add_argument("--dry-run", action="store_true")
     mi.add_argument("--state", help="state.json (server names; default: "
                     "next to config.yaml)")
+
+    def changer(name, help_, *pos):
+        p = sub.add_parser(name, help=help_)
+        for a in pos:
+            p.add_argument(*a[0], **a[1])
+        p.add_argument("--place", required=name not in ("explain",),
+                       help="defaults, dms, server:ID or channel:ID:ID")
+        p.add_argument("--category", help="the channel's category id")
+        if name != "explain":
+            p.add_argument("--by", default="muse.ai",
+                           help="who asked (default: muse.ai)")
+            p.add_argument("--yes", action="store_true",
+                           help="make a risky change (only after the "
+                                "owner said yes)")
+        return p
+    changer("set", "change a setting at a place",
+            (["key"], {}), (["value"], {}))
+    changer("reset", "make a place follow its wider place again",
+            (["key"], {}))
+    changer("undo", "undo the newest change at a place")
+    changer("preset", "apply Friends, Community or Work to a server",
+            (["name"], {"choices": ["friends", "community", "work"],
+                        "type": str.lower}))
+    changer("pause", "stop answering at a place")
+    changer("resume", "undo a pause at a place")
+    changer("explain", "what the bot does at a place, in plain words",
+            (["keys"], {"nargs": "*"}))
     args = ap.parse_args(argv)
     try:
         return {"validate": cmd_validate, "show": cmd_show,
-                "fold": cmd_fold, "migrate": cmd_migrate}[args.cmd](args)
+                "fold": cmd_fold, "migrate": cmd_migrate, "set": cmd_set,
+                "reset": cmd_reset, "undo": cmd_undo, "preset": cmd_preset,
+                "pause": cmd_pause, "resume": cmd_resume,
+                "explain": cmd_explain}[args.cmd](args)
+    except NeedsYes:
+        print("Not changed: this is risky. Tell the owner the warning; run "
+              "it again with --yes only after they say yes.")
+        return 3
     except MS.SettingsError as e:
         print(str(e), file=sys.stderr)
         return 1

@@ -6,6 +6,45 @@ entries below the releases are pre-release history. **Action
 needed** lists what an existing install must do after updating;
 UPDATING.md walks a Muse through it.
 
+## 2026-10-19: Settings engine: places, plain words, undo groups, presets
+
+New:
+
+- "Who can DM it" can name people: `dms.who.dms_from` takes a list
+  of user ids, meaning you plus those people (for example a friend),
+  besides `owners`, `shared-servers` and `anyone`. Their DMs are
+  caught up after an outage like yours.
+- `bin/settings.py` can change settings, not only show them: `set`,
+  `reset`, `undo`, `preset` (Friends, Community or Work, for a
+  server), `pause`, `resume` and `explain`, each for one place
+  (`defaults`, `dms`, `server:<id>` or `channel:<id>:<id>`). It says
+  what changed in plain words. Risky changes are only made with
+  `--yes`.
+- Changes made together (a preset, Pause everywhere) are undone
+  together with one Undo.
+
+Changed:
+
+- Risk warnings look at what a change leads to, not only at the one
+  setting: for example opening DMs warns only when more people can
+  actually DM the bot, and an allow list warns how many places go
+  quiet.
+- Setting a value that is already in force writes nothing, and
+  setting what config.yaml says at that spot removes the Discord
+  change instead, so the file stays in charge.
+- Server admins can undo their own changes back to what the owners
+  set (still never louder than that). They can no longer remove a
+  setting you made, and what you change later (pausing a server, for
+  example) now also reaches the channels an admin quieted.
+- Settings changed from Discord and from `bin/settings.py` at the
+  same moment no longer overwrite each other, and a
+  `config.discord.yaml` that cannot be read is left alone (changes are
+  refused with a message) instead of being replaced.
+
+**Action needed:**
+
+- None.
+
 ## 2026-10-19: Daily limits, ignored mentions, threads and notices
 
 Fixed:

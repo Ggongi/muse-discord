@@ -81,7 +81,9 @@ everywhere:
 dms:
   who:
     dms_from: owners      # whose DMs it answers: owners, shared-servers
-                          # (people in a server with the bot), or anyone
+                          # (people in a server with the bot), anyone,
+                          # or a list of user ids: you plus those
+                          # people, like ["200000000000000002"]
     replies: conversational
                           # off = never answer DMs. Every DM counts as
                           # addressed, so the other values act the same.
