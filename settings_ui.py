@@ -2198,6 +2198,12 @@ def page_quiet(R, gid):
         if path[0] != "servers" or path[1] != gid \
                 or ms.entry_role(e) != "admin" or kcode(key) is None:
             continue
+        pl = ms.place_of_path(path)
+        sc = ms.Scope.server(gid, channel_id=pl.channel_id,
+                             category_id=R.category_of(gid, pl.channel_id)
+                             if pl.channel_id else None)
+        if e.get("_norm", e.get("value")) == owners.get(key, sc):
+            continue    # back at the owners' value (an undone change)
         changes.append((str(e.get("at") or ""), path, key, e))
     changes.sort(key=lambda c: c[0], reverse=True)
     for _at, path, key, e in changes[:ADMIN_CHANGES_SHOWN]:

@@ -672,6 +672,8 @@ class Admin(Base):
         r = self.admin(by_label(r, "Undo")["custom_id"], channel=MUSECHAT)
         self.assertIn("**Undone:**", text(r))
         self.assertEqual(self.val("who.replies", MC), "conversational")
+        # an undone change is no longer listed as the admins'
+        self.assertNotIn("#muse-chat: When it answers", text(r))
 
     def test_never_answer_add_and_remove(self):
         r = self.admin(f"mdset:2:ppl:s{G1}:ig", [KAI],

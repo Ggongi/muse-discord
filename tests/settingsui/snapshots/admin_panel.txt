@@ -33,7 +33,7 @@ C amber
   …
 
 === admin_panel > mdset:2:val:s<G1>:r:when-addressed:q > mdset:2:un:s<G1>:g0000000003
-type 7 · 25 components · 829 chars
+type 7 · 22 components · 716 chars
 TD | **Undone:** In Muse Lounge, When it answers → back to Chatty
 C amber
   TD | ## Quiet the bot in Muse Lounge
@@ -47,7 +47,7 @@ C amber
   …
 
 === admin_panel > mdset:2:val:s<G1>:r:off:q > mdset:2:un:s<G1>:g0000000004
-type 7 · 25 components · 829 chars
+type 7 · 22 components · 716 chars
 TD | **Undone:** In Muse Lounge, When it answers → back to Chatty
 C amber
   TD | ## Quiet the bot in Muse Lounge
@@ -68,7 +68,7 @@ C amber
   …
 
 === admin_panel > mdset:2:rm:s<G1>:ig=<SPAM>
-type 7 · 22 components · 637 chars
+type 7 · 20 components · 574 chars
 SEC | **Done:** In Muse Lounge, Never answer: @Bob and @spam1 → @Bob
     [Undo] mdset:2:un:s<G1>:g0000000006
 C amber
@@ -82,7 +82,7 @@ C amber
   …
 
 === admin_panel > mdset:2:val:s<G1>:ig:=:q
-type 7 · 22 components · 637 chars
+type 7 · 20 components · 574 chars
 SEC | **Done:** In Muse Lounge, Never answer: @Bob and @spam1 → @Bob
     [Undo] mdset:2:un:s<G1>:g0000000007
 C amber
