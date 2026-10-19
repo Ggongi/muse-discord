@@ -131,7 +131,7 @@ def why_copy(mod, **over):
     c = {"id": "c2", "application_id": "777", "version": "5",
          "type": 3, "name": "Why no reply?", "description": "",
          "contexts": [1, 0], "integration_types": [0],
-         "default_member_permissions": None}
+         "default_member_permissions": "32"}
     c.update(over)
     return c
 
@@ -162,6 +162,8 @@ class Registration(unittest.TestCase):
         self.assertEqual(c["contexts"], [0, 1])
         self.assertEqual(c["integration_types"], [0])
         self.assertNotIn("description", c)          # none on menu commands
+        # Manage Server: members don't see it; owners have the button
+        self.assertEqual(c["default_member_permissions"], "32")
         self.assertLessEqual(len(c["name"]), 32)
 
     def test_created_when_missing(self):
@@ -839,6 +841,51 @@ class UIData(unittest.TestCase):
         self.assertEqual(self.ctx.outcome("2001")["author_id"], U1)
         self.assertIsNone(self.ctx.outcome("9999"))
 
+    def test_where_a_message_was(self):
+        """Review B #2: a channel registered with its category as
+        parent_id is not a thread; a channel the monitor no longer maps
+        is never listed under DMs; the ledger keeps the server it was
+        written in (#1)."""
+        m = self.mod
+        new, cat = "705000000000000001", "800000000000000009"
+        m.CHANNELS[new] = {"name": "new-room", "guild_id": G1,
+                           "guild_name": "g", "can_send": None,
+                           "thread": False, "parent_id": cat}
+        with quiet():
+            m.publish_directory()
+        m.ledger_record("3001", "skipped", "settings: who.replies is off "
+                        "here", new, "sam", author_id=U1)
+        e = m._ledger_load()["entries"]["3001"]
+        self.assertEqual((e["guild_id"], e["parent_id"]), (G1, None))
+        self.assertEqual([o["message_id"] for o in self.ctx.recent_outcomes(
+            MS.Place.channel(G1, new), 10)], ["3001"])
+        self.assertIsNone(self.ctx.outcome("3001")["parent_id"])
+        # Discovery forgets the channel: the entry still says where.
+        del m.CHANNELS[new]
+        with quiet():
+            m.publish_directory()
+        self.assertEqual(self.ctx.outcome("3001")["guild_id"], G1)
+        # An older entry for an unmapped channel: not a DM.
+        d = m._ledger_load()
+        d["entries"]["3002"] = {"status": "skipped", "reason": "settings: "
+                                "not allowed by who.allow / who.ignore",
+                                "channel_id": "706000000000000001",
+                                "author": "kai", "updated": 1.0}
+        m._ledger_save(d)
+        self.assertEqual(self.ctx.recent_outcomes(MS.Place.dms(), 10), [])
+        # A DM channel the monitor polls is one.
+        m.DM_CHANNELS["400000000000000077"] = "owner"
+        m.ledger_record("3003", "skipped", "settings: who.replies is off "
+                        "for DMs", "400000000000000077", "o", author_id=U1)
+        self.assertTrue(m._ledger_load()["entries"]["3003"]["dm"])
+        self.assertEqual([o["message_id"] for o in self.ctx.recent_outcomes(
+            MS.Place.dms(), 10)], ["3003"])
+
+    def test_no_dead_reason_prefixes(self):
+        """Every reason code prefix is one a caller writes."""
+        for prefix, _code in self.mod._LEDGER_CODES:
+            self.assertNotEqual(prefix, "who.bots is ignore")
+
     def test_stash_single_use_and_bound_to_its_user(self):
         c = self.ctx
         tok = c.stash_put(OWNER, {"kind": "apply", "n": 1})
@@ -920,6 +967,28 @@ class AdminDigest(unittest.TestCase):
         self.assertEqual(g1["allowed_mentions"], {"parse": []})
         with quiet():
             self.assertEqual(self.mod.flush_admin_digests(force=True), 0)
+
+    def test_digest_in_plain_words(self):
+        """Review B #9: what /settings sends (an overlay key and values)
+        reads as a sentence, never a raw key."""
+        self.mod.GUILDS = {G1: {"name": "Lounge"}}
+        self.mod._GUILD_CHANNELS[G1] = [{"id": CH, "name": "general",
+                                         "type": 0, "parent_id": None}]
+        with quiet():
+            self.mod.publish_directory()
+        c = self.ctx
+        c.notify_owners_admin_change(
+            G1, U1, f'servers."{G1}".channels."{CH}".replies',
+            "conversational", "off")
+        c.notify_owners_admin_change(G1, U1, f'servers."{G1}".who.ignore',
+                                     [], [U1])
+        text = self.mod.admin_digest_text(
+            G1, self.mod._ADMIN_CHANGES[G1]["changes"])
+        self.assertIn(f"<@{U1}>: In #general, When it answers: Chatty → "
+                      f"Off", text)
+        self.assertIn("In Lounge, Never answer: Nobody → ", text)
+        self.assertNotIn("who.replies", text)
+        self.assertNotIn("`", text)
 
     def test_change_during_window_joins_it(self):
         c = self.ctx

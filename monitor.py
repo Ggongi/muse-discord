@@ -1171,8 +1171,21 @@ def ledger_record_many(mids, status, reason="", channel_id=None,
         return
     d = _ledger_load()
     code = ledger_code(status, reason)
+    # Where it happened, as the monitor knows it now (a thread's parent
+    # only for a thread): /settings' Why reads it later, when the
+    # channel may be gone from discovery.
+    info = CHANNELS.get(str(channel_id)) if channel_id else None
+    where = {}
+    if info and info.get("guild_id"):
+        where = {"guild_id": info["guild_id"],
+                 "parent_id": info.get("parent_id") if info.get("thread")
+                 else None}
+    elif channel_id and (channel_id in DM_CHANNELS
+                         or channel_id in DM_CHANNEL_USER):
+        where = {"dm": True}
     for mid in mids:
         ent = d["entries"].get(mid, {})
+        ent.update(where)
         ent.update({"status": status, "reason": reason,
                     "channel_id": channel_id or ent.get("channel_id"),
                     "author": author or ent.get("author"),
@@ -1196,7 +1209,6 @@ def ledger_record_many(mids, status, reason="", channel_id=None,
 _LEDGER_CODES = (
     ("settings: who.replies is off", "replies-off"),
     ("settings: who.bots", "bots-ignore"),
-    ("who.bots is ignore", "bots-ignore"),
     ("settings: not allowed by who.allow", "not-allowed"),
     ("settings: on who.ignore", "not-allowed"),
     ("settings: not in who.allow", "not-allowed"),
@@ -2253,7 +2265,9 @@ WHY_COMMAND = {
     "type": 3,  # MESSAGE
     "contexts": [0, 1],
     "integration_types": [0],
-    "default_member_permissions": None,
+    # Manage Server: ordinary members don't see it in the menu (owners
+    # use Why no reply? on the /settings pages anyway).
+    "default_member_permissions": "32",
 }
 ADMIN_DIGEST_SECS = 60
 
@@ -2291,7 +2305,8 @@ def publish_directory():
             c["can_send"] = (mon or {}).get("can_send")
             out.append(c)
         channels[gid] = out
-    where = {cid: (info.get("guild_id"), info.get("parent_id"))
+    where = {cid: (info.get("guild_id"),
+                   info.get("parent_id") if info.get("thread") else None)
              for cid, info in CHANNELS.items()}
     global _DIRECTORY
     with _DIRECTORY_LOCK:
@@ -2433,7 +2448,7 @@ class SettingsCtx:
             o = _outcome(mid, e, where)
             kind = getattr(place, "kind", None)
             if kind == "dms":
-                ok = o["guild_id"] is None
+                ok = o["guild_id"] is None and o["dm"]
             elif kind == "server":
                 ok = o["guild_id"] == place.guild_id
             elif kind == "channel":
@@ -2489,17 +2504,28 @@ class SettingsCtx:
 
 
 def _outcome(mid, e, where):
+    """One ledger entry for /settings. Its server comes from the entry
+    (recorded since 2026-10-19), else from discovery; an entry is a DM's
+    only when it says so or its channel is a known DM channel (an
+    unmapped server channel is never shown under DMs)."""
     cid = str(e.get("channel_id") or "")
-    gid, parent = where.get(cid, (None, None))
-    if gid is None and cid in CHANNELS:
-        gid = CHANNELS[cid].get("guild_id")
-        parent = CHANNELS[cid].get("parent_id")
+    code = e.get("code") or ledger_code(e.get("status"), e.get("reason"))
+    if e.get("guild_id"):
+        gid, parent = e["guild_id"], e.get("parent_id")
+    else:
+        gid, parent = where.get(cid, (None, None))
+        info = CHANNELS.get(cid)
+        if gid is None and info:
+            gid = info.get("guild_id")
+            parent = info.get("parent_id") if info.get("thread") else None
+    dm = gid is None and bool(
+        e.get("dm") or cid in DM_CHANNELS or cid in DM_CHANNEL_USER
+        or code in ("dm-off", "dm-not-allowed"))
     return {"message_id": mid, "channel_id": cid or None,
-            "guild_id": gid, "parent_id": parent,
+            "guild_id": gid, "parent_id": parent, "dm": dm,
             "author_id": e.get("author_id"), "author": e.get("author"),
             "status": e.get("status"),
-            "code": e.get("code") or ledger_code(e.get("status"),
-                                                 e.get("reason")),
+            "code": code,
             "detail": e.get("detail") or {}, "reason": e.get("reason"),
             "at": e.get("updated") or _snowflake_ts(mid)}
 
@@ -2516,6 +2542,35 @@ def _show_value(v):
     return str(v)
 
 
+def _digest_name(some_id):
+    """A server's, channel's or person's name for the digest's words."""
+    some_id = str(some_id)
+    with _DIRECTORY_LOCK:
+        for g in _DIRECTORY["guilds"]:
+            if g["id"] == some_id:
+                return g.get("name")
+        for chans in _DIRECTORY["channels"].values():
+            for c in chans:
+                if str(c.get("id")) == some_id:
+                    return c.get("name")
+    return _USER_NAMES.get(some_id)
+
+
+def _digest_words(c):
+    """"In #general, When it answers: Chatty → Off" for a change whose
+    key is an overlay key (what /settings sends), else None."""
+    try:
+        path, key = MS.parse_key(c["key"])
+        place = MS.place_of_path(path)
+        if place is None or MS.CORE.get(key) is None and not \
+                key.startswith("plugins."):
+            return None
+        return MS.describe_change(place, key, c["old"], c["new"],
+                                  _digest_name, path)
+    except Exception:
+        return None
+
+
 def admin_digest_text(gid, changes):
     with _DIRECTORY_LOCK:
         known = _DIRECTORY["guilds"]
@@ -2523,12 +2578,16 @@ def admin_digest_text(gid, changes):
         or (GUILDS.get(gid) or {}).get("name") or gid
     head = (f"**Server admin changes in {name}** (server ID {gid}), made "
             f"with /settings:\n")
-    tail = ("\nAdmins can only make me quieter there. To undo one, use "
-            "/settings (Undo last change) or edit config.yaml.")
+    tail = ("\nAdmins can only make me quieter there. To undo one, run "
+            "/settings there and press Undo, or edit config.yaml.")
     lines = []
     for c in changes:
         when = datetime.fromtimestamp(c["at"], timezone.utc) \
             .strftime("%H:%M UTC")
+        words = _digest_words(c)
+        if words:
+            lines.append(f"- <@{c['user']}>: {words}, {when}")
+            continue
         lines.append(f"- <@{c['user']}> set `{c['key']}` to "
                      f"{_show_value(c['new'])} (was "
                      f"{_show_value(c['old'])}), {when}")
