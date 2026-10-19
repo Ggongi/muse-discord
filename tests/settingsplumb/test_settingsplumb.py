@@ -126,6 +126,16 @@ def discord_copy(mod, **over):
     return c
 
 
+def why_copy(mod, **over):
+    """The "Why no reply?" message command as Discord's GET returns it."""
+    c = {"id": "c2", "application_id": "777", "version": "5",
+         "type": 3, "name": "Why no reply?", "description": "",
+         "contexts": [1, 0], "integration_types": [0],
+         "default_member_permissions": None}
+    c.update(over)
+    return c
+
+
 class Registration(unittest.TestCase):
     def setUp(self):
         self.mod = load_monitor(CFG)
@@ -144,13 +154,24 @@ class Registration(unittest.TestCase):
         self.assertNotIn("dm_permission", c)  # deprecated for contexts
         self.assertLessEqual(len(c["description"]), 100)
 
+    def test_why_definition(self):
+        c = self.mod.WHY_COMMAND
+        self.assertEqual(c["type"], 3)              # a message command
+        self.assertEqual(c["name"], "Why no reply?")
+        self.assertEqual(self.mod.WHY_NAMES[1], "Why no reply")
+        self.assertEqual(c["contexts"], [0, 1])
+        self.assertEqual(c["integration_types"], [0])
+        self.assertNotIn("description", c)          # none on menu commands
+        self.assertLessEqual(len(c["name"]), 32)
+
     def test_created_when_missing(self):
         api = FakeCommands(self.mod)
         r, out = self.run_reg()
         self.assertEqual(r, "created")
         posts = [x for x in api.log if x[0] == "POST"]
-        self.assertEqual(len(posts), 1)
+        self.assertEqual(len(posts), 2)
         self.assertEqual(posts[0][2], self.mod.SETTINGS_COMMAND)
+        self.assertEqual(posts[1][2], self.mod.WHY_COMMAND)
         self.assertIn("/settings command created", out)
         # Once per run: later ticks make no request.
         n = len(api.log)
@@ -160,6 +181,7 @@ class Registration(unittest.TestCase):
 
     def test_noop_when_equal(self):
         api = FakeCommands(self.mod, [discord_copy(self.mod),
+                                      why_copy(self.mod),
                                       {"id": "x", "name": "other",
                                        "type": 1}])
         r, out = self.run_reg()
@@ -173,7 +195,8 @@ class Registration(unittest.TestCase):
                      {"default_member_permissions": "32"},
                      {"options": [{"type": 3, "name": "x"}]}):
             mod = load_monitor(CFG)
-            api = FakeCommands(mod, [discord_copy(mod, **over)])
+            api = FakeCommands(mod, [discord_copy(mod, **over),
+                                     why_copy(mod)])
             with quiet():
                 r = mod.register_commands()
             self.assertEqual(r, "updated", over)
@@ -182,6 +205,40 @@ class Registration(unittest.TestCase):
             self.assertEqual(patches[0][1], "/applications/777/commands/c1")
             self.assertEqual(patches[0][2], mod.SETTINGS_COMMAND)
             self.assertFalse([x for x in api.log if x[0] == "POST"])
+
+    def test_why_name_falls_back_when_refused(self):
+        """Discord answers 400 when it does not take "?" in the name: the
+        command is registered as "Why no reply" instead, and that name
+        counts as registered from then on."""
+        api = FakeCommands(self.mod, [discord_copy(self.mod)])
+        post = api.post
+
+        def picky(path, data):
+            if "?" in data["name"]:
+                api.log.append(("POST", path, data))
+                raise HTTPErr(400)
+            return post(path, data)
+        self.mod.api_post = picky
+        r, out = self.run_reg()
+        self.assertEqual(r, "created")
+        self.assertIn("Why no reply", [c["name"] for c in api.cmds])
+        self.assertIn("refused the command name", out)
+        # A later run finds it under the fallback name: nothing to do.
+        api2 = FakeCommands(self.mod, [discord_copy(self.mod),
+                                       why_copy(self.mod,
+                                                name="Why no reply")])
+        self.mod._COMMAND_REG.update(done=False, next_try=0)
+        self.assertEqual(self.run_reg()[0], "unchanged")
+        self.assertEqual([x[0] for x in api2.log], ["GET"])
+
+    def test_why_patched_when_different(self):
+        api = FakeCommands(self.mod, [discord_copy(self.mod),
+                                      why_copy(self.mod, contexts=[0])])
+        r, _ = self.run_reg()
+        self.assertEqual(r, "updated")
+        patches = [x for x in api.log if x[0] == "PATCH"]
+        self.assertEqual(patches[0][1], "/applications/777/commands/c2")
+        self.assertEqual(patches[0][2], self.mod.WHY_COMMAND)
 
     def test_retry_on_failure_never_fatal(self):
         api = FakeCommands(self.mod)
@@ -262,8 +319,15 @@ class Routing(unittest.TestCase):
         return r
 
     def test_command_component_modal_reach_handle(self):
-        for ix in (cmd_ix(), cmd_ix(guild=G1, user=U1),
+        why = cmd_ix()
+        why["data"] = {"name": "Why no reply?", "type": 3,
+                       "target_id": "1"}
+        why2 = cmd_ix(guild=G1)
+        why2["data"] = {"name": "Why no reply", "type": 3,
+                        "target_id": "1"}
+        for ix in (cmd_ix(), cmd_ix(guild=G1, user=U1), why, why2,
                    comp_ix("mdset:open:server:" + G1),
+                   comp_ix("mdset:2:pg:x:b"),
                    comp_ix("mdset:m:abc", t=5)):
             r = self.dispatch(ix)
             got, ctx, _ = self.stub.calls[-1]
@@ -288,6 +352,20 @@ class Routing(unittest.TestCase):
         # Autocomplete (4) is not answered.
         self.assertIsNone(self.dispatch({"id": "1", "token": "t",
                                          "type": 4, "data": {}}))
+
+    def test_components_v2_forwarded_verbatim(self):
+        """A Components V2 page (flags 64|32768, no content) reaches
+        Discord as settings_ui made it, for a new message and an edit."""
+        for t, flags in ((4, 64 | 32768), (7, 32768)):
+            body = {"type": t, "data": {
+                "flags": flags, "allowed_mentions": {"parse": []},
+                "components": [{"type": 17, "accent_color": 0x5865F2,
+                                "components": [{"type": 10,
+                                                "content": "## Page"}]}]}}
+            self.stub.body = body
+            r = self.dispatch(comp_ix("mdset:2:pg:x:b"))
+            self.assertEqual(r, body)
+            self.assertNotIn("content", r["data"])
 
     def test_body_forwarded_verbatim(self):
         body = {"type": 9, "data": {"custom_id": "mdset:m:1",
@@ -602,7 +680,8 @@ class Directory(unittest.TestCase):
             "/users/@me/guilds": [{"id": G1, "name": "Lounge"},
                                   {"id": G2, "name": "Atrium"}],
             f"/guilds/{G1}?with_counts=true": {
-                "id": G1, "roles": [], "approximate_member_count": 1240},
+                "id": G1, "roles": [], "approximate_member_count": 1240,
+                "system_channel_id": CH},
             f"/guilds/{G2}?with_counts=true": {"id": G2, "roles": []},
             f"/guilds/{G1}/channels": [
                 {"id": CAT, "type": 4, "name": "Text", "position": 0},
@@ -625,12 +704,19 @@ class Directory(unittest.TestCase):
             mod.publish_directory()
             ctx = mod.SettingsCtx()
         self.assertEqual(ctx.guilds(), [
-            {"id": G2, "name": "Atrium", "member_count": None},
-            {"id": G1, "name": "Lounge", "member_count": 1240}])
+            {"id": G2, "name": "Atrium", "member_count": None,
+             "system_channel_id": None},
+            {"id": G1, "name": "Lounge", "member_count": 1240,
+             "system_channel_id": CH}])
         chans = ctx.channels(G1)
         self.assertEqual([(c["id"], c["type"], c["parent_id"])
                           for c in chans],
                          [(CAT, 4, None), (CH, 0, CAT)])
+        # The bot reads #general; its send permission is unknown here (no
+        # roles), and a category is neither readable nor not.
+        self.assertTrue(chans[1]["readable"])
+        self.assertIsNone(chans[1]["can_send"])
+        self.assertNotIn("readable", chans[0])
         self.assertEqual(ctx.channels(G2), [])
         self.assertEqual(ctx.channels("123"), [])
         # GUILD_CREATE's member_count refreshes the cache.
@@ -650,6 +736,150 @@ class Directory(unittest.TestCase):
         ctx.guilds()[0]["name"] = "x"
         self.assertEqual(ctx.channels(G1)[0]["name"], "Text")
         self.assertEqual(ctx.guilds()[0]["name"], "Atrium")
+
+
+# ------------------------------------------------- data for settings_ui
+class UIData(unittest.TestCase):
+    """What the redesigned /settings reads through SettingsCtx: the
+    ledger's outcomes (with author ids and reason codes), names, the
+    stash, the directory's system channel and send flags."""
+
+    def setUp(self):
+        self.mod = load_monitor(CFG)
+        with quiet():
+            self.mod.publish_directory()
+            self.ctx = self.mod.SettingsCtx()
+
+    def test_ledger_keeps_author_id_code_and_detail(self):
+        m = self.mod
+        msg = {"id": "1001", "channel_id": CH,
+               "author": {"id": U1, "username": "sam"}}
+        with quiet():
+            m.note_refused(msg, "#general", "who.replies is off here")
+        e = m._ledger_load()["entries"]["1001"]
+        self.assertEqual((e["author_id"], e["author"], e["code"]),
+                         (U1, "sam", "replies-off"))
+        # A later outcome keeps the author id and drops stale detail.
+        m.ledger_record_many(["1001"], "skipped", "daily cap reached", CH,
+                             "sam", detail={"key": "limits.per_day",
+                                            "counter": "everywhere",
+                                            "cap": 3})
+        m.ledger_record("1001", "replied", "sweep sync", CH, "sam")
+        e = m._ledger_load()["entries"]["1001"]
+        self.assertEqual((e["author_id"], e["code"]), (U1, "replied"))
+        self.assertNotIn("detail", e)
+        self.assertEqual(self.ctx.display_name(U1), "sam")
+        for status, reason, code in (
+                ("skipped", "settings: who.replies is off for DMs",
+                 "dm-off"),
+                ("skipped", "settings: who.bots: ignore", "bots-ignore"),
+                ("skipped", "settings: who.dms_from is owners",
+                 "dm-not-allowed"),
+                ("skipped", "settings: not allowed by who.allow / "
+                 "who.ignore", "not-allowed"),
+                ("skipped", "bot exchange limit (4) reached",
+                 "bot-exchange"),
+                ("skipped", "suspicious, ignored: x", "suspicious-ignored"),
+                ("skipped", "predates bot join", "predates-join"),
+                ("skipped", "403 missing access", "no-send"),
+                ("skipped", "enqueue failed 3x", "internal"),
+                ("enqueue_failed", "sweep enqueue failed", "internal"),
+                ("skipped", "no reply (worker's call)", "worker-skipped"),
+                ("skipped", "send failed: boom", "send-failed"),
+                ("quarantined", "ignore previous", "quarantined"),
+                ("skipped", "something new", "other")):
+            self.assertEqual(m.ledger_code(status, reason), code, reason)
+
+    def test_rate_block_says_which_cap(self):
+        m = load_monitor(CFG + f'servers:\n  "{G1}":\n    limits:\n'
+                         f'      per_person_per_day: 1\n')
+        st = state(m)
+        scope = MS.Scope.server(G1)
+        with quiet():
+            self.assertIsNone(m.rate_block(st, U1, CH, scope))
+            m.rate_record(st, U1, scope)
+            got = m.rate_block(st, U1, CH, scope)
+            self.assertFalse(m.rate_allows(st, U1, CH, scope))
+        self.assertEqual(got, {"key": "limits.per_person_per_day",
+                               "counter": f"server:{G1}", "cap": 1})
+        self.assertIsNone(m.rate_block(st, OWNER, CH, scope))
+
+    def test_recent_outcomes_by_place(self):
+        m = self.mod
+        thread = "703000000000000009"
+        m.CHANNELS[thread] = {"name": "general > t", "guild_id": G1,
+                              "thread": True, "parent_id": CH}
+        with quiet():
+            m.publish_directory()
+        m.ledger_record("2001", "skipped", "settings: who.replies is off "
+                        "here", CH, "sam", author_id=U1)
+        m.ledger_record("2002", "skipped", "daily cap reached", thread,
+                        "kai", author_id="222000000000000009",
+                        detail={"key": "limits.per_day",
+                                "counter": f"server:{G1}", "cap": 5})
+        m.ledger_record("2003", "skipped", "settings: who.dms_from is "
+                        "owners", "400000000000000077", "ann",
+                        author_id="222000000000000008")
+        m.ledger_record("2004", "replied", "", "704000000000000001", "x")
+        ch = MS.Place.channel(G1, CH)
+        got = self.ctx.recent_outcomes(ch, 10)
+        self.assertEqual([o["message_id"] for o in got], ["2002", "2001"])
+        self.assertEqual(got[0]["parent_id"], CH)
+        self.assertEqual(got[0]["detail"]["cap"], 5)
+        self.assertEqual(got[0]["code"], "cap")
+        self.assertEqual(got[1]["guild_id"], G1)
+        self.assertEqual(
+            [o["message_id"] for o in self.ctx.recent_outcomes(
+                MS.Place.server(G1), 10)], ["2002", "2001"])
+        self.assertEqual(
+            [o["message_id"] for o in self.ctx.recent_outcomes(
+                MS.Place.dms(), 10) if o["status"] == "skipped"], ["2003"])
+        self.assertEqual(self.ctx.recent_outcomes(ch, 1)[0]["message_id"],
+                         "2002")
+        self.assertEqual(self.ctx.outcome("2001")["author_id"], U1)
+        self.assertIsNone(self.ctx.outcome("9999"))
+
+    def test_stash_single_use_and_bound_to_its_user(self):
+        c = self.ctx
+        tok = c.stash_put(OWNER, {"kind": "apply", "n": 1})
+        self.assertEqual(len(tok), 10)
+        self.assertNotIn(":", tok)
+        with self.assertRaises(PermissionError):
+            c.stash_take(U1, tok)
+        # another interaction's Ctx sees the same stash
+        with quiet():
+            other = self.mod.SettingsCtx()
+        self.assertEqual(other.stash_take(OWNER, tok),
+                         {"kind": "apply", "n": 1})
+        self.assertIsNone(c.stash_take(OWNER, tok))     # used
+        tok = c.stash_put(OWNER, {"x": 1}, ttl=-1)
+        self.assertIsNone(c.stash_take(OWNER, tok))     # expired
+        self.assertIsNone(c.stash_take(OWNER, "nope"))
+
+    def test_directory_send_flags(self):
+        m = self.mod
+        m.GUILDS = {G1: {"name": "Lounge", "system_channel_id": None}}
+        m._GUILD_CHANNELS[G1] = [
+            {"id": CH, "name": "general", "type": 0, "parent_id": None},
+            {"id": "702000000000000001", "name": "random", "type": 0,
+             "parent_id": None},
+            {"id": "709000000000000001", "name": "secret", "type": 0,
+             "parent_id": None}]
+        m.CHANNELS = {CH: {"name": "general", "guild_id": G1,
+                           "can_send": True},
+                      "702000000000000001": {"name": "random",
+                                             "guild_id": G1,
+                                             "can_send": False}}
+        with quiet():
+            m.publish_directory()
+        g = self.ctx.guilds()[0]
+        self.assertIn("system_channel_id", g)
+        self.assertIsNone(g["system_channel_id"])
+        got = {c["name"]: (c["readable"], c["can_send"])
+               for c in self.ctx.channels(G1)}
+        self.assertEqual(got, {"general": (True, True),
+                               "random": (True, False),
+                               "secret": (False, None)})
 
 
 # ---------------------------------------------------------- admin digest
