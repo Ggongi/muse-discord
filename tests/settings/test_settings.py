@@ -839,7 +839,10 @@ class Cards(MonitorBase):
         self.assertTrue(ok)
         self.assertEqual(item["settings"], {
             "where": "dm", "speaker": "owner", "audience": "private",
-            "memory": "everything", "length": "normal", "notes": ""})
+            "memory": "everything", "length": "normal", "notes": "",
+            # The places a settings request can name (none discovered
+            # here); tests/settingsnl covers the list.
+            "places": {"servers": [], "more": False}})
         self.assertIs(item["follow_up"], False)
         self.assertTrue(item["owner_command"])
 

@@ -2143,7 +2143,8 @@ def undo_plan(st, prefix, children=False, admin_gid=None):
 
 
 def undo_changes(config_path, prefix, by, plugins_dir=None, children=False,
-                 admin_gid=None, info=None, role=None, expect=None):
+                 admin_gid=None, info=None, role=None, expect=None,
+                 undo_id=None):
     """Revert the newest change still in effect at one place, and with
     it every change of the same group (one apply, preset or pause),
     in one file write. Old history lines without a group undo one at a
@@ -2152,8 +2153,10 @@ def undo_changes(config_path, prefix, by, plugins_dir=None, children=False,
     admin_gid: a server admin's Undo: only server admins' changes in
     that server, checked by admin_check (SettingsError when refused).
     expect: the id undo_preview gave; SettingsError when the Undo would
-    now revert something else (a stale button). Returns the key strings
-    reverted, newest first ([]: nothing to undo)."""
+    now revert something else (a stale button). undo_id: the group id
+    for the undo's own history lines (as undo_group). Returns the key
+    strings reverted, newest first ([]: nothing to undo)."""
+    undo_id = _check_group(undo_id)
     with overlay_lock(overlay_path_for(config_path)):
         st = load(config_path, plugins_dir)
         doc = _read_overlay_doc(st.overlay_path, strict=True)
@@ -2171,7 +2174,7 @@ def undo_changes(config_path, prefix, by, plugins_dir=None, children=False,
             role = "admin"
         elif role == "admin":
             raise SettingsError("a server admin's undo needs admin_gid")
-        done = _revert(st, doc, picks, by, role)
+        done = _revert(st, doc, picks, by, role, undo_id)
         _write_overlay_doc(st.overlay_path, doc)
     return done
 
@@ -3394,6 +3397,23 @@ def group_current(st, group):
             return False
     values = doc.get("values") or {}
     return all(_line_live(h, values) for _i, h in lines)
+
+
+def group_undo_plan(st, group):
+    """The changes undo_group would make for group, as [Change] (value:
+    what each key goes back to at its layer, or "inherit"), newest
+    first; [] for an unknown group. Pass them to assess: an Undo is
+    judged by its outcome too."""
+    doc = st.overlay_doc or {}
+    out = []
+    for _i, h in reversed(_group_lines(doc, group)):
+        try:
+            path, key = parse_key(h["key"])
+        except ValueError:
+            continue
+        out.append(Change(place_of_path(path), key, h.get("from", "inherit"),
+                          path=path))
+    return out
 
 
 def _revert(st, doc, picks, by, role=None, ugroup=None):

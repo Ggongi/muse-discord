@@ -67,6 +67,36 @@ Changed:
   "I just joined" DMs still works. The monitor registers **Why no
   reply?** by itself; it can take a moment to appear in Discord.
 
+## 2026-10-19: Change settings by asking
+
+New:
+
+- DM the bot what you want, like "only answer in #general when I @
+  you" or "be brief in the Work server", and it changes the setting.
+  Changes that are safe or make the bot quieter apply at once, with
+  an Undo button. Changes that open the bot to more people or loosen
+  your privacy show what they would do and wait for your Apply. Only
+  your own DMs count: never server messages, other people, or
+  forwarded messages. If someone else's message tries it, nothing
+  changes and you get a DM about it (at most one an hour).
+- Your Muse can change settings from its main chat too (SETTINGS.md).
+  Each change it makes shows up in your DMs with an Undo button,
+  without a ping, also one made while the bot was stopped.
+  `bin/settings.py --by` takes a name (default `muse.ai`), not a user
+  id.
+- Instructions, the status line and welcome notes always wait for
+  your Apply when you change them by DM, so you see the exact words.
+- `bin/settings.py places` lists your servers and channels with their
+  ids, and `bin/settings.py` names channels in what it prints.
+
+**Action needed:**
+
+- Update the installed worker prompt (new SETTINGS REQUESTS section).
+- Have your Muse save a memory note: "To change muse-discord's
+  settings, read <package dir>/SETTINGS.md first."
+- If your runtime registered a copy of hooks/mention-watch.sh, update
+  the copy.
+
 ## 2026-10-19: Settings engine: places, plain words, undo groups, presets
 
 New:

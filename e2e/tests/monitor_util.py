@@ -23,6 +23,7 @@ def load_monitor_with(tmp, config, name="monitor_under_test"):
     SELF."""
     shutil.copy(os.path.join(REPO, "monitor.py"), tmp)
     shutil.copy(os.path.join(REPO, "muse_settings.py"), tmp)
+    shutil.copy(os.path.join(REPO, "settings_nl.py"), tmp)
     plugins = os.path.join(REPO, "plugins")
     if os.path.isdir(plugins) and not os.path.exists(
             os.path.join(tmp, "plugins")):

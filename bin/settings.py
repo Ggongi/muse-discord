@@ -32,6 +32,12 @@ Changing settings (the muse.ai path; writes config.discord.yaml, as
     bin/settings.py pause --place PLACE
     bin/settings.py resume --place PLACE
     bin/settings.py explain [--place PLACE] [KEY ...]
+    bin/settings.py places [--find TEXT] [--server ID]
+
+`places` lists the places with their ids (from directory.json, which
+the running monitor keeps up to date): defaults, dms, each server and
+its channels. --find shows only the servers and channels whose name
+contains TEXT; --server only that server.
 
 PLACE is defaults (every server and DM without its own setting), dms,
 server:<server id> or channel:<server id>:<channel id>. KEY is a
@@ -44,7 +50,9 @@ they lead to: strangers' DMs, your memory in a big server, Pause
 everywhere, ...) are printed with a warning and NOT made unless --yes
 is given: only add --yes after the owner explicitly said yes (exit
 status 3 = needs --yes). --by NAME records who asked (default
-muse.ai); --category ID names a channel's category.
+muse.ai); it is a name, never a user id (ids are for changes made in
+Discord): every change made here is sent to the owners in a silent DM
+with an Undo button. --category ID names a channel's category.
 
 --config PATH picks the file (default: $MUSE_DISCORD_CONFIG, else
 config.yaml in the package directory).
@@ -54,6 +62,7 @@ import json
 import os
 import secrets
 import sys
+import time
 
 PKG = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PKG)
@@ -82,17 +91,49 @@ def _known_guilds(cfg):
     return known if isinstance(known, dict) else {}
 
 
+DIRECTORY_STALE_SECS = 3600
+CARD_TYPES = (0, 5, 15, 16)   # text, announcement, forum, media channels
+
+
+def _directory(cfg):
+    """directory.json (written by the running monitor: its servers, with
+    member counts, and their channels), or None."""
+    for d in (os.path.dirname(os.path.abspath(cfg)), PKG):
+        try:
+            with open(os.path.join(d, "directory.json")) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("guilds"), list):
+            return data
+    return None
+
+
 def _info(cfg):
-    """What the monitor last saw (state.json): server names and member
-    counts, for the risk checks and the sentences."""
+    """What the monitor last saw: server and channel names and member
+    counts (directory.json, else state.json), for the risk checks and
+    the sentences."""
     state = _state(cfg)
     known = state.get("known_guilds")
     counts = state.get("guild_members")
     known = known if isinstance(known, dict) else {}
     counts = counts if isinstance(counts, dict) else {}
-    return {"guilds": [{"id": str(g), "name": n,
-                        "member_count": counts.get(g)}
-                       for g, n in known.items()]}
+    guilds = {str(g): {"id": str(g), "name": n,
+                       "member_count": counts.get(g)}
+              for g, n in known.items()}
+    channels = {}
+    d = _directory(cfg)
+    if d is not None:
+        for g in d.get("guilds") or []:
+            if isinstance(g, dict) and g.get("id"):
+                gid = str(g["id"])
+                guilds[gid] = {"id": gid, "name": g.get("name") or gid,
+                               "member_count": g.get("member_count")
+                               if g.get("member_count") is not None
+                               else counts.get(gid)}
+        chans = d.get("channels")
+        channels = chans if isinstance(chans, dict) else {}
+    return {"guilds": list(guilds.values()), "channels": channels}
 
 
 def _fmt(spec, value):
@@ -361,6 +402,47 @@ def cmd_explain(args):
     return 0
 
 
+def cmd_places(args):
+    cfg = _cfg_path(args)
+    d = _directory(cfg)
+    if d is None:
+        print("No directory.json yet: the monitor writes it once it is "
+              "running. Start the monitor, then try again.",
+              file=sys.stderr)
+        return 1
+    age = time.time() - (d.get("updated") or 0)
+    if age > DIRECTORY_STALE_SECS:
+        print(f"Note: directory.json is {int(age // 3600)} hour(s) old; "
+              f"start the monitor for fresh names.")
+    find = (args.find or "").strip().lower()
+    chans = d.get("channels") if isinstance(d.get("channels"), dict) \
+        else {}
+    lines = [] if find or args.server else ["defaults", "dms"]
+    for g in d.get("guilds") or []:
+        if not isinstance(g, dict) or not g.get("id"):
+            continue
+        gid, name = str(g["id"]), str(g.get("name") or g["id"])
+        if args.server and gid != str(args.server):
+            continue
+        n = g.get("member_count")
+        size = f"{n:,} members" if isinstance(n, int) else "size unknown"
+        rows = [c for c in chans.get(gid) or [] if isinstance(c, dict)
+                and c.get("type") in CARD_TYPES]
+        hit = not find or find in name.lower()
+        rows = [c for c in rows
+                if hit or find in str(c.get("name") or "").lower()]
+        if not hit and not rows:
+            continue
+        lines.append(f"server:{gid}  {name} ({size})")
+        lines += [f"  channel:{gid}:{c['id']}  #{c.get('name') or c['id']}"
+                  for c in rows]
+    if not lines:
+        print(f"Nothing matches {args.find or args.server!r}.")
+        return 1
+    print("\n".join(lines))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="settings.py", description="muse-discord settings tool")
@@ -408,13 +490,24 @@ def main(argv=None):
     changer("resume", "undo a pause at a place")
     changer("explain", "what the bot does at a place, in plain words",
             (["keys"], {"nargs": "*"}))
+    pl = sub.add_parser("places", help="the places (servers, channels) "
+                        "with their ids")
+    pl.add_argument("--find", help="only names containing this text")
+    pl.add_argument("--server", help="only this server id")
     args = ap.parse_args(argv)
+    by = getattr(args, "by", None)
+    if by is not None and (not str(by).strip()
+                           or MS._id_str(str(by)) is not None):
+        print(f"--by {by!r}: give a name (like muse.ai), not a user id; "
+              f"user ids are for changes made in Discord.",
+              file=sys.stderr)
+        return 2
     try:
         return {"validate": cmd_validate, "show": cmd_show,
                 "fold": cmd_fold, "migrate": cmd_migrate, "set": cmd_set,
                 "reset": cmd_reset, "undo": cmd_undo, "preset": cmd_preset,
                 "pause": cmd_pause, "resume": cmd_resume,
-                "explain": cmd_explain}[args.cmd](args)
+                "explain": cmd_explain, "places": cmd_places}[args.cmd](args)
     except NeedsYes:
         print("Not changed: this is risky. Tell the owner the warning; run "
               "it again with --yes only after they say yes.")

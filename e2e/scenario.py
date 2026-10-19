@@ -539,6 +539,13 @@ def _arg_regex(v, w, labels, kinds):
         _fail(w, f"invalid regular expression: {e}")
 
 
+def _arg_key_suffix(v, w, labels, kinds):
+    """A settings key (or the end of one), e.g. who.replies."""
+    if not isinstance(v, str) or not re.fullmatch(r"[a-z_]+(\.[a-z_]+)*",
+                                                  v):
+        _fail(w, f"expected a settings key such as who.replies, got {v!r}")
+
+
 CHECK_ARGS = {
     "sut_reply_count": _arg_count,
     "replies_to": _arg_label,
@@ -560,6 +567,7 @@ CHECK_ARGS = {
     "held": _arg_label,
     "queue_item": _arg_queue_item,
     "monitor_restarts": _arg_count,
+    "overlay_lacks": _arg_key_suffix,
 }
 
 

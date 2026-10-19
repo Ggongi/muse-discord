@@ -358,12 +358,28 @@ when a newer release exists, each owner gets one DM about it. Pressing
 (tracking main) is offered the newest release, unless it already
 contains it.
 
+Last, save a memory note in the owner's main chat, so a later request
+to change the bot's settings finds its guide: "To change
+muse-discord's settings, read `<package dir>/SETTINGS.md` first and
+follow it."
+
 ## Changing settings later
 
 The owner may ask to change how the bot behaves at any time ("be
 brief in the work server", "stay quiet in #announcements", "let my
-friend's DMs through"). Edit `config.yaml`; the bot re-reads it on
-save, no restart needed.
+friend's DMs through"). There are three ways:
+
+- **They DM the bot** what they want ("only answer in #general when I
+  @ you"). It changes the setting itself: changes that are safe or
+  make it quieter apply at once, with an **Undo** button; changes
+  that open it to more people or loosen their privacy show what they
+  would do and wait for their **Apply**. Only the owners' own DMs
+  count.
+- **They type `/settings`** in Discord (below).
+- **They ask you**, in this chat: follow SETTINGS.md, which changes
+  settings with `bin/settings.py` (the bot re-reads them at once, no
+  restart). Edit `config.yaml` by hand only for what that does not
+  offer (owners, persona, never_share, plugins).
 
 The owner can also change most settings from Discord, without the
 Muse: type `/settings` in any channel the bot is in, or in a DM with

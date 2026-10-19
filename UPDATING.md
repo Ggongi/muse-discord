@@ -150,6 +150,11 @@ only releases, and skips any release HEAD already contains.
   inside the seams (persona, generation policy, judgment tweaks).
 - **Wake hook**: if `hooks/mention-watch.sh` changed and the runtime
   registered a copy rather than the file itself, update the copy.
+- **Settings guide**: if the release has `SETTINGS.md` and your memory
+  has no note about it yet, save one: "To change muse-discord's
+  settings, read `<package dir>/SETTINGS.md` first and follow it."
+  Then follow that file whenever the owner asks you to change how the
+  bot behaves.
 - **Update hook**: if the runtime has no hook for
   `hooks/update-watch.sh` yet, register it as SETUP.md step 10
   describes (main chat, ~60 s poll, its wake prompt). From then on

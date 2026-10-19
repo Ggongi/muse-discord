@@ -346,16 +346,19 @@ that sent that message deletes it, where it was posted; checks can
 still name the label), `thread` (with `send.in`, below) and
 `settings` (a live settings change, below).
 In tier 1, directives in a message's text (`[[slow]]`, `[[silent]]`,
-`[[long]]`, `[[everyone]]`, `[[mention_a]]`, `[[say:<text>]]`; see
-`fake_worker.py`) shape the fake worker's reply. Besides the channel
+`[[long]]`, `[[everyone]]`, `[[mention_a]]`, `[[say:<text>]]`,
+`[[settings:<op> <key>=<value> @<place>]]`, which attaches a settings
+action; see `fake_worker.py`) shape the fake worker's reply. Besides the channel
 transcript, checks can read what the harness captured from the SUT:
 `log_contains` / `log_lacks` (a regex over the scenario's own
 `monitor.log`), `held` (a never_share hold in `state.json` for a
 label's message), `ledger_status`, `quarantined`, and, in tier 1,
 `queue_item` (the queue item the fake worker got for a label's
 message: `follow_up`, `kind`, `from_bot`, `owner_command`, and
-fields of its `settings` card), and `monitor_restarts` (how many
-times the monitor was restarted during the steps). A scenario may set
+fields of its `settings` card), `monitor_restarts` (how many
+times the monitor was restarted during the steps), and
+`overlay_lacks: <key>` (no entry for that settings key, at any place,
+in the SUT's `config.discord.yaml`). A scenario may set
 `config:` overrides or `legacy_config: true` (see "The test config");
 either restarts the monitor for that scenario. Check it offline with
 `python3 e2e/run.py --tree . --tier 1 --dry-run` (or `--tier 2`).
