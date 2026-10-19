@@ -74,9 +74,9 @@ chmod 600 ~/.config/muse-discord/bot_token
 
 Verify WITHOUT printing it: `test -s ~/.config/muse-discord/bot_token`
 should succeed. If the install must use a different path or an env
-var, set `bot.token_file` / `bot.token_env` in config.yaml (step 4)
-instead. An env var must be set wherever the watchdog runs: the
-processes it starts inherit its environment.
+var, set `token_from` in config.yaml (step 4) to that path or to
+`env:NAME` instead. An env var must be set wherever the watchdog
+runs: the processes it starts inherit its environment.
 
 ## Step 4: Fill config.yaml
 
@@ -84,66 +84,72 @@ processes it starts inherit its environment.
 cp config.example.yaml config.yaml
 ```
 
-Edit `config.yaml`:
+Setup fills in only three settings. Everything else already has a
+careful default, so do not walk the owner through the rest of the
+file unless they ask.
 
-- **owners.user_ids**: the owner's Discord user ID (a number, as a
-  quoted string). **[owner]** To find it: in Discord, open Settings,
-  Advanced, enable **Developer Mode**; then right-click your own
-  avatar/name anywhere and choose **Copy User ID**.
-- **bot.guild_ids**: leave `[]` unless the bot should only run in
-  specific servers.
-- **behavior.dm_policy**: `owner_only` is the recommended default.
-- **behavior.respond_to**: leave it at `[mention, reply_to_bot]`.
-- **behavior.active_guild_ids**: servers where ambient behavior
-  (welcomes) runs. Every other server stays in observe mode, where
-  only @mentions, replies to the bot, and DMs get answers. Leave it
-  empty unless step 5 turns on an ambient behavior.
-  **[owner]** To find a server ID: with Developer Mode on, right-click
-  the server icon and choose **Copy Server ID**.
-- **safety**: reply caps are off by default. If the owner wants to
-  bound token spend, set `daily_reply_cap` (all items queued for the
-  worker per day, answered or not) and/or `per_user_daily_cap`; their
-  own messages are always exempt.
-- Review **engine** tuning; defaults are sane.
-- **behavior.bots**: `direct` (default) lets other bots, such as
-  other people's Muses, talk to this one by @mention or reply. Set
-  `off` to ignore bots entirely.
-- **presence**: keeps the bot shown as online. By default there is no
-  status line under its name; set `status_text` (and `status_kind`)
-  for one, or `enabled: false` to skip the presence process.
+- **owners**: the owner's Discord user ID, as a quoted string in a
+  list (`owners: ["123456789012345678"]`); add co-owners the same
+  way. **[owner]** To find it: in Discord, open Settings, Advanced,
+  enable **Developer Mode**; then right-click your own avatar/name
+  anywhere and choose **Copy User ID**.
+- **persona**: leave it at `persona.md` (step 6 writes that file).
+- **token_from**: leave it at the token file from step 3, or set the
+  path or `env:NAME` used there.
 
-Validate the config loads (no Discord connection is made):
+What the defaults mean, in one breath, so the owner knows what they
+are getting: in servers the bot answers when @mentioned or replied
+to, and keeps talking with someone it just answered when they write
+again within about 2 minutes; in DMs it answers only its owners;
+replies may draw on public facts about the owner (name, interests,
+public projects, opinions) but nothing private; there are no daily
+caps; welcomes and media generation are off. Step 5 and "Changing
+settings later" below cover changing any of it.
+
+Check the file (no Discord connection is made, and the token is not
+needed for this):
 
 ```bash
-python3 -c "
-import monitor
-print('owners:', monitor.OWNER_USER_IDS)
-print('poll:', monitor.POLL_INTERVAL, 'coalesce:', monitor.COALESCE_SECS)
-print('plugins:', monitor.CFG.get('plugins'))
-"
+python3 bin/settings.py validate
 ```
 
-(Run with a token in argv if the token file isn't placed yet:
-`python3 -c "..." ` imports monitor, which requires a resolvable
-token; pass a dummy only for this check if you must, and never log it.)
+It names each problem: the file, the setting, and why. Fix every
+error before step 8: the bot refuses to start with an invalid
+config.yaml.
 
 ## Step 5: Decide the plugins
 
-Both plugins are off by default. Enable in `config.yaml` under
-`plugins:` only what the owner wants:
+Both plugins are off by default. Turn on only what the owner wants:
 
-- **welcome**: greets new members, in active servers only (add each
-  server's ID to `behavior.active_guild_ids`). Set
-  `plugins.welcome.enabled: true` and review the `channel` param (default: each server's system
-  channel; per-server overrides via `per_guild`, keyed by guild ID or
-  server name, values are channel IDs, channel names, or `off`) and
-  the `prompt` param (the instructions the worker drafts from;
-  `{user}` and `{server}` are substituted per join).
-- **media_generation**: lets allowed users have the worker generate
-  images/video. Requires the worker runtime to actually have media
-  tools; if it doesn't, leave this off (the worker must never claim
-  generation it cannot start). `allowed_user_ids: []` means owners
-  only.
+- **welcome**: greets new members. It is off in every server
+  (`all_servers`), and turned on one server at a time, under that
+  server's id (**[owner]** with Developer Mode on, right-click the
+  server icon and choose **Copy Server ID**):
+
+  ```yaml
+  servers:
+    "200000000000000001":
+      name: My Server # a label for the owner; ignored by the bot
+      plugins:
+        welcome:
+          enabled: on
+          channel: system # or a channel id, in quotes
+          notes: "Point newcomers to #rules."
+  ```
+
+  `channel: system` is the server's Discord system channel.
+  `notes` tells the Muse what to mention to newcomers.
+
+  <!-- VERIFY: welcome.channel default is `system` -->
+
+- **media**: lets the owners (or anyone listed in
+  `plugins.media.who`) have the worker generate images/video, up to
+  `plugins.media.per_day` a day (`none` = no cap). Requires the
+  worker runtime to actually have media tools; if it doesn't, leave
+  `plugins.media.enabled: off` (the worker must never claim
+  generation it cannot start).
+
+Run `python3 bin/settings.py validate` again after editing.
 
 ## Step 6: The persona interview (do not skip)
 
@@ -240,9 +246,9 @@ to the scheduled run. Keep the schedule anyway: it is the backstop
 that restarts presence and a stuck monitor (alive, stale heartbeat),
 raises alerts, and checks for updates. A hook-triggered run leaves
 alerts to it, so a failure that run hit is still reported by the next
-scheduled run. With `bot.token_env` (no token file), the variable must
-also be set where the hook runs, or only the scheduled run can restart
-the monitor.
+scheduled run. With `token_from: env:NAME` (no token file), the
+variable must also be set where the hook runs, or only the scheduled
+run can restart the monitor.
 
 To stop everything: unregister the wake hook and the watchdog schedule
 first (either one restarts a dead monitor), then kill the PID in
@@ -261,10 +267,14 @@ see working before calling the install done.
    can send in. Expect: typing indicator within ~5s, a reply in the
    persona's voice within ~15s (coalesce window + worker time).
 2. **Reply-to-bot**: owner uses Discord's reply feature on a bot
-   message, no @mention. Expect a reply (the `reply_to_bot` trigger).
-3. **DM policy**: owner DMs the bot: expect a reply. A non-owner DMs
-   it (second account, if available): expect total silence, and the
-   monitor log shows nothing about it (owner_only means unread).
+   message, no @mention. Expect a reply (a reply to the bot counts
+   as addressing it). Then, within 2 minutes, the owner writes once
+   more in that channel with no @mention and no reply: expect an
+   answer too (the conversational follow-up). The same message from
+   anyone else gets none.
+3. **DMs**: owner DMs the bot: expect a reply. A non-owner DMs it
+   (second account, if available): expect total silence (the default
+   `dms.who.dms_from: owners`).
 4. **Talk scope**: in a channel where the bot can read but NOT send,
    mention it. Expect: no reply, one log line `Skipping replies in
 ...: the bot cannot send messages there.`, and a `skipped` entry
@@ -287,13 +297,14 @@ see working before calling the install done.
    a welcome in the resolved channel, drafted from the prompt param.
 9. **Generation** (if enabled): owner asks the bot for an image.
    Expect a reply with the image attached, and the file visible in
-   `generated/<message id>/`. A non-allowed user asking gets a brief
-   decline.
+   `generated/<message id>/`. A user not in `plugins.media.who`
+   asking gets a brief decline.
 10. **New server** (if a second server is available): invite the
     bot there. Expect a DM to the owner within a minute naming the
-    server, its ID, the visible channels, and observe mode. An
-    @mention there gets a reply, and a member joining there gets no
-    welcome until the server is activated.
+    server, its ID, and the visible channels. The new server follows
+    `all_servers`: an @mention there gets a reply, and a member
+    joining there gets no welcome until that server turns welcomes
+    on.
 11. **Another bot** (if one is in the server): have it @mention this
     bot or reply to one of its messages. Expect a reply that reaches
     the other bot as a real mention or reply, and expect the exchange
@@ -308,7 +319,7 @@ ships, the bot DMs each owner what is new, with **Update now** and
 `<package dir>`; this hook turns that into a wake of the owner's Muse
 in its main chat, which then updates the install to that release by
 following UPDATING.md. Without the hook, the button does nothing. The
-DMs follow `updates.check` in config.yaml.
+DMs follow `updates.notify` in config.yaml.
 
 - **Muse hook runtime**: register `hooks/update-watch.sh` as a
   polling hook (every ~60 seconds is plenty) delivered to the
@@ -341,10 +352,57 @@ when a newer release exists, each owner gets one DM about it. Pressing
 (tracking main) is offered the newest release, unless it already
 contains it.
 
+## Changing settings later
+
+The owner may ask to change how the bot behaves at any time ("be
+brief in the work server", "stay quiet in #announcements", "let my
+friend's DMs through"). Edit `config.yaml`; the bot re-reads it on
+save, no restart needed.
+
+- Settings live in a few places, and the most specific one wins:
+  `everywhere`, then `dms` for direct messages, or `all_servers`,
+  then one server under `servers`, then a category, then one
+  channel. A thread follows its parent channel. Lists replace the
+  list above them; only `notes` add up (the server's, then the
+  channel's).
+- A channel or category takes only `replies`, `notes`, and
+  `plugins.<name>.enabled`. Everything else is set per server at
+  most.
+- `replies` is `conversational` (the default: answers when
+  addressed, and keeps talking with the person it just answered
+  when they write again within about 2 minutes), `when-addressed`
+  (only @mentions and replies to the bot), or `off`.
+- Servers and channels are keyed by their id, in quotes. A `name:`
+  next to one is only a label for people.
+- After every edit, run `python3 bin/settings.py validate`. A config
+  that fails it keeps the bot from starting.
+
+When the owner asks "what is my bot doing in X?", show them instead
+of reading the file:
+
+```bash
+python3 bin/settings.py show --explain                  # everywhere
+python3 bin/settings.py show --dms --explain
+python3 bin/settings.py show --server <id> --explain
+python3 bin/settings.py show --server <id> --channel <id> --explain
+```
+
+`--explain` prints each setting's effective value and where it came
+from (built-in, a line in config.yaml, or a broader scope).
+Settings changed through the bot rather than the file are kept in
+`config.discord.yaml` next to it; `show --explain` names them too,
+and `python3 bin/settings.py fold` copies them into config.yaml (see
+PROTOCOL.md, "Settings").
+
+The few engine timings (polling, sweep, backoff) are not owner
+settings; PROTOCOL.md lists them under "Engine settings" for the
+rare install that needs them.
+
 ## Troubleshooting
 
-- **No welcomes in a server**: the server is in observe mode. Add
-  its ID to `behavior.active_guild_ids`.
+- **No welcomes in a server**: welcomes are off there. Set
+  `plugins.welcome.enabled: on` under that server in `servers`
+  (step 5), and check `show --server <id> --explain`.
 
 - **`GATEWAY DISABLED (code 4014)` in monitor.log** (the watchdog
   alerts "monitor degraded"): Message Content intent is off.
