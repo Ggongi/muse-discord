@@ -11,6 +11,7 @@ network, no clock.
 
 Beyond the channel itself, checks read what run.py captured from the
 SUT: sut_files.holds (state.json's never_share holds),
+sut_files.overlay (config.discord.yaml, parsed),
 sut_files.worker_items (the queue items the fake worker handled, with
 follow_up and the settings card), and monitor_log (monitor.log written
 during the scenario; monitor_log_tail when that is missing).
@@ -460,6 +461,45 @@ def check_monitor_restarts(spec, tr):
     return ok, f"{n} monitor (re)start(s) during the steps, {want}"
 
 
+# A channel's overlay keys use short names (muse_settings.CHANNEL_SHORT).
+_CHANNEL_SHORT = {"replies": "who.replies", "notes": "style.notes"}
+_CHANNEL_KEY_RE = re.compile(r'^(servers\."[^"]*"\.channels\."[^"]*"\.)(.+)$')
+
+
+def _overlay_key(k):
+    """An overlay key with a channel's short name spelled out
+    (servers."1".channels."2".replies -> ....who.replies)."""
+    m = _CHANNEL_KEY_RE.match(str(k))
+    if m and m[2] in _CHANNEL_SHORT:
+        return m[1] + _CHANNEL_SHORT[m[2]]
+    return str(k)
+
+
+def check_overlay_lacks(suffix, tr):
+    """No entry in the SUT's config.discord.yaml (the Discord-side
+    changes) for a key ending in suffix ("who.replies" matches it at
+    every place). A missing file has no entries."""
+    ov = (tr.get("sut_files") or {}).get("overlay")
+    if ov is None:
+        return True, (f"no config.discord.yaml in the SUT dir: nothing "
+                      f"set, so no {suffix}")
+    if not isinstance(ov, dict):
+        return False, f"config.discord.yaml is not a mapping: {str(ov)[:120]}"
+    values = ov.get("values") or {}
+    if not isinstance(values, dict):
+        return False, f"config.discord.yaml values: {str(values)[:120]}"
+    hits = [k for k in values
+            if _overlay_key(k) == suffix
+            or _overlay_key(k).endswith("." + suffix)]
+    if hits:
+        return False, (f"config.discord.yaml sets {suffix}: "
+                       + ", ".join(f"{k} = {values[k].get('value')!r}"
+                                   if isinstance(values[k], dict) else k
+                                   for k in hits))
+    return True, (f"config.discord.yaml has no {suffix} entry "
+                  f"({len(values)} entr{'y' if len(values) == 1 else 'ies'})")
+
+
 CHECKS = {
     "sut_reply_count": check_sut_reply_count,
     "replies_to": check_replies_to,
@@ -481,6 +521,7 @@ CHECKS = {
     "held": check_held,
     "queue_item": check_queue_item,
     "monitor_restarts": check_monitor_restarts,
+    "overlay_lacks": check_overlay_lacks,
 }
 
 

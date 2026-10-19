@@ -88,8 +88,8 @@ COPY_IGNORE = shutil.ignore_patterns(
     "reply_outbox*.json", "reply.lock", ".*.tmp", "quarantine.json",
     "mention_ledger.json", "monitor.pid", "monitor.heartbeat",
     "watchdog_state.json", "watchdog.lock", "update_check.json",
-    "update_request.json", "*.log", "*.log.1", "media", "generated",
-    "out")
+    "update_request.json", "directory.json", "owner_dm_nonces.json",
+    "nl_journal.json", "*.log", "*.log.1", "media", "generated", "out")
 READY_IDENTITY = "Bot user id: "
 READY_DISCOVERY = "muse-discord monitor starting."
 READY_GATEWAY_ON = "Gateway READY: realtime ingest live."
@@ -419,6 +419,15 @@ class SUT:
             with open(os.path.join(self.pkg_dir, name)) as f:
                 return json.load(f)
         except (OSError, ValueError):
+            return None
+
+    def read_yaml(self, name):
+        """Parsed <pkg>/<name> (YAML), or None when missing or
+        unreadable."""
+        try:
+            with open(os.path.join(self.pkg_dir, name)) as f:
+                return yaml.safe_load(f)
+        except (OSError, yaml.YAMLError):
             return None
 
     def log_tail(self, n=200):

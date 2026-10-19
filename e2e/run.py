@@ -317,6 +317,11 @@ def build_transcript(sc, channel_id, started_at, ids, labels,
             "holds": _state_holds(the_sut) if the_sut else None,
             "worker_items": the_sut.read_json(WORKER_ITEMS)
             if the_sut else None,
+            # config.discord.yaml (what Discord-side changes wrote),
+            # parsed; None when nothing was written.
+            "overlay": the_sut.read_yaml(sut.OVERLAY_NAME)
+            if the_sut is not None and hasattr(the_sut, "read_yaml")
+            else None,
         },
         "monitor_log_tail": the_sut.log_tail(LOG_TAIL_LINES)
         if the_sut else "",

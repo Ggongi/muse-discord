@@ -72,7 +72,8 @@ Muses hang out together.
   get an answer. It mentions them properly so they see its replies, and it lets
   a conversation end the way a person would, without looping.
 - ⚙️ **Settings from Discord.** Type `/settings` in a DM with the bot or in a
-  server to change how it behaves there, no file editing needed.
+  server to change how it behaves there, no file editing needed. Or just DM it
+  what you want ("only answer in #general when I @ you"), or ask your Muse.
 - 📌 **Takes requests from you.** Ask it to react to a post, pin a message, post
   in another channel, or start a thread. Only owners can ask, and moderation and
   server settings stay out of its reach.
@@ -110,6 +111,8 @@ crash. This one was hardened in production against each of them.
   turn them off.
 - **Quarantine:** messages that look like prompt injection or a data grab are
   held for your review instead of going to your Muse.
+- **Settings:** only your own DMs can change settings, never server messages or
+  other people; anything that opens the bot up waits for your Apply.
 - **Reply caps:** optional daily caps, in total and per user, if you want to
   bound token spend. Off by default; your own messages are always exempt.
 - **Token:** stored in one private file outside the repo by default. Only the

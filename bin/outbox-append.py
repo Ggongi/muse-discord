@@ -16,8 +16,11 @@ appending through this tool cannot.
 
 Nothing is appended if any item has an obvious mistake (the monitor
 would set it aside unsent); the errors are printed so the worker can fix
-them and run it again. The monitor re-validates every item on its side.
-Never needs the bot token and never touches the network.
+them and run it again. An item with a `settings` action (a settings
+request from an owner's DM; PROTOCOL.md) gets the monitor's own shape
+checks (settings_nl.shape_problems). The monitor re-validates every
+item on its side. Never needs the bot token and never touches the
+network.
 """
 import fcntl
 import json
@@ -33,6 +36,21 @@ LOCK = os.path.join(PACKAGE_DIR, "reply.lock")
 def _is_id(value):
     return (isinstance(value, str) and value.isdigit()) \
         or (isinstance(value, int) and not isinstance(value, bool))
+
+
+def settings_problems(item):
+    """The monitor's shape rules for a settings action (and for fields
+    starting with _nl, which are the monitor's own)."""
+    try:
+        if PACKAGE_DIR not in sys.path:
+            sys.path.insert(0, PACKAGE_DIR)
+        import settings_nl
+    except Exception as e:  # the monitor checks it anyway
+        print(f"note: could not load settings_nl.py to check the settings "
+              f"action ({e}); the monitor will check it", file=sys.stderr)
+        return []
+    return settings_nl.shape_problems(item, os.path.join(PACKAGE_DIR,
+                                                         "plugins"))
 
 
 def problems(item):
@@ -57,6 +75,8 @@ def problems(item):
             out.append(f"{field} is not a list of strings")
     if out:
         return out
+    if "settings" in item or any(str(k).startswith("_nl") for k in item):
+        return settings_problems(item)
     if item.get("silent"):
         if not (item.get("reply_to") or item.get("item")):
             out.append("a silent item needs reply_to or item")

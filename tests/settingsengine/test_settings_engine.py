@@ -1029,11 +1029,11 @@ class CLI(unittest.TestCase):
         self.assertEqual(rc, 3, out)   # undoing to Chatty in a big server
         self.assertIn("Warning: Chatty in Lounge", out)
         rc, out = self.run_cli("undo", "--place", f"server:{G1}", "--yes",
-                               "--by", OWNER)
+                               "--by", "zach")
         self.assertEqual(rc, 0, out)
         self.assertIn("Undo: In Lounge, When it answers → back to Chatty",
                       out)
-        self.assertEqual(doc(self.cfg)["history"][-1]["by"], OWNER)
+        self.assertEqual(doc(self.cfg)["history"][-1]["by"], "zach")
         rc, out = self.run_cli("undo", "--place", f"server:{G1}")
         self.assertIn("Nothing to undo in Lounge", out)
 
@@ -1486,9 +1486,15 @@ class ReviewLow(unittest.TestCase):
             rc, out = cli("set", "who.replies", "off", "--place",
                           f"channel:{G1}:{CH}", "--category", bad)
             self.assertEqual(rc, 1, out)
+        # --by is a name: a user id (an owner's or anyone's) is refused,
+        # so a CLI change can never pass for a Discord-side one.
+        for by in (ADMIN, OWNER, " "):
+            rc, out = cli("set", "style.length", "brief", "--place",
+                          f"server:{G1}", "--by", by)
+            self.assertEqual(rc, 2, out)
         rc, out = cli("set", "style.length", "brief", "--place",
-                      f"server:{G1}", "--by", ADMIN)
-        rc, out = cli("undo", "--place", f"server:{G1}", "--by", ADMIN)
+                      f"server:{G1}", "--by", "helper")
+        rc, out = cli("undo", "--place", f"server:{G1}", "--by", "helper")
         self.assertEqual(rc, 0, out)
         for h in doc(cfg)["history"]:
             self.assertNotIn("role", h)
@@ -1501,6 +1507,34 @@ class ReviewLow(unittest.TestCase):
                       undo_id="nl-undo-555")
         self.assertEqual(doc(cfg)["history"][-1]["group"], "nl-undo-555")
         self.assertTrue(doc(cfg)["history"][-1]["undo"])
+
+    def test_group_undo_plan(self):
+        cfg = config(self)
+        apply(cfg, [C(GEN, "who.replies", "off"),
+                    C(S1, "style.length", "brief")], group="nl-600")
+        plan = MS.group_undo_plan(load(cfg), "nl-600")
+        self.assertEqual([(c.place, c.key, c.value) for c in plan],
+                         [(S1, "style.length", "inherit"),
+                          (P.channel(G1, CH), "who.replies", "inherit")])
+        self.assertEqual(plan[1].path, ("servers", G1, "channels", CH))
+        # Judged by outcome: back to Chatty in Lounge (1,240 members).
+        risk = MS.assess(load(cfg), plan, INFO)
+        self.assertTrue(any("Chatty in #general" in w
+                            for w in risk.warnings), risk.warnings)
+        self.assertEqual(MS.group_undo_plan(load(cfg), "nl-nope"), [])
+        MS.undo_group(cfg, "nl-600", OWNER, PLUGINS, role="owner")
+        self.assertEqual(value(cfg, GEN, "who.replies"), "conversational")
+
+    def test_undo_changes_names_its_undo(self):
+        cfg = config(self)
+        apply(cfg, [C(S1, "who.replies", "off")])
+        MS.undo_changes(cfg, S1, OWNER, PLUGINS, role="owner",
+                        undo_id="nl-700")
+        last = doc(cfg)["history"][-1]
+        self.assertEqual((last["group"], last["undo"]), ("nl-700", True))
+        with self.assertRaises(MS.SettingsError):
+            MS.undo_changes(cfg, S1, OWNER, PLUGINS, role="owner",
+                            undo_id="not a group id!")
 
     def test_no_change_is_a_sentinel(self):
         self.assertNotEqual(MS.NO_CHANGE, "no change")

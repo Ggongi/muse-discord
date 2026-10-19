@@ -133,6 +133,26 @@ except MS.SettingsError as e:
           file=sys.stderr, flush=True)
     sys.exit(1)
 _S0 = _SETTINGS.current
+
+
+def _import_nl():
+    """settings_nl.py (plain-language settings) from this package."""
+    here = os.path.join(BASE_DIR, "settings_nl.py")
+    cached = sys.modules.get("settings_nl")
+    if cached is not None and os.path.abspath(
+            getattr(cached, "__file__", "") or "") == here:
+        return cached
+    if os.path.isfile(here):
+        spec = importlib.util.spec_from_file_location("settings_nl", here)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["settings_nl"] = mod
+        spec.loader.exec_module(mod)
+        return mod
+    import settings_nl
+    return settings_nl
+
+
+NL = _import_nl()
 # The raw file (test-only keys such as testing: live here).
 CFG = _S0.raw
 if _S0.notice:
@@ -1877,7 +1897,13 @@ def announce_update(state):
 def apply_record(state, rec):
     """Main-loop side of an interaction: persist what the interaction
     thread decided (it never writes state.json itself)."""
-    if rec.get("kind") == "update_choice":
+    if rec.get("kind") == "nl":   # plain-language settings buttons
+        NL.apply_record(state, rec)
+        if rec.get("journal"):
+            # Recorded for good: the crash journal entry can go.
+            save_state(state)
+            nl_journal(drop=rec["journal"])
+    elif rec.get("kind") == "update_choice":
         upd = state.setdefault("update_notice", {})
         if rec.get("version") == upd.get("version"):
             upd["choice"] = {k: rec.get(k) for k in ("action", "by", "at")}
@@ -2172,6 +2198,10 @@ _MEMBER_COUNTS = {}   # guild id -> member count (approximate)
 _GUILD_CHANNELS = {}  # guild id -> [{"id","name","type","parent_id",..}]
 _DIRECTORY = {"guilds": [], "channels": {}}
 _DIRECTORY_LOCK = threading.Lock()
+# The same snapshot on disk, for bin/settings.py (places, names in its
+# sentences): written atomically, only when it changed.
+DIRECTORY_FILE = os.path.join(BASE_DIR, "directory.json")
+_DIRECTORY_WRITTEN = {"body": None}
 
 
 def publish_directory():
@@ -2187,6 +2217,13 @@ def publish_directory():
     global _DIRECTORY
     with _DIRECTORY_LOCK:
         _DIRECTORY = {"guilds": guilds, "channels": channels}
+    body = {"guilds": guilds, "channels": channels}
+    if body != _DIRECTORY_WRITTEN["body"]:
+        try:
+            atomic_write(DIRECTORY_FILE, dict(body, updated=int(time.time())))
+            _DIRECTORY_WRITTEN["body"] = body
+        except OSError as e:
+            print(f"Could not write directory.json: {e}", flush=True)
 
 
 # Pending admin-change digests: guild id -> {"first": t, "changes": []}.
@@ -2420,6 +2457,313 @@ register_interaction(SETTINGS_PREFIX, on_settings_interaction,
                      owner_only=False)
 register_interaction("/" + SETTINGS_COMMAND["name"], on_settings_interaction,
                      owner_only=False)
+
+
+# ---------------------------------------------------------------------------
+# Settings requests: an owner DMs "only answer in #general when I @ you".
+# The worker attaches a `settings` action to its outbox item for that DM;
+# settings_nl.py decides it (who may, what it means, Apply first or not)
+# and writes the reply. This side gives it a ctx, sends its outcome
+# (with the usual nonce and retries), routes its mdnl:* buttons, and
+# tells the owners about changes their Muse made with bin/settings.py.
+# ---------------------------------------------------------------------------
+_nl_live = NL.Live()
+_NL_PEOPLE = {}        # user id -> name, from the conversation history
+# Capability nonces of open owner-DM items (state["nl_nonces"]), for the
+# wake hook only: mode 600, never read by a worker (like the token).
+OWNER_DM_NONCES_FILE = os.path.join(BASE_DIR, "owner_dm_nonces.json")
+_NL_NONCES_WRITTEN = {"body": None}
+# Apply clicks written down before their overlay write (interaction
+# thread), recovered at startup (settings_nl.recover).
+NL_JOURNAL_FILE = os.path.join(BASE_DIR, "nl_journal.json")
+_NL_JOURNAL_LOCK = threading.Lock()
+_NL_UPKEEP = {"settings": None}
+
+
+def _write_private(path, obj):
+    """Atomic JSON write, mode 600 whatever the file had."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                               prefix="." + os.path.basename(path) + ".",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            os.fchmod(f.fileno(), 0o600)
+            json.dump(obj, f)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def nl_journal(put=None, drop=None):
+    """nl_journal.json: read it, or add (put=(token, entry)) or remove
+    (drop=token) one entry. Any thread."""
+    with _NL_JOURNAL_LOCK:
+        try:
+            with open(NL_JOURNAL_FILE) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        data = data if isinstance(data, dict) else {}
+        if put is not None:
+            data[put[0]] = put[1]
+        elif drop is not None and drop in data:
+            del data[drop]
+        else:
+            return data
+        _write_private(NL_JOURNAL_FILE, data)
+        return data
+
+
+def nl_mint_nonce(state, mid):
+    """A capability for one owner-DM queue item (see settings_nl): 128
+    random bits, kept in state and the hook's private file, never in
+    reply_queue.json."""
+    n = state.setdefault("nl_nonces", {})
+    n[str(mid)] = {"nonce": secrets.token_hex(16), "at": time.time()}
+    for old in list(n)[:-300]:
+        del n[old]
+    nl_write_nonces(state)
+
+
+def nl_write_nonces(state):
+    """owner_dm_nonces.json = the nonces of open owner-DM items (written
+    only when that changed; expired ones dropped)."""
+    n = state.get("nl_nonces") or {}
+    now = time.time()
+    for k in [k for k, v in n.items()
+              if not isinstance(v, dict) or now - v.get("at", 0)
+              > NL.MAX_AGE]:
+        del n[k]
+    body = {k: v["nonce"] for k, v in n.items()}
+    if body == _NL_NONCES_WRITTEN["body"]:
+        return
+    try:
+        _write_private(OWNER_DM_NONCES_FILE, body)
+        _NL_NONCES_WRITTEN["body"] = body
+    except OSError as e:
+        print(f"Could not write owner_dm_nonces.json: {e}", flush=True)
+
+
+def is_forwarded(msg):
+    """A forwarded message (Discord's message_reference type 1, with the
+    forwarded content in message_snapshots)."""
+    ref = msg.get("message_reference") or {}
+    return ref.get("type") == 1 or bool(msg.get("message_snapshots"))
+
+
+class _NlCtx(SettingsCtx):
+    """What settings_nl gets (see its docstring); usable from the main
+    loop (with state) and the interaction thread (without)."""
+
+    def __init__(self, state=None):
+        super().__init__()
+        self.state = state
+        self.live = _nl_live
+
+    def info(self):
+        with _DIRECTORY_LOCK:
+            return {"guilds": [dict(g) for g in _DIRECTORY["guilds"]],
+                    "channels": {g: [dict(c) for c in cs] for g, cs in
+                                 _DIRECTORY["channels"].items()}}
+
+    def thread_parent(self, cid):
+        info = CHANNELS.get(str(cid)) or {}
+        return info.get("parent_id") if info.get("thread") else None
+
+    def dm_channel_user(self, cid):
+        cid = str(cid)
+        return DM_CHANNEL_USER.get(cid) if cid in DM_CHANNELS else None
+
+    def person_names(self):
+        return dict(_NL_PEOPLE)
+
+    def channel_label(self, cid):
+        """A place name the monitor knows (never an outbox field)."""
+        cid = str(cid)
+        if cid in DM_CHANNELS:
+            return "a DM with me"
+        info = CHANNELS.get(cid)
+        if info:
+            name = str(info.get("name") or cid).lstrip("#")
+            g = info.get("guild_id")
+            gname = (GUILDS.get(g) or {}).get("name") \
+                or info.get("guild_name") or g
+            return f"#{name} in {gname}" if gname else f"#{name}"
+        return f"channel {cid}"
+
+    @contextlib.contextmanager
+    def write_lock(self):
+        """The overlay write lock (this process, then the file), held
+        across a decision and its write. Re-entrant."""
+        with _OVERLAY_LOCK:
+            with MS.overlay_lock(MS.overlay_path_for(_SETTINGS.config_path)):
+                yield
+
+    def journal_all(self):
+        return nl_journal()
+
+    def journal_put(self, tok, entry):
+        nl_journal(put=(tok, entry))
+
+    def journal_drop(self, tok):
+        nl_journal(drop=tok)
+
+    def undo_changes(self, place, by, children, expect, undo_id):
+        with _OVERLAY_LOCK:
+            out = MS.undo_changes(_SETTINGS.config_path, place, by,
+                                  PLUGINS_DIR, children=children,
+                                  role="owner", expect=expect,
+                                  undo_id=undo_id)
+        settings()
+        return out
+
+    def save(self, state):
+        save_state(state)
+
+    def log(self, msg):
+        print(msg, flush=True)
+
+
+def _nl_note_people(state):
+    for hist in (state.get("history") or {}).values():
+        for h in hist or []:
+            if h.get("author_id") and h.get("author"):
+                _NL_PEOPLE[str(h["author_id"])] = str(h["author"])
+
+
+def nl_outbox_item(state, item):
+    """Decide and answer one settings request from the outbox. Returns
+    "settled", "retry" (a failed send waits for its next try) or
+    ("rejected", reason): refused without settling its queue item (a
+    forged or misdirected action), set aside for review."""
+    retry = item.get("_retry") or {}
+    if retry.get("next", 0) > time.time():
+        return "retry"
+    _nl_note_people(state)
+    try:
+        res = NL.process(_NlCtx(state), state, item)
+    except Exception as e:
+        # Never wedge the outbox on one item.
+        print(f"Settings request for item {item.get('item')} failed: "
+              f"{type(e).__name__}: {e}", flush=True)
+        return ("rejected", f"settings: internal error "
+                            f"({type(e).__name__})")
+    finally:
+        nl_write_nonces(state)
+    for line in res.logs:
+        print(line, flush=True)
+    if res.rec is None:
+        return ("rejected", res.reject)
+    if res.alert:
+        ok = notify_owners(res.alert)
+        print("Settings refusal alert: "
+              + ("owners alerted" if ok else "no owner reachable"),
+              flush=True)
+    rec = res.rec
+    if rec.get("sent"):
+        print(f"Skipping duplicate settings action for item "
+              f"{item.get('item')}", flush=True)
+        _settle(state, item, "replied", "duplicate suppressed")
+        return "settled"
+    if not rec.get("text"):
+        _settle(state, item, rec["status"], rec["reason"], replied=True)
+        rec["sent"] = True
+        return "settled"
+    cid, rt = rec["channel_id"], rec.get("reply_to")
+    try:
+        msg = send_reply(cid, rec["text"], rt,
+                         nonce=send_nonce(cid, rt, [rec["text"]], 0),
+                         components=rec.get("components"))
+    except Exception as e:
+        now = time.time()
+        first = retry.get("first", now)
+        if getattr(e, "code", None) == 403 or now - first >= SEND_RETRY_SECS:
+            print(f"Giving up on the settings reply for item "
+                  f"{item.get('item')}: {e}", flush=True)
+            _settle(state, item, "skipped", f"send failed: {e}"[:200])
+            return "settled"
+        n = retry.get("n", 0) + 1
+        item["_retry"] = {"first": first, "n": n,
+                          "next": now + min(30, 2 ** n)}
+        print(f"Failed to send the settings reply (attempt {n}; retrying, "
+              f"same nonce): {e}", flush=True)
+        return "retry"
+    NL.sent(state, item["item"], (msg or {}).get("id"))
+    _settle(state, item, rec["status"], rec["reason"], replied=True)
+    return "settled"
+
+
+def on_nl_button(ix, rest, uid, record):
+    return NL.on_button(_NlCtx(), ix, rest, uid, record)
+
+
+register_interaction("mdnl", on_nl_button, owner_only=True)
+
+
+def nl_note_changes(state):
+    """Main loop: change groups made with bin/settings.py since the
+    position saved in state.json wait for the owners' notice (so ones
+    made while the monitor was down are noticed too)."""
+    cur = settings()
+    if _NL_UPKEEP["settings"] is cur and "nl_history_mark" in state:
+        return
+    _NL_UPKEEP["settings"] = cur
+    ctx = _NlCtx(state)
+    names = NL.names_for(ctx, MS._Info(ctx.info()), cur)
+    NL.queue_notices(state, NL.new_cli_groups(cur, state, names),
+                     time.time())
+
+
+def nl_recover(state):
+    """Startup: settle Apply clicks a stop interrupted (settings_nl)."""
+    n = NL.recover(_NlCtx(state), state)
+    if n:
+        print(f"Settings requests: recovered {n} interrupted Apply "
+              f"click(s).", flush=True)
+
+
+def nl_upkeep(state):
+    """Main loop, every tick: expire Apply cards (edited to say so, best
+    effort), prune, and send the batched notice of changes the owners'
+    Muse made (silent DMs, with Undo)."""
+    ctx = _NlCtx(state)
+    nl_note_changes(state)
+    nl_write_nonces(state)
+    edits, logs = NL.expire(ctx, state)
+    for line in logs:
+        print(line, flush=True)
+    for cid, mid, text in edits:
+        try:
+            api_patch(f"/channels/{cid}/messages/{mid}",
+                      {"content": text, "components": []})
+        except Exception as e:
+            print(f"Could not edit an expired settings card: {e}",
+                  flush=True)
+    if rest_backing_off():
+        return
+    due = NL.due_notice(ctx, state)
+    if due is None:
+        return
+    text, components, groups = due
+    payload = {"content": text, "allowed_mentions": {"parse": []},
+               "flags": NL.SUPPRESS_NOTIFICATIONS}
+    if components:
+        payload["components"] = components
+    delivered = not OWNER_USER_IDS
+    for uid in sorted(OWNER_USER_IDS):
+        if dm_owner(uid, payload):
+            delivered = True
+    dropped = NL.notice_done(state, delivered)
+    for g in groups:
+        print(f"Settings (CLI, by {g['by']}): applied "
+              f"{g.get('group') or 'a change'}: " + "; ".join(g["lines"])
+              + ("; owners notified" if delivered else
+                 "; no owner reachable" + ("" if dropped else
+                                           " (retrying)")), flush=True)
 
 
 # Registering the command: a global application command, checked once per
@@ -2905,8 +3249,11 @@ def reply_reference(message_id):
     return {"message_id": message_id, "fail_if_not_exists": False}
 
 
-def send_reply(channel_id, text, reply_to=None, nonce=None):
+def send_reply(channel_id, text, reply_to=None, nonce=None,
+               components=None):
     data = {"content": text, "allowed_mentions": SEND_ALLOWED_MENTIONS}
+    if components:
+        data["components"] = components
     if reply_to:
         data["message_reference"] = reply_reference(reply_to)
     if nonce:
@@ -4154,6 +4501,11 @@ def settings_card(scope, here, author_id, from_bot, channel_id,
         else here["privacy.memory"]
     card["length"] = here["style.length"]
     card["notes"] = here["style.notes"]
+    if dm and owner and not from_bot:
+        # Settings requests (SETTINGS REQUESTS in the worker prompt):
+        # the places the owner can name, with their ids.
+        with _DIRECTORY_LOCK:
+            card["places"] = NL.card_places(_DIRECTORY)
     if from_bot:
         card["bot_exchange"] = {"count": exchange + 1,
                                 "limit": here["who.bot_exchange_limit"]}
@@ -4366,7 +4718,17 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     burst_note = f" (+{len(fragments)} fragment(s))" if fragments else ""
     note_item_meta(state, msg["id"], author_id=author_id,
                    channel_id=msg["channel_id"], bot=from_bot, dm=dm,
-                   kind=item["kind"])
+                   kind=item["kind"],
+                   # Settings requests: never from a forwarded message;
+                   # attachments or a reply to someone else's message
+                   # always need the owner's Apply.
+                   forwarded=any(is_forwarded(m) for m in [msg] + fragments),
+                   has_inputs=bool(media or documents) or bool(
+                       reply_ctx and not reply_ctx.get("is_bot")))
+    if dm and str(author_id) in OWNER_USER_IDS and not from_bot:
+        # The settings-request capability for this owner DM (written
+        # for the wake hook before the item reaches the queue file).
+        nl_mint_nonce(state, msg["id"])
     print(f"Queued {item['kind']}{' (follow-up)' if item['follow_up'] else ''}"
           f" from {msg['author'].get('username')} in "
           f"{cname}{burst_note}: {content[:80]}", flush=True)
@@ -4469,6 +4831,11 @@ def _outbox_problem(item):
     if item.get("_retry") is not None \
             and not isinstance(item["_retry"], dict):
         return "_retry was edited (leave it alone)"
+    if "settings" in item or any(str(k).startswith("_nl") for k in item):
+        # A settings request (settings_nl.py): its own shape rules; the
+        # text is an optional lead-in.
+        problems = NL.shape_problems(item, PLUGINS_DIR)
+        return "settings: " + "; ".join(problems) if problems else None
     if item.get("silent"):
         if not (item.get("reply_to") or item.get("item")):
             return "silent item names no message (reply_to or item)"
@@ -4622,6 +4989,18 @@ def process_outbox(state):
                   f"{reply_to or item.get('item')}", flush=True)
             _settle(state, item, "replied", "duplicate suppressed")
             settled.append(item)
+            continue
+        if "settings" in item:
+            # A settings request: the monitor decides and answers it
+            # (settings_nl.py); the worker's text is a lead-in at most.
+            outcome = nl_outbox_item(state, item)
+            if outcome == "retry":
+                remaining.append(item)
+            elif isinstance(outcome, tuple):
+                rejects.append((item, outcome[1]))  # the item stays open
+            else:
+                typing_clear(typing_keys)
+                settled.append(item)
             continue
         # Clamped to Discord's per-message limit AFTER every rewrite: the
         # @everyone neutralization and link_mentions both lengthen text
@@ -4798,6 +5177,11 @@ def process_outbox(state):
         if not item.get("item") and item.get("reply_to"):
             done_ids.add(item["reply_to"])
             done_frags.add(item["reply_to"])
+
+    nonces = state.get("nl_nonces") or {}
+    for qid in done_ids & set(nonces):
+        del nonces[qid]   # answered: its capability is spent
+    nl_write_nonces(state)
 
     def answered(q):
         return q.get("message_id") in done_ids or any(
@@ -5849,6 +6233,8 @@ def main():
     # gateway inbox ("_record", applied by drain_gateway).
     _holds_live.update({hid: h.get("at", 0) for hid, h in
                         (state.get("holds") or {}).items()})
+    nl_recover(state)
+    _nl_live.load(state)
     _update_announced["version"] = \
         (state.get("update_notice") or {}).get("version")
     threading.Thread(
@@ -5938,6 +6324,11 @@ def main():
             flush_admin_digests()
         except Exception as e:
             print(f"/settings upkeep error: {e}", flush=True)
+
+        try:
+            nl_upkeep(state)  # settings requests: expiry, notices
+        except Exception as e:
+            print(f"Settings request upkeep error: {e}", flush=True)
 
         # One REST slice per tick (see "Sliced REST work"): the poll's,
         # or the background job's, alternating when both are due.
