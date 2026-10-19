@@ -159,7 +159,9 @@ What the settings scenarios cannot cover on Discord:
   on someone else's ephemeral messages, so no driver can open it. The
   offline suites in `tests/` cover it: `tests/settingsplumb`
   (registration, routing, the 3 s deadline, writes and undo) and
-  `tests/settingsui` (every page, for owners, admins and strangers);
+  `tests/settingsui` (every page, for owners, admins and strangers,
+  crawled against Discord's limits and snapshot goldens, forged ids,
+  and the task walkthroughs click by click);
   on Discord it is tested by hand with the checklist below. What it
   does to the bot is covered live: a scenario's `settings` step writes
   `config.discord.yaml` through the same `muse_settings` calls (see
@@ -171,78 +173,112 @@ Run it before a release that touches `/settings`, `settings_ui.py`,
 or the interaction code, with a real install (or `muse-test`), your
 own account as an owner, and a second account that is not an owner.
 Keep `monitor.log` open (`tail -f`) and `config.discord.yaml` at hand.
+Do the client checks (marked *client*) on the desktop app, the web
+app, iOS and Android: these are what the offline suites cannot see.
 
 Registration:
 
 - [ ] Start the monitor: the log says `/settings command created` (or
-      `updated`), or nothing on a restart with the command unchanged.
+      `updated`), or nothing on a restart with the commands unchanged.
       No `registration failed` line.
 - [ ] `/settings` appears in the bot's DM and in a server channel,
       and not in a group DM.
+- [ ] *client* Right-click (long-press) a message, Apps: **Why no
+      reply?** is there, with the "?". If the log says `Discord
+      refused the command name 'Why no reply?'`, it is "Why no reply";
+      note it, and the spec's fallback is working. The second account
+      without Manage Server does not see it in the menu.
 - [ ] Restart again: no `created` / `updated` line (no needless
       write).
 
-Owner, in a DM:
-
-- [ ] `/settings` opens Home, visible only to you: Everywhere, DMs,
-      All servers, then each server by name with its member count.
-      With more than 25 servers the picker pages.
-- [ ] Open a scope; every drawer opens (Who it talks to, How it
-      talks, What it may do, Privacy, Limits, Plugins), each value
-      with its source tag.
-- [ ] Change a choice (e.g. How it talks, length): the page updates
-      in place, `config.discord.yaml` gains the entry with your id as
-      `by`, the log says `Settings reloaded`, and the bot's next reply
-      follows it without a restart.
-- [ ] A number (Limits): the modal accepts a number and `none`,
-      rejects text, and the value shows after submitting.
-- [ ] Edit house rules: the modal is prefilled; inherited notes show
-      as the placeholder.
-- [ ] Reset next to a changed value writes `inherit`; the source tag
-      falls back to the broader scope.
-- [ ] Undo last change reverts the newest change at that scope; a
-      second Undo goes one further back.
-- [ ] Why? lists the chain for each setting on the page.
-- [ ] A risky change (privacy memory loosened in a server, DMs from
-      anyone, media for everyone) shows a confirmation with a red
-      "Yes, change it"; backing out writes nothing.
-- [ ] Not offered: owners, token, persona, never_share (shown as "N
-      phrases set in config.yaml", read-only), plugin installation.
-- [ ] Pause everywhere, then Resume: the bot stops and resumes
-      answering.
-
 Owner, in a server:
 
-- [ ] `/settings` opens that server's page; This channel shows only
-      replies, notes and plugin on/off (and This category when the
-      channel has one).
+- [ ] `/settings` in a channel opens that channel's page, visible only
+      to you; in a thread or forum post, its parent's page with "You
+      ran this in a thread".
+- [ ] *client* Components V2 render: the coloured box, the separator,
+      the buttons beside text, `-#` small text. Open the server's page
+      (35 components) and the admin panel with a banner (37): nothing
+      is cut off or fails to load, on mobile too.
+- [ ] Pick "Only when @mentioned": the page updates in place with
+      **Done:** and **Undo**, `config.discord.yaml` gains the entry
+      with your id as `by`, the log says `Settings reloaded`, and the
+      bot's next reply follows it without a restart. **Undo** puts it
+      back.
+- [ ] The channel picker (type 8) finds any channel by typing.
+- [ ] Apply the Community preset from the server's page: the preview
+      lists the changes, Apply makes them, one **Undo** reverts all.
+- [ ] Caps: **Change** opens the modal with empty boxes (never
+      "none"); "lots" is not saved and **Try again** reopens it with
+      "lots" typed; blank saves "no cap here".
+- [ ] *client* A modal submit updates the page in place (type 7 after
+      a modal), with no "This interaction failed".
+- [ ] *client* Instructions: the modal's **Reply length** string
+      select (a select inside a modal) shows, keeps its choice, and
+      saves.
+- [ ] **Why no reply?** on the channel page lists a message you sent
+      while the bot was set to ignore you, with a fix button; the fix
+      works and the line says to send again.
+- [ ] Pause the server: the page turns grey and names the channels
+      that still answer; Resume.
+
+Owner, in a DM:
+
+- [ ] `/settings` opens DMs. **Go to…** reaches Defaults and every
+      server (paged past 22), and a server's channel picker is a paged
+      list with "Find a channel by name…" past 3 pages.
+- [ ] Who can DM it: **Add by ID** with a friend's id lets them DM the
+      bot (have them try), with no confirmation; Remove takes them
+      off. Pause everywhere asks first; Apply, then **Undo**.
+- [ ] *client* DM user select (flip `DM_USER_SELECT_SEARCHES` in
+      `settings_ui.py` to try it): in a bot DM, does a user select
+      find a friend or a mutual-server member by name? Do its
+      `default_values` show people who are not in the DM? Are
+      mentions of unknown users shown as "@unknown-user"? If search
+      works everywhere, leave the constant on.
+- [ ] Not offered: owners, token, persona, never_share (shown as "N
+      set in config.yaml", read-only), categories, plugin
+      installation.
 
 Server admin (the second account, with Manage Server in one server,
 not an owner):
 
-- [ ] `/settings` there shows only the quieter controls (replies off
-      or when-addressed, plugins off, add to ignore); no privacy or
-      limits; no other server.
+- [ ] `/settings` there shows only **Quiet the bot**: quieter buttons
+      for here and the whole server, Add to Never answer, Turn off
+      for extras that are on, and the admins' changes with Undo. No
+      privacy, caps, presets, Defaults, DMs or other servers.
+- [ ] Off in all of the server, then the banner's **Undo**: back to
+      what you (the owner) set.
 - [ ] Make a change: about a minute later the owner gets one DM
       summing up the admin's changes in that server (several changes
       in that minute arrive together).
+- [ ] **Why no reply?** on a message works for the admin; on a
+      message in another server it is refused.
 
 Anyone else (the second account, no Manage Server):
 
 - [ ] `/settings` answers "Only the bot's owners can change its
-      settings." and nothing is written.
+      settings. Server admins (Manage Server) can make it quieter
+      here." and nothing is written; **Why no reply?** is refused.
 
 Owner DMs:
 
 - [ ] Invite the bot to a new server: the join DM has a **Configure**
-      button that opens that server's page.
+      button that opens that server's page. An old join DM's
+      **Configure** still works.
 - [ ] Change a setting with `/settings`, then edit the same setting
       in `config.yaml`: the owner gets one DM saying the file wins.
 
 Robustness:
 
+- [ ] *client* An old classic `/settings` page (from before the
+      update, still open in a channel): clicking it answers "This
+      settings page is out of date" in a new message, and the old
+      message stays as it was.
 - [ ] Click through pages while the bot is busy replying: every
       click answers at once ("This interaction failed" never shows).
+- [ ] Restart the monitor between a confirm card and **Apply**: Apply
+      says the confirmation expired and nothing changes.
 - [ ] Move `settings_ui.py` away and restart: `/settings` answers
       "Settings UI unavailable." and the log says why, once.
 

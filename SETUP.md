@@ -382,28 +382,50 @@ friend's DMs through"). There are three ways:
   offer (owners, persona, never_share, plugins).
 
 The owner can also change most settings from Discord, without the
-Muse: type `/settings` in a DM with the bot, or in any server it is
-in. Only the owner sees the pages it opens.
+Muse: type `/settings` in any channel the bot is in, or in a DM with
+the bot. Only the person who typed it sees the pages it opens.
 
-- In a DM it opens **Home**: pick Everywhere, DMs, All servers, or
-  one server, or pause the bot everywhere. In a server it opens that
-  server's page, with **This channel** for the channel it was typed
-  in.
-- Each page shows every value and where it comes from, a **Reset**
-  next to anything set at that level, **Why?** for the full chain,
-  and **Undo last change**. Changes that loosen privacy or open the
-  bot to more people ask for a confirmation first.
+- In a channel it opens that channel's page (in a thread, its parent
+  channel's): When it answers there, instructions added for it, and
+  image and video on or off. Buttons go to the server's page,
+  **Defaults** (what every server and DM follows unless it sets its
+  own), **DMs** and **Other servers**; a channel picker goes to any
+  other channel. In a DM with the bot it opens **DMs**.
+- A server's page has the basics (When it answers, What it may say
+  about you, Instructions and reply length, Replies per person per
+  day, Welcome and Image and video on or off), a preset picker
+  (Friends, Community, Work: it shows what would change before
+  anything is applied), **More settings** (Only answer these people,
+  Never answer, Other bots, caps, Possible prompt injection) and
+  **Extras settings** (where welcomes go, welcome notes, who may ask
+  for images and video).
+- Every choice starts with "Same as <place>: <value>": pick it to go
+  back to following the server or Defaults. A value set on that page
+  says who changed it and when, and says when it overrides
+  config.yaml.
+- Each change shows a **Done** line with **Undo**; the bottom of a
+  page shows the last change made there, with Undo (on a server's
+  page this includes its channels). Changes with risky results (DMs
+  opened to more people, memory shared in a big server, Pause
+  everywhere) show what they mean and wait for **Apply**.
+- **Why no reply?** lists the last messages that addressed the bot
+  there and got no answer, why, and a fix button where one helps.
+  Right-click a message, Apps, **Why no reply?** does the same for one
+  message. That menu entry shows only for people with Manage Server
+  (server admins, and the owner in their own servers); elsewhere, use
+  the **Why no reply?** button on the `/settings` pages.
 - When the bot joins a new server, the owner's DM about it has a
   **Configure** button that opens that server's page.
-- Server admins (Manage Server) can use `/settings` in their own
-  server to make the bot quieter there: replies off or only when
-  addressed, plugins off, people to ignore. They cannot loosen
-  anything or see privacy and limits. The owner gets one DM per
-  minute summing up what admins changed. Anyone else is told only
-  the owners can change settings.
+- Server admins (Manage Server) who type `/settings` in their own
+  server get **Quiet the bot**: answer only @mentions or nothing, in
+  that channel or the whole server; add people to Never answer; turn
+  extras off; and undo what admins changed (back to the owner's
+  setting, never louder). The owner gets one DM per minute summing up
+  what admins changed. Anyone else is told only the owners can change
+  settings.
 - Not editable from Discord: `owners`, `token_from`, `persona`, the
-  `never_share` phrases, and installing plugins. Those stay in
-  config.yaml.
+  `never_share` phrases, categories, and installing plugins. Those
+  stay in config.yaml.
 - Discord changes go to `config.discord.yaml`, never into
   config.yaml. If the owner later edits the same setting in
   config.yaml, the file wins and the owner gets a DM saying so.
@@ -462,6 +484,9 @@ rare install that needs them.
   check Server Settings, Integrations, the bot: a server admin may
   have hidden the command there. If the bot answers "Settings UI
   unavailable", `settings_ui.py` is missing from the package dir.
+  **Why no reply?** (right-click a message, Apps) is registered the
+  same way; if Discord refuses the "?" in its name, the log says so
+  and it is registered as "Why no reply".
 - **No welcomes in a server**: welcomes are off there. Set
   `plugins.welcome.enabled: on` under that server in `servers`
   (step 5), and check `show --server <id> --explain`.

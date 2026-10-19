@@ -293,7 +293,7 @@ class Risk(unittest.TestCase):
                               C(S1, "plugins.media.who", "everyone")])
         self.assertTrue(any("Anyone in Lounge can ask for generated"
                             in w for w in a.warnings), a.warnings)
-        self.assertTrue(any("Images and video per day" in w
+        self.assertTrue(any("Generations per day" in w
                             for w in a.warnings))
         a = self.assess(cfg, [C(S1, "plugins.media.enabled", True),
                               C(S1, "plugins.media.who", [SAM]),
@@ -1103,38 +1103,51 @@ class CLI(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 11. The current /settings still works on the new engine
+# 11. /settings (settings_ui, Components V2) on the engine
 # ---------------------------------------------------------------------------
-class SettingsUIStillWorks(unittest.TestCase):
+def ui_text(resp):
+    """Every text display of a /settings page, joined."""
+    out = []
+
+    def walk(comps):
+        for c in comps or []:
+            if isinstance(c, dict):
+                if c.get("type") == 10:
+                    out.append(c.get("content") or "")
+                walk(c.get("components"))
+    walk(resp.get("data", {}).get("components"))
+    return "\n".join(out)
+
+
+class SettingsUIOnTheEngine(unittest.TestCase):
     def test_dms_page_with_a_list(self):
         import settings_ui as UI
         cfg = config(self, BASE + f'dms:\n  who:\n    dms_from: ["{SAM}"]\n')
         ctx = FakeCtx(cfg)
         ix = {"type": 3, "id": "1", "token": "t", "user": {"id": OWNER},
-              "data": {"custom_id": "mdset:d:d:who", "component_type": 2}}
+              "data": {"custom_id": "mdset:2:pg:d:b", "component_type": 2}}
         r = UI.handle(ix, ctx)
         self.assertEqual(r["type"], 7, r)
-        self.assertIn("DMs from", r["data"]["content"])
+        self.assertIn("Who can DM it", ui_text(r))
+        self.assertIn(f"<@{SAM}>", ui_text(r))
         self.assertEqual(ctx.logs, [])
-        ix["data"] = {"custom_id": "mdset:s:d:df", "component_type": 3,
+        ix["data"] = {"custom_id": "mdset:2:set:d:df", "component_type": 3,
                       "values": ["owners"]}
         r = UI.handle(ix, ctx)
-        self.assertIn("Saved", r["data"]["content"])
+        self.assertIn("**Done:**", ui_text(r))
         self.assertEqual(value(cfg, DMS, "who.dms_from"), "owners")
         # an admin's /settings write is recorded as an admin's
         ix = {"type": 3, "id": "1", "token": "t", "guild_id": G1,
               "member": {"user": {"id": ADMIN}, "permissions": str(1 << 5)},
               "channel_id": CH, "data": {"custom_id":
-                                         f"mdset:s:c{G1}.{CH}:r",
-                                         "component_type": 3,
-                                         "values": ["off"]}}
+                                         f"mdset:2:val:c{G1}.{CH}:r:off:q",
+                                         "component_type": 2}}
         r = UI.handle(ix, ctx)
-        self.assertIn("Saved", r["data"]["content"])
+        self.assertIn("**Done:**", ui_text(r))
         self.assertEqual(doc(cfg)["values"][KS_GEN]["role"], "admin")
         self.assertEqual(MS.undo_plan(load(cfg), S1, True, admin_gid=G1),
                          [C(P.channel(G1, CH), "who.replies", "inherit",
                             path=("servers", G1, "channels", CH))])
-
 
 
 # ---------------------------------------------------------------------------
@@ -1235,18 +1248,18 @@ class ReviewHigh(unittest.TestCase):
         ix = {"type": 3, "id": "1", "token": "t", "guild_id": G1,
               "member": {"user": {"id": ADMIN},
                          "permissions": str(1 << 5)},
-              "channel_id": CH, "data": {"custom_id": f"mdset:u:s{G1}",
+              "channel_id": CH, "data": {"custom_id": f"mdset:2:un:s{G1}",
                                          "component_type": 2}}
         r = UI.handle(ix, FakeCtx(cfg))
-        self.assertIn("Nothing to undo", r["data"]["content"])
+        self.assertIn("Nothing to undo", ui_text(r))
         self.assertEqual(value(cfg, DMS, "who.dms_from"), "owners")
         self.assertEqual(value(cfg, S1, "who.replies"), "conversational")
         # the admin's own change is undone, and only that
         admin_apply(cfg, [C(GEN, "who.replies", "off")])
-        ix["data"] = {"custom_id": f"mdset:u:c{G1}.{CH}",
+        ix["data"] = {"custom_id": f"mdset:2:un:c{G1}.{CH}",
                       "component_type": 2}
         r = UI.handle(ix, FakeCtx(cfg))
-        self.assertIn("Undone", r["data"]["content"])
+        self.assertIn("Undone", ui_text(r))
         self.assertEqual(value(cfg, GEN, "who.replies"), "conversational")
         self.assertEqual(value(cfg, DMS, "who.dms_from"), "owners")
 
@@ -1257,11 +1270,11 @@ class ReviewHigh(unittest.TestCase):
                     C(S1, "style.length", "brief")])
         ix = {"type": 3, "id": "1", "token": "t", "guild_id": G1,
               "member": {"user": {"id": OWNER}, "permissions": "0"},
-              "channel_id": CH, "data": {"custom_id": f"mdset:u:s{G1}",
+              "channel_id": CH, "data": {"custom_id": f"mdset:2:un:s{G1}",
                                          "component_type": 2}}
         r = UI.handle(ix, FakeCtx(cfg))
-        self.assertIn("Are you sure", r["data"]["content"])
-        self.assertIn("Anyone on Discord", r["data"]["content"])
+        self.assertIn("Check before undoing", ui_text(r))
+        self.assertIn("Anyone on Discord", ui_text(r))
         self.assertEqual(value(cfg, DMS, "who.dms_from"), "owners")
 
     def test_h3_roles_are_explicit(self):
@@ -1613,6 +1626,50 @@ class FuzzAdmin(unittest.TestCase):
                 bad = {n: (er[n], et[n]) for n in _FUZZ_SCOPES
                        if _RANK[er[n]] > _RANK[et[n]]}
                 self.assertEqual(bad, {}, f"seed {seed}: " + "; ".join(log))
+
+
+# ---------------------------------------------------------------------------
+# 13. Engine additions for the /settings redesign (PR B)
+# ---------------------------------------------------------------------------
+class ForTheUI(unittest.TestCase):
+    def test_friends_skip_keeps_the_rest(self):
+        """The preview shows Friends in a big server without the one key
+        it may not set (big="skip"); the default still refuses."""
+        cfg = config(self)
+        apply(cfg, [C(S1, "who.replies", "when-addressed"),
+                    C(S1, "limits.per_day", 50)])
+        st = load(cfg)
+        with self.assertRaises(MS.SettingsError):
+            MS.preset_changes(st, "friends", S1, INFO)
+        ch = MS.preset_changes(st, "friends", S1, INFO, big="skip")
+        keys = {c.key for c in ch}
+        self.assertNotIn("privacy.memory", keys)
+        self.assertEqual(keys, {"who.replies", "limits.per_day"})
+        # a small server: nothing skipped
+        ch = MS.preset_changes(st, "friends", S3, INFO, big="skip")
+        self.assertIn("privacy.memory", {c.key for c in ch})
+
+    def test_named_people_are_no_warning(self):
+        """Picking Sam by name for Who can DM it: that Sam can DM the
+        bot is what was asked; anyone else still warns."""
+        cfg = config(self)
+        st = load(cfg)
+        ch = [C(DMS, "who.dms_from", [SAM])]
+        self.assertTrue(MS.assess(st, ch, INFO, NAMES).risky)
+        self.assertFalse(MS.assess(st, ch, INFO, NAMES,
+                                   named=[SAM]).risky)
+        ch = [C(DMS, "who.dms_from", [SAM, ANN])]
+        a = MS.assess(st, ch, INFO, NAMES, named=[SAM])
+        self.assertEqual(a.warnings, ["@Ann can DM the bot and get "
+                                      "answers."])
+        # an open audience is never "named"
+        a = MS.assess(st, [C(DMS, "who.dms_from", "anyone")], INFO, NAMES,
+                      named=[SAM])
+        self.assertTrue(a.risky)
+
+    def test_generations_label(self):
+        self.assertEqual(MS.label("plugins.media.per_day"),
+                         "Generations per day")
 
 
 if __name__ == "__main__":

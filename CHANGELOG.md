@@ -6,6 +6,67 @@ entries below the releases are pre-release history. **Action
 needed** lists what an existing install must do after updating;
 UPDATING.md walks a Muse through it.
 
+## 2026-10-19: /settings, redesigned
+
+New:
+
+- `/settings` opens right where you are: in a channel, on that
+  channel's page; in a thread, on its parent channel; in a DM with the
+  bot, on DMs. From there, one button goes to the server, Defaults
+  (what every server and DM follows), DMs or another server, and a
+  channel picker goes to any channel.
+- Each setting shows what it is now in plain words, and its first
+  choice is "Same as" what it follows, with that value (for example
+  "Same as Defaults: Chatty"), so going back to the server's or
+  Defaults' value is one pick. A setting changed there says who
+  changed it and when, and says so when it overrides config.yaml.
+- Presets for a server: Friends, Community and Work. Picking one shows
+  exactly what would change first, and applying it is one change you
+  can undo with one click.
+- **Why no reply?** on a channel, server or DMs page lists the last
+  messages that addressed the bot and got no answer, with the reason
+  in plain words and a fix where there is one ("Remove Sam" from Never
+  answer, "Change cap"). Server admins can also right-click a
+  message, Apps, **Why no reply?** for that one message (the menu
+  entry is for people with Manage Server). In DMs it checks whether a
+  person can DM the bot.
+- After every change, a **Done** line says what changed, with an
+  **Undo** button. Pages also show the last change made there, with
+  Undo; on a server page that includes changes in its channels.
+- Server admins (Manage Server) get a **Quiet the bot** panel: make the
+  bot answer only @mentions or nothing, here or in the whole server,
+  add people to Never answer, turn extras off, and undo what admins
+  changed. They still can never make it louder than you set it, and
+  the summary DM you get of their changes now says them in plain words
+  ("In #general, When it answers: Chatty → Off").
+
+Changed:
+
+- Changes that could have bad results (DMs opened to more people,
+  memory shared in a big server, Pause everywhere, Chatty in a big
+  server, a cap removed) show what they would mean and wait for
+  **Apply**. Picking people by name for Who can DM it does not ask
+  again.
+- Caps: leave the box blank for no cap. A box is never prefilled with
+  "none" any more, 0 means only you get replies, and a typo is not
+  saved: the page says why and **Try again** reopens the box with what
+  you typed.
+- Who can DM it: pick people in a server, or add them by ID in a DM
+  with the bot (copy a user ID with Developer Mode on), and remove them
+  from a list.
+- Pause buttons name what they pause ("Pause #general", "Pause" and
+  the server's name, "Pause everywhere"), and pausing a server says
+  which channels still answer because they have their own setting.
+- When config.discord.yaml cannot be read, the pages say so and offer
+  no changes until it is fixed, instead of failing on save.
+
+**Action needed:**
+
+- None. A `/settings` page opened before the update says it is out of
+  date; run `/settings` again. The **Configure** button in earlier
+  "I just joined" DMs still works. The monitor registers **Why no
+  reply?** by itself; it can take a moment to appear in Discord.
+
 ## 2026-10-19: Change settings by asking
 
 New:

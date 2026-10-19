@@ -1136,7 +1136,8 @@ def quarantine(msg, channel_name, matched_pattern, fragments=()):
     ledger_record_many([msg["id"]] + [f["id"] for f in fragments],
                        "quarantined", matched_pattern,
                        channel_id=msg.get("channel_id"),
-                       author=entry["author"])
+                       author=entry["author"],
+                       author_id=(msg.get("author") or {}).get("id"))
     print(f"Quarantined suspicious message from {entry['author']} in #{channel_name} "
           f"(matched: {matched_pattern}): {entry['content'][:80]}", flush=True)
 
@@ -1173,29 +1174,112 @@ def _ledger_save(d):
 
 
 def ledger_record(mid, status, reason="", channel_id=None, author=None,
-                  recoveries=None):
+                  recoveries=None, author_id=None, detail=None):
     ledger_record_many([mid], status, reason, channel_id, author,
-                       recoveries)
+                       recoveries, author_id, detail)
 
 
 def ledger_record_many(mids, status, reason="", channel_id=None,
-                       author=None, recoveries=None):
+                       author=None, recoveries=None, author_id=None,
+                       detail=None):
     """ledger_record for several ids in one write: a burst's trigger and
-    its fragments always share one outcome."""
+    its fragments always share one outcome. Each entry also keeps the
+    author's id and a reason code (ledger_code; "Why no reply?" in
+    /settings reads them), plus detail (which cap, which limit)."""
     mids = [m for m in mids if m]
     if not mids:
         return
     d = _ledger_load()
+    code = ledger_code(status, reason)
+    # Where it happened, as the monitor knows it now (a thread's parent
+    # only for a thread): /settings' Why reads it later, when the
+    # channel may be gone from discovery.
+    info = CHANNELS.get(str(channel_id)) if channel_id else None
+    where = {}
+    if info and info.get("guild_id"):
+        where = {"guild_id": info["guild_id"],
+                 "parent_id": info.get("parent_id") if info.get("thread")
+                 else None}
+    elif channel_id and (channel_id in DM_CHANNELS
+                         or channel_id in DM_CHANNEL_USER):
+        where = {"dm": True}
     for mid in mids:
         ent = d["entries"].get(mid, {})
+        ent.update(where)
         ent.update({"status": status, "reason": reason,
                     "channel_id": channel_id or ent.get("channel_id"),
                     "author": author or ent.get("author"),
-                    "updated": time.time()})
+                    "author_id": str(author_id) if author_id
+                    else ent.get("author_id"),
+                    "code": code, "updated": time.time()})
+        if detail is not None:
+            ent["detail"] = detail
+        else:
+            ent.pop("detail", None)
         if recoveries is not None:
             ent["recoveries"] = recoveries
         d["entries"][mid] = ent
+        if author_id and author:
+            remember_name(author_id, author)
     _ledger_save(d)
+
+
+# Reason codes for the ledger (2026-10-19), from the reason text every
+# caller already writes: what /settings' "Why no reply?" explains.
+_LEDGER_CODES = (
+    ("settings: who.replies is off", "replies-off"),
+    ("settings: who.bots", "bots-ignore"),
+    ("settings: not allowed by who.allow", "not-allowed"),
+    ("settings: on who.ignore", "not-allowed"),
+    ("settings: not in who.allow", "not-allowed"),
+    ("settings: who.dms_from", "dm-not-allowed"),
+    ("settings: not in who.dms_from", "dm-not-allowed"),
+    ("settings: shares no server", "dm-not-allowed"),
+    ("daily cap reached", "cap"),
+    ("bot exchange limit", "bot-exchange"),
+    ("suspicious, ignored", "suspicious-ignored"),
+    ("predates bot join", "predates-join"),
+    ("no send permission", "no-send"),
+    ("403 missing access", "no-send"),
+    ("enqueue failed", "internal"),
+    ("sweep enqueue failed", "internal"),
+    ("recovery cap reached", "internal"),
+    ("no reply (worker's call)", "worker-skipped"),
+    ("send failed", "send-failed"),
+    ("held for owner review (never_share)", "never-share"),
+    ("never_share hold discarded", "never-share"),
+)
+
+
+def ledger_code(status, reason=""):
+    """A ledger entry's reason code: replied, queued, quarantined, or why
+    a message was skipped (replies-off, dm-off, bots-ignore, not-allowed,
+    dm-not-allowed, cap, bot-exchange, suspicious-ignored, predates-join,
+    no-send, internal, worker-skipped, send-failed, never-share, other)."""
+    if status in ("replied", "queued", "quarantined"):
+        return status
+    if status == "enqueue_failed":
+        return "internal"
+    reason = str(reason or "")
+    if reason.startswith("settings: who.replies is off for DMs"):
+        return "dm-off"
+    for prefix, code in _LEDGER_CODES:
+        if reason.startswith(prefix):
+            return code
+    return "other"
+
+
+# Display names of people the monitor has seen (ledger authors), for
+# /settings' "Remove Sam" (bounded; ids only otherwise).
+_USER_NAMES = {}
+
+
+def remember_name(uid, name):
+    if uid and name:
+        _USER_NAMES[str(uid)] = str(name)
+        if len(_USER_NAMES) > 2000:
+            for k in list(_USER_NAMES)[:500]:
+                _USER_NAMES.pop(k, None)
 
 
 def _ledger_terminal(mid):
@@ -1233,8 +1317,15 @@ def rate_allows(state, user_id, channel_id=None, scope=None):
     Owners are never capped or counted: these limits bound abuse and
     token spend from strangers, not the owner's own use of the bot.
     Counted at queue time, one per burst."""
+    return rate_block(state, user_id, channel_id, scope) is None
+
+
+def rate_block(state, user_id, channel_id=None, scope=None):
+    """rate_allows, saying which cap stops it: None (allowed) or {"key",
+    "counter" ("everywhere", "server:<id>", "dms": where the cap is set),
+    "cap"}."""
     if user_id in OWNER_USER_IDS:
-        return True
+        return None
     if scope is None:
         scope = scope_of_channel(channel_id)
     st = settings()
@@ -1255,7 +1346,7 @@ def rate_allows(state, user_id, channel_id=None, scope=None):
             where = "" if cid == "everywhere" else f" for {cid}"
             print(f"Rate limit: daily cap ({cap}){where} reached, "
                   f"skipping.", flush=True)
-            return False
+            return {"key": "limits.per_day", "counter": cid, "cap": cap}
 
     day_start = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0).timestamp()
@@ -1268,9 +1359,10 @@ def rate_allows(state, user_id, channel_id=None, scope=None):
             print(f"Rate limit: user {user_id} hit per-user daily cap"
                   f"{'' if cid == 'everywhere' else ' for ' + cid}, "
                   f"skipping.", flush=True)
-            return False
+            return {"key": "limits.per_person_per_day", "counter": cid,
+                    "cap": cap}
 
-    return True
+    return None
 
 
 def rate_record(state, user_id, scope=None):
@@ -2190,13 +2282,26 @@ SETTINGS_COMMAND = {
     # admins in theirs; settings_ui refuses everyone else.
     "default_member_permissions": None,
 }
+# The message context command (right-click a message, Apps): why the
+# bot did not answer it. Discord may refuse "?" in the name; then the
+# second name is registered (WHY_NAMES[1]).
+WHY_NAMES = ("Why no reply?", "Why no reply")
+WHY_COMMAND = {
+    "name": WHY_NAMES[0],
+    "type": 3,  # MESSAGE
+    "contexts": [0, 1],
+    "integration_types": [0],
+    # Manage Server: ordinary members don't see it in the menu (owners
+    # use Why no reply? on the /settings pages anyway).
+    "default_member_permissions": "32",
+}
 ADMIN_DIGEST_SECS = 60
 
 # Directory for SettingsCtx, built on the main loop from discovery and
 # the gateway, published as one immutable snapshot under _DIRECTORY_LOCK.
 _MEMBER_COUNTS = {}   # guild id -> member count (approximate)
 _GUILD_CHANNELS = {}  # guild id -> [{"id","name","type","parent_id",..}]
-_DIRECTORY = {"guilds": [], "channels": {}}
+_DIRECTORY = {"guilds": [], "channels": {}, "where": {}}
 _DIRECTORY_LOCK = threading.Lock()
 # The same snapshot on disk, for bin/settings.py (places, names in its
 # sentences): written atomically, only when it changed.
@@ -2206,17 +2311,37 @@ _DIRECTORY_WRITTEN = {"body": None}
 
 def publish_directory():
     """Snapshot GUILDS, member counts and channel lists for /settings
-    (main loop only; the interaction thread reads the snapshot)."""
-    guilds = sorted(
-        ({"id": gid, "name": (info or {}).get("name") or gid,
-          "member_count": _MEMBER_COUNTS.get(gid)}
-         for gid, info in GUILDS.items()),
-        key=lambda g: (str(g["name"]).lower(), g["id"]))
-    channels = {gid: [dict(c) for c in _GUILD_CHANNELS.get(gid) or []]
-                for gid in GUILDS}
+    (main loop only; the interaction thread reads the snapshot). A
+    guild carries its system_channel_id when discovery knows it; a
+    channel whether the bot can read it (readable: a text channel the
+    monitor polls) and send there (can_send, None when unknown); where
+    maps every monitored channel and thread to (guild, parent)."""
+    guilds = []
+    for gid, info in GUILDS.items():
+        g = {"id": gid, "name": (info or {}).get("name") or gid,
+             "member_count": _MEMBER_COUNTS.get(gid)}
+        if "system_channel_id" in (info or {}):
+            g["system_channel_id"] = info.get("system_channel_id")
+        guilds.append(g)
+    guilds.sort(key=lambda g: (str(g["name"]).lower(), g["id"]))
+    channels = {}
+    for gid in GUILDS:
+        out = []
+        for c in _GUILD_CHANNELS.get(gid) or []:
+            c = dict(c)
+            mon = CHANNELS.get(c.get("id"))
+            if c.get("type") in READABLE_CHANNEL_TYPES:
+                c["readable"] = mon is not None
+            c["can_send"] = (mon or {}).get("can_send")
+            out.append(c)
+        channels[gid] = out
+    where = {cid: (info.get("guild_id"),
+                   info.get("parent_id") if info.get("thread") else None)
+             for cid, info in CHANNELS.items()}
     global _DIRECTORY
     with _DIRECTORY_LOCK:
-        _DIRECTORY = {"guilds": guilds, "channels": channels}
+        _DIRECTORY = {"guilds": guilds, "channels": channels,
+                      "where": where}
     body = {"guilds": guilds, "channels": channels}
     if body != _DIRECTORY_WRITTEN["body"]:
         try:
@@ -2224,6 +2349,14 @@ def publish_directory():
             _DIRECTORY_WRITTEN["body"] = body
         except OSError as e:
             print(f"Could not write directory.json: {e}", flush=True)
+
+
+# /settings' stash: what a confirm card, a preset preview or a failed
+# modal is waiting on, in memory only (a restart forgets it: the page
+# then says it expired). token -> (user id, payload, expires at).
+_STASH = {}
+_STASH_LOCK = threading.Lock()
+STASH_MAX = 500
 
 
 # Pending admin-change digests: guild id -> {"first": t, "changes": []}.
@@ -2303,6 +2436,76 @@ class SettingsCtx:
         settings()
         return out
 
+    def display_name(self, user_id):
+        """A person's name the monitor has seen (None when unknown)."""
+        return _USER_NAMES.get(str(user_id))
+
+    def stash_put(self, user_id, payload, ttl=900):
+        """Keep payload for user_id (single use, ttl seconds); a 10
+        character token."""
+        tok = secrets.token_urlsafe(8)[:10]
+        now = time.time()
+        with _STASH_LOCK:
+            for k in [k for k, v in _STASH.items() if v[2] < now]:
+                del _STASH[k]
+            while len(_STASH) >= STASH_MAX:
+                _STASH.pop(next(iter(_STASH)))
+            _STASH[tok] = (str(user_id), payload, now + ttl)
+        return tok
+
+    def stash_take(self, user_id, token):
+        """The payload stash_put kept, once; None when it is gone
+        (expired, used, or the monitor restarted). PermissionError when
+        it is someone else's (it stays theirs)."""
+        with _STASH_LOCK:
+            e = _STASH.get(str(token))
+            if e is None or e[2] < time.time():
+                _STASH.pop(str(token), None)
+                return None
+            if e[0] != str(user_id):
+                raise PermissionError("not this user's")
+            del _STASH[str(token)]
+        return e[1]
+
+    def recent_outcomes(self, place, limit=20):
+        """The newest mention-ledger entries for a place (a Place from
+        muse_settings: a server, a channel and its threads, or DMs),
+        newest first: message_id, channel_id, guild_id, parent_id,
+        author_id (None in entries older than 2026-10-19), author,
+        status, code, detail, reason, at."""
+        with _DIRECTORY_LOCK:
+            where = dict(_DIRECTORY.get("where") or {})
+            for gid, chans in _DIRECTORY["channels"].items():
+                for c in chans:
+                    where.setdefault(str(c.get("id")), (gid, None))
+        out = []
+        for mid, e in _ledger_load()["entries"].items():
+            if not isinstance(e, dict):
+                continue
+            o = _outcome(mid, e, where)
+            kind = getattr(place, "kind", None)
+            if kind == "dms":
+                ok = o["guild_id"] is None and o["dm"]
+            elif kind == "server":
+                ok = o["guild_id"] == place.guild_id
+            elif kind == "channel":
+                ok = (o["parent_id"] or o["channel_id"]) == place.channel_id
+            else:
+                ok = True
+            if ok:
+                out.append(o)
+        out.sort(key=lambda o: o["at"], reverse=True)
+        return out[:max(0, int(limit))]
+
+    def outcome(self, message_id):
+        """recent_outcomes' entry for one message, or None."""
+        e = _ledger_load()["entries"].get(str(message_id))
+        if not isinstance(e, dict):
+            return None
+        with _DIRECTORY_LOCK:
+            where = dict(_DIRECTORY.get("where") or {})
+        return _outcome(str(message_id), e, where)
+
     def names(self, some_id):
         """A server's or channel's name for muse_settings' sentences."""
         some_id = str(some_id)
@@ -2337,6 +2540,33 @@ class SettingsCtx:
         print(f"/settings: {msg}", flush=True)
 
 
+def _outcome(mid, e, where):
+    """One ledger entry for /settings. Its server comes from the entry
+    (recorded since 2026-10-19), else from discovery; an entry is a DM's
+    only when it says so or its channel is a known DM channel (an
+    unmapped server channel is never shown under DMs)."""
+    cid = str(e.get("channel_id") or "")
+    code = e.get("code") or ledger_code(e.get("status"), e.get("reason"))
+    if e.get("guild_id"):
+        gid, parent = e["guild_id"], e.get("parent_id")
+    else:
+        gid, parent = where.get(cid, (None, None))
+        info = CHANNELS.get(cid)
+        if gid is None and info:
+            gid = info.get("guild_id")
+            parent = info.get("parent_id") if info.get("thread") else None
+    dm = gid is None and bool(
+        e.get("dm") or cid in DM_CHANNELS or cid in DM_CHANNEL_USER
+        or code in ("dm-off", "dm-not-allowed"))
+    return {"message_id": mid, "channel_id": cid or None,
+            "guild_id": gid, "parent_id": parent, "dm": dm,
+            "author_id": e.get("author_id"), "author": e.get("author"),
+            "status": e.get("status"),
+            "code": code,
+            "detail": e.get("detail") or {}, "reason": e.get("reason"),
+            "at": e.get("updated") or _snowflake_ts(mid)}
+
+
 def _show_value(v):
     if v is True:
         return "on"
@@ -2349,6 +2579,35 @@ def _show_value(v):
     return str(v)
 
 
+def _digest_name(some_id):
+    """A server's, channel's or person's name for the digest's words."""
+    some_id = str(some_id)
+    with _DIRECTORY_LOCK:
+        for g in _DIRECTORY["guilds"]:
+            if g["id"] == some_id:
+                return g.get("name")
+        for chans in _DIRECTORY["channels"].values():
+            for c in chans:
+                if str(c.get("id")) == some_id:
+                    return c.get("name")
+    return _USER_NAMES.get(some_id)
+
+
+def _digest_words(c):
+    """"In #general, When it answers: Chatty → Off" for a change whose
+    key is an overlay key (what /settings sends), else None."""
+    try:
+        path, key = MS.parse_key(c["key"])
+        place = MS.place_of_path(path)
+        if place is None or MS.CORE.get(key) is None and not \
+                key.startswith("plugins."):
+            return None
+        return MS.describe_change(place, key, c["old"], c["new"],
+                                  _digest_name, path)
+    except Exception:
+        return None
+
+
 def admin_digest_text(gid, changes):
     with _DIRECTORY_LOCK:
         known = _DIRECTORY["guilds"]
@@ -2356,12 +2615,16 @@ def admin_digest_text(gid, changes):
         or (GUILDS.get(gid) or {}).get("name") or gid
     head = (f"**Server admin changes in {name}** (server ID {gid}), made "
             f"with /settings:\n")
-    tail = ("\nAdmins can only make me quieter there. To undo one, use "
-            "/settings (Undo last change) or edit config.yaml.")
+    tail = ("\nAdmins can only make me quieter there. To undo one, run "
+            "/settings there and press Undo, or edit config.yaml.")
     lines = []
     for c in changes:
         when = datetime.fromtimestamp(c["at"], timezone.utc) \
             .strftime("%H:%M UTC")
+        words = _digest_words(c)
+        if words:
+            lines.append(f"- <@{c['user']}>: {words}, {when}")
+            continue
         lines.append(f"- <@{c['user']}> set `{c['key']}` to "
                      f"{_show_value(c['new'])} (was "
                      f"{_show_value(c['old'])}), {when}")
@@ -2457,6 +2720,9 @@ register_interaction(SETTINGS_PREFIX, on_settings_interaction,
                      owner_only=False)
 register_interaction("/" + SETTINGS_COMMAND["name"], on_settings_interaction,
                      owner_only=False)
+for _name in WHY_NAMES:
+    register_interaction("/" + _name, on_settings_interaction,
+                         owner_only=False)
 
 
 # ---------------------------------------------------------------------------
@@ -2798,24 +3064,45 @@ def _command_differs(have, want):
 
 
 def ensure_settings_command(app_id):
-    """Make the global /settings command match SETTINGS_COMMAND.
-    Returns "created", "updated" or "unchanged"; raises on failure."""
+    """Make the global /settings command match SETTINGS_COMMAND, and the
+    "Why no reply?" message command WHY_COMMAND. Returns "created",
+    "updated" or "unchanged" (the first that applies: /settings, then
+    the message command); raises on failure."""
     base = f"/applications/{urllib.parse.quote(str(app_id), safe='')}" \
         "/commands"
     have = api_get(base)
     if not isinstance(have, list):
         raise ValueError(f"unexpected command list: {str(have)[:80]}")
+    r1 = _ensure_command(base, have, SETTINGS_COMMAND,
+                         (SETTINGS_COMMAND["name"],))
+    r2 = _ensure_command(base, have, WHY_COMMAND, WHY_NAMES)
+    return r1 if r1 != "unchanged" else r2
+
+
+def _ensure_command(base, have, want, names):
+    """Create or update one command (names: what it may be called; the
+    one already registered is kept). A message command name Discord
+    refuses (400) is retried with the next name."""
     mine = [c for c in have if isinstance(c, dict)
-            and c.get("name") == SETTINGS_COMMAND["name"]
-            and c.get("type", 1) == SETTINGS_COMMAND["type"]]
-    if not mine:
-        api_post(base, SETTINGS_COMMAND)
-        return "created"
-    if not _command_differs(mine[0], SETTINGS_COMMAND):
-        return "unchanged"
-    cid = urllib.parse.quote(str(mine[0].get("id")), safe="")
-    api_patch(f"{base}/{cid}", SETTINGS_COMMAND)
-    return "updated"
+            and c.get("name") in names
+            and c.get("type", 1) == want["type"]]
+    if mine:
+        want = dict(want, name=mine[0]["name"])
+        if not _command_differs(mine[0], want):
+            return "unchanged"
+        cid = urllib.parse.quote(str(mine[0].get("id")), safe="")
+        api_patch(f"{base}/{cid}", want)
+        return "updated"
+    for i, name in enumerate(names):
+        try:
+            api_post(base, dict(want, name=name))
+            return "created"
+        except Exception as e:
+            if getattr(e, "code", None) != 400 or i == len(names) - 1:
+                raise
+            print(f"Discord refused the command name {name!r}; trying "
+                  f"{names[i + 1]!r}.", flush=True)
+    return "unchanged"
 
 
 def register_commands(gateway_status=None):
@@ -2920,7 +3207,7 @@ def note_refused(msg, cname, reason):
     author = msg.get("author", {}) or {}
     ledger_record(msg["id"], "skipped", f"settings: {reason}",
                   channel_id=msg.get("channel_id"),
-                  author=author.get("username"))
+                  author=author.get("username"), author_id=author.get("id"))
     print(f"Not answering {author.get('username')} in {cname}: "
           f"{reason}.", flush=True)
 
@@ -3199,7 +3486,9 @@ def flush_pending(state, queue, force=False):
                         f"enqueue failed {entry['tries']}x",
                         channel_id=entry["channel_id"],
                         author=(trigger.get('author', {}) or {})
-                        .get('username'))
+                        .get('username'),
+                        author_id=(trigger.get('author', {}) or {})
+                        .get('id'))
                     print(f"Dropping burst from "
                           f"{(trigger.get('author', {}) or {}).get('username')} "
                           f"in {entry['channel_name']} after 3 failed "
@@ -4543,7 +4832,7 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     if predates_join(state, msg, guild_id):
         ledger_record_many(burst_ids, "skipped", "predates bot join",
                            channel_id=msg.get("channel_id"),
-                           author=author_name)
+                           author=author_name, author_id=author_id)
         return False
     chan_hist = state.get("history", {}).get(msg["channel_id"], [])
     from_bot = is_bot_author(msg.get("author"))
@@ -4558,7 +4847,8 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         ledger_record_many(burst_ids, "skipped",
                            f"bot exchange limit ({limit}) reached",
                            channel_id=msg.get("channel_id"),
-                           author=author_name)
+                           author=author_name, author_id=author_id,
+                           detail={"limit": limit})
         print(f"Not answering bot {author_name} in {cname}: the bot "
               f"exchange limit ({limit}) is reached.", flush=True)
         return False
@@ -4569,7 +4859,7 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
             ledger_record_many(burst_ids, "skipped",
                                f"suspicious, ignored: {matched}",
                                channel_id=msg.get("channel_id"),
-                               author=author_name)
+                               author=author_name, author_id=author_id)
             print(f"Ignored a suspicious message from {author_name} in "
                   f"{cname} (privacy.suspicious: ignore).", flush=True)
         else:
@@ -4593,10 +4883,12 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     #    A capped burst is dropped at once, not retried: ledgered as
     #    skipped (terminal), so flush_pending drops its pending entry
     #    and the author's later messages are judged on their own.
-    if not rate_allows(state, author_id, msg["channel_id"], scope):
+    capped = rate_block(state, author_id, msg["channel_id"], scope)
+    if capped:
         ledger_record_many(burst_ids, "skipped", "daily cap reached",
                            channel_id=msg.get("channel_id"),
-                           author=author_name)
+                           author=author_name, author_id=author_id,
+                           detail=capped)
         return False
     rate_record(state, author_id, scope)
 
@@ -4735,7 +5027,8 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     # (Typing comes from the typing thread, via typing_refresh.)
     ledger_record_many(burst_ids, "queued",
                        channel_id=msg.get("channel_id"),
-                       author=msg.get("author", {}).get("username"))
+                       author=msg.get("author", {}).get("username"),
+                       author_id=author_id)
     return True
 
 
@@ -4786,7 +5079,8 @@ def _settle(state, item, status, reason="", replied=False):
             state["replied_to"].append(mid)
     ledger_record_many(ids, status, reason,
                        channel_id=item.get("channel_id"),
-                       author=item.get("author"))
+                       author=item.get("author"),
+                       author_id=item.get("author_id"))
 
 
 def _answered_id(state, item):
@@ -5662,7 +5956,8 @@ def sweep_mentions(state, queue, channels, dms=True):
             if mid in replied:
                 if entries.get(mid, {}).get("status") != "replied":
                     ledger_record(mid, "replied", "sweep sync", cid,
-                                  author.get("username"))
+                                  author.get("username"),
+                                  author_id=author.get("id"))
                 continue
             ids = {mid, aliases.get(mid, mid)}
             if any(ids & s for s in (replied, quar_ids, q_ids,
@@ -5675,13 +5970,15 @@ def sweep_mentions(state, queue, channels, dms=True):
             if info.get("can_send") is False:
                 ledger_record(mid, "skipped",
                               "no send permission in channel", cid,
-                              author.get("username"))
+                              author.get("username"),
+                              author_id=author.get("id"))
                 continue
             recs = (ent or {}).get("recoveries", 0)
             if recs >= SWEEP_MAX_RECOVERIES:
                 if ent and ent.get("status") != "skipped":
                     ledger_record(mid, "skipped", "recovery cap reached",
-                                  cid, author.get("username"))
+                                  cid, author.get("username"),
+                                  author_id=author.get("id"))
                     print(f"Sweep: giving up on unrecoverable mention "
                           f"{mid} from {author.get('username')} in "
                           f"{cname} (recorded in mention ledger).",
@@ -5696,7 +5993,8 @@ def sweep_mentions(state, queue, channels, dms=True):
                 ledger_record(mid, "queued",
                               f"sweep recovery #{recs + 1}", cid,
                               author.get("username"),
-                              recoveries=recs + 1)
+                              recoveries=recs + 1,
+                              author_id=author.get("id"))
                 print(f"Sweep recovered lost mention {mid} from "
                       f"{author.get('username')} in {cname}.", flush=True)
             elif not _ledger_terminal(mid):
@@ -5705,7 +6003,8 @@ def sweep_mentions(state, queue, channels, dms=True):
                 ledger_record(mid, "enqueue_failed",
                               "sweep enqueue failed", cid,
                               author.get("username"),
-                              recoveries=recs + 1)
+                              recoveries=recs + 1,
+                              author_id=author.get("id"))
     return changed
 
 
@@ -5891,7 +6190,8 @@ def _note_no_send(msg, cname):
               f"messages there.", flush=True)
     ledger_record(msg["id"], "skipped", "no send permission in channel",
                   channel_id=cid,
-                  author=(msg.get("author", {}) or {}).get("username"))
+                  author=(msg.get("author", {}) or {}).get("username"),
+                  author_id=(msg.get("author", {}) or {}).get("id"))
 
 
 

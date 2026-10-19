@@ -1,0 +1,11 @@
+=== why_owner
+type 4 · 9 components · 394 chars
+C blurple
+  TD | ## Why no reply?
+  TD | -# <@<SPAM>>'s [message](https://discord.com/channels/<G1>/<MUSECHAT>/<ID>) in #muse-chat, 4 min ago
+  SEP
+  SEC | <@<SPAM>> is on **Never answer** in Muse Lounge (added by <@<ADMIN>>, admin, Oct 19).
+      [Remove spam1] mdset:2:fx:s<G1>:ig:-<SPAM>
+  TD | -# Removing spam1 doesn't answer this message; ask spam1 to send it again.
+ROW
+  [Open #muse-chat settings] mdset:2:pg:c<G1>.<MUSECHAT>:b

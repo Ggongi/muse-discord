@@ -1,0 +1,30 @@
+=== owner_thread
+type 4 · 22 components · 781 chars
+C blurple
+  TD | ## #muse-chat
+  TD | -# In Muse Lounge · 1,240 members. A channel can change when it answers, add instructions and switch extras; everything else follows Muse Lounge.
+  TD | -# You ran this in a thread; threads follow #muse-chat.
+  SEP
+  TD | **When it answers in #muse-chat**
+  ROW
+    SELECT mdset:2:set:c<G1>.<MUSECHAT>:r “When it answers…” 1-1
+      * Same as Muse Lounge: Chatty — Follows Muse Lounge and changes when it does  (=)
+      - Chatty — Answers @mentions and replies, plus that person's follow-ups for 2 minutes  (conversational)
+      - Only when @mentioned — Answers only @mentions and replies to its messages  (when-addressed)
+      - Off — Never answers in #muse-chat  (off)
+  SEC | **Instructions for the Muse**
+  SEC | Muse Lounge's instructions apply here. Added for #muse-chat: nothing
+      [Edit](primary) mdset:2:mod:c<G1>.<MUSECHAT>:i:b
+  SEC | **Image and video generation**
+  SEC | Off · same as Muse Lounge
+      [Turn on](success) mdset:2:val:c<G1>.<MUSECHAT>:~media.enabled:on:b
+ROW
+  [Pause #muse-chat](danger) mdset:2:pz:c<G1>.<MUSECHAT>
+  [Why no reply?] mdset:2:pg:c<G1>.<MUSECHAT>:y
+ROW
+  CHANNELS mdset:2:gc:c<G1>.<MUSECHAT> “Go to another channel in Muse Lounge…” 1-1
+ROW
+  [Muse Lounge](primary) mdset:2:pg:s<G1>:b
+  [Defaults] mdset:2:pg:x:b
+  [DMs] mdset:2:pg:d:b
+  [Other servers] mdset:2:pg:c<G1>.<MUSECHAT>:o

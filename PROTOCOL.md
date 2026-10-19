@@ -183,8 +183,21 @@ bound to the queue item it was made for:
 
 ### mention_ledger.json (monitor-internal, durable)
 
-`{"entries": {message_id: {status, reason, channel_id, author,
-updated, recoveries?}}}`. Every mention/DM that reaches a terminal
+`{"entries": {message_id: {status, reason, code, channel_id,
+author, author_id, updated, detail?, recoveries?}}}`. `author_id` and
+`code` (2026-10-19; older entries lack them) are the author's user id
+and the reason as a code for /settings' **Why no reply?**:
+`replied`, `queued`, `quarantined`, or for `skipped` /
+`enqueue_failed`: `replies-off`, `dm-off`, `bots-ignore`,
+`not-allowed`, `dm-not-allowed`, `cap` (with `detail` `{key,
+counter, cap}`: which cap, and where it is set), `bot-exchange`
+(`detail` `{limit}`), `suspicious-ignored`, `predates-join`,
+`no-send`, `internal`, `worker-skipped`, `send-failed`,
+`never-share` or `other`. Entries also keep `guild_id` (and a
+thread's `parent_id`), or `dm: true`, as the monitor knew them when
+writing: the page explains a message with the settings of the server
+the interaction is in, and an entry for another server counts as not
+recorded. Every mention/DM that reaches a terminal
 state is recorded: `queued` (in flight), `replied`, `quarantined`, or
 `skipped` with a reason (`"no send permission in channel"`,
 `"403 missing access"`, `"recovery cap reached"`, `"enqueue failed
@@ -430,15 +443,23 @@ history: [] # the last 100 changes and retired entries
 
 ### /settings (the slash command)
 
-The monitor registers one global application command, `settings`
-(chat input, no options), once per start, after it knows the bot's
-identity. It reads the command list (`GET
-/applications/<app id>/commands`), creates the command when missing
+The monitor registers two global application commands once per start,
+after it knows the bot's identity: `settings` (chat input, no
+options) and **Why no reply?** (a message command, type 3: right-click
+a message, Apps). It reads the command list (`GET
+/applications/<app id>/commands`), creates a command when missing
 (`POST`), edits it when it differs (`PATCH .../commands/<id>`), and
 does nothing when it matches. It never bulk-overwrites, so other
-commands of the application survive. A failure is logged and retried
-a minute later; it never stops the monitor. The application id comes
-from the gateway's READY (else `GET /applications/@me`).
+commands of the application survive. If Discord refuses the "?" in
+the message command's name (HTTP 400), it is registered as "Why no
+reply" instead, and either name counts as registered later. The
+message command's `default_member_permissions` is `"32"` (Manage
+Server), so ordinary members do not see it; owners have the **Why no
+reply?** button on the pages, and settings_ui checks who may use it
+on every interaction anyway. A failure
+is logged and retried a minute later; it never stops the monitor. The
+application id comes from the gateway's READY (else `GET
+/applications/@me`).
 
 | Field                        | Value    | Meaning                                    |
 | ---------------------------- | -------- | ------------------------------------------ |
@@ -452,31 +473,58 @@ invite URL in SETUP.md step 2 needs no other scope.
 Who may use it (checked on every interaction, never trusted from a
 custom id):
 
-- **Owners**: everything editable from Discord, at any scope, from a
-  DM or any server.
-- **Server admins** (Manage Server in that server, from the
-  interaction's member permissions): their own server only, and only
-  quieter: `replies` off or when-addressed for the server or a
-  channel, plugins off, additions to `ignore`. Never loosening,
-  never privacy or limits, never another server.
+- **Owners**: everything editable from Discord, at any place, from
+  a DM or any server.
+- **Server admins** (Manage Server or Administrator in that server,
+  from the interaction's member permissions; not owners): their own
+  server only, on the **Quiet the bot** panel, and only quieter:
+  `replies` off or when-addressed for the server or a channel, extras
+  off, additions to `ignore`; plus reverting what admins wrote there
+  (back to the owners' value, never louder: muse_settings' admin
+  rule), and **Why no reply?** for that server. Never privacy, caps,
+  presets, Defaults, DMs or another server.
 - **Anyone else**: an ephemeral "Only the bot's owners can change
-  its settings."
+  its settings. Server admins (Manage Server) can make it quieter
+  here."
 
 The pages are rendered by `settings_ui.py` (next to `monitor.py`).
-The command and every component or modal whose custom id starts with
-`mdset:` reach `settings_ui.handle` on the interaction thread, which
-answers within Discord's 3 seconds whatever the main loop is doing;
-its return value is posted as the interaction callback. Every
-response is ephemeral. Without `settings_ui.py` the monitor logs it
-once and answers "Settings UI unavailable."
+Both commands and every component or modal whose custom id starts
+with `mdset:` reach `settings_ui.handle` on the interaction thread,
+which answers within Discord's 3 seconds whatever the main loop is
+doing; its return value is posted as the interaction callback,
+verbatim. Pages are Components V2 messages (flags `64 | 32768`: no
+`content`, no embeds, at most 40 components): a new ephemeral message
+for the commands, a refusal or an out-of-date notice, a modal (type
+9) for a form, and an edit in place (type 7) for everything else.
+Without `settings_ui.py` the monitor logs it once and answers
+"Settings UI unavailable."
 
-- Writes go through `muse_settings.set_value` / `reset` into
-  `config.discord.yaml` (above), with `by` = the user's id, and
-  apply at once (the same live reload as a file edit). **Undo last
-  change** reverts the newest change still in effect at that one
-  scope (not the channels under a server; Everywhere includes the
-  bot-wide settings) to its previous value; pressing it again goes
-  one change further back.
+- Custom ids are `mdset:2:<verb>:<place>[:…]` (place `x` Defaults,
+  `d` DMs, `s<server id>`, `c<server id>.<channel id>`); the grammar
+  is in `settings_ui.py`'s docstring. Any other `mdset:` id (a page
+  from before 2026-10-19) answers "This settings page is out of date",
+  except the join notice's `mdset:open:server:<server id>`, which
+  still opens that server's page (owners only).
+- Writes go through `muse_settings.apply` into `config.discord.yaml`
+  (above), with `by` = the user's id and role `owner` or `admin`: one
+  history group per click (a preset, Pause everywhere, a modal's
+  fields), applied at once (the same live reload as a file edit).
+  `muse_settings.assess` judges each change by its outcome first; a
+  risky one shows a confirm card and waits for **Apply**. What such a
+  card, a preset preview or a failed modal is waiting on is kept in
+  memory for 15 minutes, bound to the user, single use; after a
+  restart the card says it expired.
+- **Undo** (after a change, and at the bottom of a page for the last
+  change made there) reverts the newest change group still in effect
+  at that place, and on a server's page in its channels too
+  (`muse_settings.undo` with `children` and `expect`: when something
+  changed since, the page says what Undo would do now and writes
+  nothing). Undo lines are never undone (no redo).
+- **Why no reply?** reads `mention_ledger.json` (below) for the place
+  through `SettingsCtx.recent_outcomes`, and one message through
+  `SettingsCtx.outcome`; each reason is checked again against the
+  settings in force, and a fix is offered only while the cause holds
+  and the viewer may make it.
 - The join notice the owners get for a new server carries a
   **Configure** button, custom id `mdset:open:server:<server id>`,
   which opens that server's page.
@@ -488,8 +536,9 @@ once and answers "Settings UI unavailable."
   stays in the overlay's history with the admin's id.
 - Server names and member counts on the pages come from discovery
   (`approximate_member_count`) and the gateway's GUILD_CREATE; the
-  channel and category lists from discovery. No page waits on a
-  Discord request.
+  channel and category lists, each server's system channel, and
+  whether the bot can read and send in each channel, from discovery.
+  No page waits on a Discord request.
 
 ### Settings requests
 
