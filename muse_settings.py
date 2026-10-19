@@ -79,7 +79,7 @@ class Spec:
     def __init__(self, type, default, scopes, values=(), hidden_values=(),
                  min=None, max=None, none=False, maxlen=None, steers=False,
                  risky=False, discord_editable=True, allow_names=False,
-                 hidden=False, legacy=None):
+                 hidden=False, legacy=None, description=None):
         self.type = type
         self.default = default
         self.scopes = _scopes(scopes)
@@ -92,6 +92,7 @@ class Spec:
         self.allow_names = allow_names
         self.hidden = hidden
         self.legacy = legacy
+        self.description = description
 
     def valid_text(self):
         t = self.type
@@ -235,7 +236,9 @@ def load_manifests(plugins_dir):
                     discord_editable=s.get("discord_editable", True)
                     is not False,
                     allow_names=bool(s.get("allow_names")),
-                    hidden=bool(s.get("hidden")), legacy=s.get("legacy"))
+                    hidden=bool(s.get("hidden")), legacy=s.get("legacy"),
+                    description=(str(s["description"]).strip()
+                                 if s.get("description") else None))
         else:
             for key, p in (meta.get("params") or {}).items():
                 default = p.get("default") if isinstance(p, dict) else None
@@ -1121,6 +1124,23 @@ class Settings:
             out.append((key, value, src, rows))
         return out
 
+    def layer(self, path, key):
+        """(set?, value, source) for one layer path (see chain())."""
+        return self._layer(path, key)
+
+    def trace(self, scope, key):
+        """(value, [(name, path, set?, value, source)] for every layer of
+        scope's chain, least specific first)."""
+        return self._resolve_key(self.chain(scope), key)
+
+    def value_without(self, scope, key, path):
+        """What key would resolve to at scope if the layer `path` did not
+        set it (what a reset to inherit there would give)."""
+        if path == ("top",):
+            return copy.deepcopy(TOP[key].default)
+        chain = [(p, n) for p, n in self.chain(scope) if p != path]
+        return self._resolve_key(chain, key)[0]
+
     def cap_layers(self, key, scope):
         """[(counter id, cap)] for every layer along the chain that sets a
         cap (not none) for key: each counts only what happens in its own
@@ -1517,6 +1537,34 @@ def _apply_overlay(st):
 # ---------------------------------------------------------------------------
 # Write API (overlay)
 # ---------------------------------------------------------------------------
+def check_settable(st, path, key):
+    """The spec of key if Discord may set it at the scope path, else raise
+    SettingsError saying why. The one rule set_value and /settings share."""
+    keystr = format_key(path, key) if path else key
+    spec = st.spec(key)
+    if spec is None:
+        raise SettingsError(f"{keystr}: unknown setting")
+    kind = _scope_kind(path)
+    if path == ("top",):
+        if key not in TOP_DISCORD_EDITABLE:
+            raise SettingsError(f"{keystr}: not editable from Discord")
+    elif key in TOP:
+        raise SettingsError(f"{keystr}: a bot-wide setting has no scope")
+    elif kind not in spec.scopes or (kind == "all_servers" and not (
+            key == "who.replies" or key.endswith(".enabled"))):
+        raise SettingsError(f"{keystr}: cannot be set at {kind} scope")
+    elif kind == "channel" and key.startswith("plugins.") \
+            and not key.endswith(".enabled"):
+        raise SettingsError(f"{keystr}: a channel or category may set only "
+                            f"replies, notes and plugins.<plugin>.enabled")
+    if path[0] in ("servers", "alias") and (_id_str(path[1]) is None or (
+            len(path) > 2 and _id_str(path[3]) is None)):
+        raise SettingsError(f"{keystr}: expected Discord ids")
+    if not spec.discord_editable or spec.hidden:
+        raise SettingsError(f"{keystr}: not editable from Discord")
+    return spec
+
+
 def set_value(config_path, keystr, value, by, plugins_dir=None):
     """Record a Discord-side change: overlay entry {value, base, by, at}
     plus a history line (last HISTORY_CAP kept). value "inherit" resets
@@ -1527,21 +1575,7 @@ def set_value(config_path, keystr, value, by, plugins_dir=None):
         path, key = parse_key(keystr)
     except ValueError as e:
         raise SettingsError(f"{keystr}: not a settings key ({e})")
-    spec = st.spec(key)
-    if spec is None:
-        raise SettingsError(f"{keystr}: unknown setting")
-    kind = _scope_kind(path)
-    if path == ("top",):
-        if key not in TOP_DISCORD_EDITABLE:
-            raise SettingsError(f"{keystr}: not editable from Discord")
-    elif kind not in spec.scopes or (kind == "all_servers" and not (
-            key == "who.replies" or key.endswith(".enabled"))):
-        raise SettingsError(f"{keystr}: cannot be set at {kind} scope")
-    if path[0] == "servers" and (_id_str(path[1]) is None or (
-            len(path) > 2 and _id_str(path[3]) is None)):
-        raise SettingsError(f"{keystr}: expected Discord ids")
-    if not spec.discord_editable:
-        raise SettingsError(f"{keystr}: not editable from Discord")
+    spec = check_settable(st, path, key)
     if value != "inherit":
         ok, norm = normalize(spec, value)
         if not ok:
@@ -1568,6 +1602,157 @@ def set_value(config_path, keystr, value, by, plugins_dir=None):
 def reset(config_path, keystr, by, plugins_dir=None):
     """Act as if this scope did not set the key (writes inherit)."""
     return set_value(config_path, keystr, "inherit", by, plugins_dir)
+
+
+# Which way a change goes: the most permissive value last. Used by
+# /settings for the server-admin view (restrict-only) and risky changes.
+_RANKS = {
+    "who.replies": ("off", "when-addressed", "conversational"),
+    "who.dms_from": ("owners", "shared-servers", "anyone"),
+    "who.bots": ("ignore", "when-addressed"),
+    "privacy.memory": ("nothing", "public-only", "everything"),
+    "privacy.suspicious": ("ignore", "hold-for-review", "answer"),
+}
+
+
+def loosens(key, old, new, spec=None):
+    """True when new lets the bot answer more people, share more, do more
+    or reply more than old; False when it is the same or stricter; None
+    when the two cannot be ordered (style, text, channels). Effective
+    (resolved) values in, as Settings.resolve gives them."""
+    if old == new:
+        return False
+    if key in _RANKS:
+        r = _RANKS[key]
+        if old in r and new in r:
+            return r.index(new) > r.index(old)
+        return None
+    if spec is None:
+        spec = CORE.get(key)
+    if spec is None:
+        return None
+    if spec.type == "on-off":
+        return bool(new) and not bool(old)
+    if spec.type == "number" and spec.none:
+        # A cap: none = no cap at all.
+        if new is None:
+            return old is not None
+        if old is None:
+            return False
+        return new > old
+    if spec.type == "people":
+        if key.endswith(".ignore") or key == "who.ignore":
+            if not isinstance(old, list) or not isinstance(new, list):
+                return None
+            return bool(set(old) - set(new))
+        if new == "everyone":
+            return old != "everyone"
+        if old == "everyone":
+            return False
+
+        def people(v):
+            return set() if v == "owners" else set(v or [])
+        return bool(people(new) - people(old))
+    return None
+
+
+def scope_prefix(path):
+    """The overlay key prefix of a scope path: "everywhere", "dms",
+    "all_servers", 'servers."<id>"', 'servers."<id>".channels."<id>"'."""
+    if path[0] == "servers":
+        out = f'servers."{path[1]}"'
+        return out + (f'.channels."{path[3]}"' if len(path) > 2 else "")
+    return path[0]
+
+
+def parse_scope_prefix(prefix):
+    """The scope path of an overlay key prefix (inverse of scope_prefix)."""
+    path, _key = parse_key(str(prefix) + ".x")
+    if path == ("top",):
+        raise ValueError("not a scope")
+    return path
+
+
+def _undo_paths(prefix):
+    path = parse_scope_prefix(prefix)
+    # The Everywhere page also holds the bot-wide settings.
+    return {path, ("top",)} if path == ("everywhere",) else {path}
+
+
+def _undo_pick(doc, paths):
+    """(history index, key string, path, key, value to restore) for the
+    newest change at one of paths that is still in effect and not already
+    undone, or None."""
+    hist = doc.get("history") or []
+    values = doc.get("values") or {}
+    for i in range(len(hist) - 1, -1, -1):
+        h = hist[i]
+        if not isinstance(h, dict) or "to" not in h or h.get("undo") \
+                or h.get("undone") or h.get("retired") or h.get("folded"):
+            continue
+        try:
+            path, key = parse_key(h.get("key"))
+        except ValueError:
+            continue
+        if path not in paths:
+            continue
+        ks = format_key(path, key)
+        cur = values.get(ks)
+        if h["to"] == "inherit":
+            live = cur is None or (isinstance(cur, dict)
+                                   and cur.get("value") == "inherit")
+        else:
+            live = isinstance(cur, dict) and cur.get("value") == h["to"]
+        if live:
+            return i, ks, path, key, h.get("from", "inherit")
+    return None
+
+
+def undo_candidate(st, prefix):
+    """(key string, path, key, value it would restore) for what undo()
+    would revert at this scope, or None (nothing to undo)."""
+    pick = _undo_pick(st.overlay_doc or {}, _undo_paths(prefix))
+    return None if pick is None else pick[1:]
+
+
+def undo(config_path, prefix, by, plugins_dir=None):
+    """Revert the newest Discord change made at one scope (prefix as
+    scope_prefix gives; "everywhere" includes the bot-wide settings) that
+    is still in effect. Repeated calls step further back. Returns the key
+    string reverted, or None when there is nothing to undo."""
+    st = load(config_path, plugins_dir)
+    doc = _read_overlay_doc(st.overlay_path)
+    pick = _undo_pick(doc, _undo_paths(prefix))
+    if pick is None:
+        return None
+    i, ks, path, key, target = pick
+    spec = check_settable(st, path, key)
+    in_file = (path, key) in st.file_values
+    cur = st.file_values.get((path, key))
+    now = _now()
+    entry = {"value": "inherit", "base": _dumpable(spec, cur),
+             "by": str(by), "at": now}
+    if target == "inherit":
+        if in_file:
+            doc["values"][ks] = entry
+        else:
+            doc["values"].pop(ks, None)
+    else:
+        ok, norm = normalize(spec, target)
+        if not ok:
+            raise SettingsError(f"{ks}: cannot restore {_show(target)}: "
+                                f"{norm}")
+        if in_file and norm == cur:
+            doc["values"].pop(ks, None)   # the file says it already
+        else:
+            doc["values"][ks] = dict(entry, value=_dumpable(spec, norm))
+    hist = doc["history"]
+    hist[i] = dict(hist[i], undone=True)
+    hist.append({"key": ks, "from": hist[i]["to"], "to": target,
+                 "by": str(by), "at": now, "undo": True})
+    doc["history"] = hist[-HISTORY_CAP:]
+    _write_overlay_doc(st.overlay_path, doc)
+    return ks
 
 
 def backup(path):
