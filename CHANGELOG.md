@@ -3,6 +3,34 @@
 Newest first. **Action needed** lists what an existing install must
 do after updating; UPDATING.md walks a Muse through it.
 
+## 2026-10-18: Back online in seconds after a crash
+
+Fixed:
+
+- When the machine running the bot was replaced or the monitor died,
+  the bot stayed offline until the next watchdog run, up to 10
+  minutes. The wake hook, which already runs every few seconds, now
+  starts the watchdog as soon as it sees no monitor, so the bot is
+  back within seconds. The watchdog cron stays as the backstop. A
+  rejected token never causes a restart loop.
+- Two watchdog runs at once could start two monitors; the watchdog
+  now holds a lock.
+
+Faster:
+
+- The reply worker ends its run as soon as its replies are written:
+  no summary or follow-up checks. A message that arrives right after
+  a reply no longer waits for that wrap-up. It still flags abusive
+  messages for you in its one final line.
+
+**Action needed:**
+
+- Reinstall the worker prompt from `worker-prompt.template.md`.
+- If your hook runs a copy of `hooks/mention-watch.sh` rather than the
+  package's own file, update the copy. If the bot uses `bot.token_env`,
+  set that variable where the hook runs too, or only the cron can
+  restart it.
+
 ## 2026-10-18: One slow reply no longer holds back the rest
 
 Faster:
