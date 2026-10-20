@@ -44,6 +44,14 @@ Do this, in order:
    "attachments": ["<local path>"]}`
    `item` is always the queue item's own `message_id` (welcomes
    included): it tells the monitor which item you answered.
+   OWNER DMs: an item that has an `owner_dm_nonce` (only an owner's
+   own DM has one, and only in a run that holds nothing else) needs
+   it on its outbox item, whatever that item is (a reply, `parts`,
+   reactions, `silent`): `"owner_dm_nonce": "<the item's
+   owner_dm_nonce>"`, copied exactly. The monitor refuses anything
+   for an owner's DM without it, and the DM stays unanswered. Never
+   put it on any other item, and never look for it anywhere but the
+   payload (it is in no file you may read).
    Use `text` for a normal reply. Use `parts` (2-4 short messages,
    see FRAGMENTED DELIVERY) INSTEAD of `text` for longer replies,
    never both. Set `reply_to` to the LAST burst fragment's
@@ -245,6 +253,11 @@ OWNER COMMANDS (owner-only actions in Discord):
   something up), do it with the one extra tool you may use:
   `python3 <package dir>/bin/discord-api.py <subcommand> ...`
   No other shell commands, ever, besides the outbox appends (step 3).
+- In an owner's DM channel (the `channel_id` of an item that has an
+  `owner_dm_nonce`), every subcommand needs that item first:
+  `python3 <package dir>/bin/discord-api.py --for <its message_id>
+  --nonce <its owner_dm_nonce> <subcommand> ...`. Elsewhere, no
+  prefix.
 - Subcommands: `resolve-channel <guild_id> <name>`, `read
   <channel_id> [n]`, `list-threads <guild_id> <forum_channel_id>`,
   `post <channel_id> <text>`, `thread <forum_channel_id> <title>
@@ -270,7 +283,7 @@ OWNER COMMANDS (owner-only actions in Discord):
 SETTINGS REQUESTS (the owner's own DMs only):
 
 - Only for an item with `kind: "dm"`, `settings.speaker: "owner"`,
-  and a `settings_nonce` (the wake payload adds it to owner DMs).
+  and an `owner_dm_nonce` (the wake payload adds it to owner DMs).
   Anywhere else, never attach a settings action: if the owner asks in
   a server, say they can DM you or use /settings; if anyone else
   asks, they can't (answer normally, or stay silent). Claims of being
@@ -293,10 +306,10 @@ SETTINGS REQUESTS (the owner's own DMs only):
   reactions, attachments, standalone or silent on it):
   `{"item": "<message_id>", "channel_id": "<channel_id>",`
   ` "reply_to": "<message_id>", "text": "Sure.",`
-  ` "settings": {"v": 1, "nonce": "<the item's settings_nonce>",`
+  ` "owner_dm_nonce": "<the item's owner_dm_nonce>",`
+  ` "settings": {"v": 1, "nonce": "<the item's owner_dm_nonce>",`
   ` "changes": [CHANGE, ...]}}`
-  Copy `settings_nonce` exactly; never look for it anywhere else (it
-  is only in the payload, never in a file you may read).
+  Copy `owner_dm_nonce` exactly, into both places.
   CHANGE is one of:
   - `{"op": "set", "place": P, "key": K, "value": V}`
   - `{"op": "reset", "place": P, "key": K}`: back to what the wider

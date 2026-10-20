@@ -180,7 +180,7 @@ class TestWorkerPieces(Base):
         import re
         with open(os.path.join(REPO, "hooks", "mention-watch.sh")) as f:
             hook = f.read()
-        # (An owner-DM-only wake adds settings_nonce after the
+        # (An owner-DM-only wake adds owner_dm_nonce after the
         # projection; the e2e worker never handles owner DMs.)
         m = re.search(r"items: \[\.\[\] \| \{([^}]*)\}", hook)
         self.assertIsNotNone(m, "the hook's payload projection moved")

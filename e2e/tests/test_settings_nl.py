@@ -83,11 +83,19 @@ class Directive(unittest.TestCase):
         self.assertNotIn("settings", out)
         out, _ = fake_worker.build_reply(item("plain"))
         self.assertNotIn("settings", out)
-        # A payload nonce (owner-DM-only wakes) is echoed.
+        # A payload nonce (owner-DM-only wakes) is echoed, on the item
+        # and in the settings action.
         it = item("[[settings:undo]]")
-        it["settings_nonce"] = "ab" * 16
+        it["owner_dm_nonce"] = "ab" * 16
         out, _ = fake_worker.build_reply(it)
         self.assertEqual(out["settings"]["nonce"], "ab" * 16)
+        self.assertEqual(out["owner_dm_nonce"], "ab" * 16)
+        it = item("plain")
+        it["owner_dm_nonce"] = "cd" * 16
+        out, _ = fake_worker.build_reply(it)
+        self.assertEqual(out["owner_dm_nonce"], "cd" * 16)
+        self.assertNotIn("owner_dm_nonce", fake_worker.build_reply(
+            item("plain"))[0])
 
     def test_outbox_append_accepts_it(self):
         pkg = tempfile.mkdtemp(prefix="e2e-nl-")

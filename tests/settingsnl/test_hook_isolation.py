@@ -61,12 +61,12 @@ class OwnerDmWakesAlone(unittest.TestCase):
                     item("5", "dm", "owner")])
         ids, _ = self.wake()
         self.assertEqual(ids, ["2", "5"])
-        self.assertEqual([i.get("settings_nonce")
+        self.assertEqual([i.get("owner_dm_nonce")
                           for i in self.payload["items"]],
                          ["a" * 32, "b" * 32])
         ids, _ = self.wake()
         self.assertEqual(ids, ["1"])
-        self.assertNotIn("settings_nonce", self.payload["items"][0])
+        self.assertNotIn("owner_dm_nonce", self.payload["items"][0])
         self.assertNotIn("a" * 32, json.dumps(self.payload))
         # A nonce file naming a server item never reaches its wake.
         with open(os.path.join(self.pkg, "owner_dm_nonces.json"), "w") as f:
@@ -74,7 +74,7 @@ class OwnerDmWakesAlone(unittest.TestCase):
         self.queue([item("7", "mention", "owner")])
         ids, _ = self.wake()
         self.assertEqual(ids, ["7"])
-        self.assertNotIn("settings_nonce", self.payload["items"][0])
+        self.assertNotIn("owner_dm_nonce", self.payload["items"][0])
 
     def test_owner_dm_first_and_alone(self):
         self.queue([item("1", "mention", "member"),

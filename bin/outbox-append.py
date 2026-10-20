@@ -18,19 +18,25 @@ Nothing is appended if any item has an obvious mistake (the monitor
 would set it aside unsent); the errors are printed so the worker can fix
 them and run it again. An item with a `settings` action (a settings
 request from an owner's DM; PROTOCOL.md) gets the monitor's own shape
-checks (settings_nl.shape_problems). The monitor re-validates every
-item on its side. Never needs the bot token and never touches the
-network.
+checks (settings_nl.shape_problems). An item for an owner's DM
+carries that DM's `owner_dm_nonce` from the wake payload, passed
+through as is (checked here only for its shape: the monitor holds the
+real one). The monitor re-validates every item on its side. Never
+needs the bot token and never touches the network.
 """
 import fcntl
 import json
 import os
+import re
 import sys
 import tempfile
 
 PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTBOX = os.path.join(PACKAGE_DIR, "reply_outbox.json")
 LOCK = os.path.join(PACKAGE_DIR, "reply.lock")
+
+
+NONCE_RE = re.compile(r"[0-9a-f]{32,64}")
 
 
 def _is_id(value):
@@ -73,6 +79,15 @@ def problems(item):
                 isinstance(value, list)
                 and all(isinstance(v, str) for v in value)):
             out.append(f"{field} is not a list of strings")
+    nonce = item.get("owner_dm_nonce")
+    if nonce is not None:
+        if not (isinstance(nonce, str) and NONCE_RE.fullmatch(nonce)):
+            out.append('owner_dm_nonce: copy the item\'s "owner_dm_nonce" '
+                       'from the wake payload exactly')
+        elif isinstance(item.get("settings"), dict) \
+                and item["settings"].get("nonce") not in (None, nonce):
+            out.append("owner_dm_nonce and settings.nonce differ; both are "
+                       "the item's owner_dm_nonce")
     if out:
         return out
     if "settings" in item or any(str(k).startswith("_nl") for k in item):

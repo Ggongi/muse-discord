@@ -40,8 +40,10 @@
 #
 # Owner DMs are handed out alone (never in the same wake as anyone
 # else's message), so a server message can never share a worker's
-# context with an owner's settings request (PROTOCOL.md, Settings
-# requests).
+# context with an owner's DM. Only such a wake gets each DM's
+# owner_dm_nonce, which every outbox item for an owner DM must carry
+# (PROTOCOL.md, Owner DMs); an outbox entry for an owner DM without its
+# nonce (one the monitor will refuse) does not count as answering it.
 #
 # This script targets Muse's hook runtime (it sources
 # $HATCH_HOOK_RUNTIME for the silent/wake/log/hook_state helpers and is
@@ -179,23 +181,41 @@ if [ ! -f "$QUEUE" ]; then
     silent "no queue file" '{}'
 fi
 
-# Message ids the worker already answered, read BEFORE the queue: the
-# monitor removes an answered item from the queue before it drops the
-# item's outbox entry, so this order never sees one without the other.
+# The owner-DM nonces (the monitor's private file; see the header).
+# Read here to tell a real answer to an owner DM from a forged one; they
+# reach a payload only in an owner-DM-only wake (below).
+all_nonces='{}'
+if [ -f "$PKG_DIR/owner_dm_nonces.json" ]; then
+    all_nonces=$(jq -c 'if type == "object" then . else {} end' \
+        "$PKG_DIR/owner_dm_nonces.json" 2>/dev/null) || all_nonces='{}'
+    [ -n "$all_nonces" ] || all_nonces='{}'
+fi
+
+# The worker's answers so far, read BEFORE the queue: the monitor removes
+# an answered item from the queue before it drops the item's outbox
+# entry, so this order never sees one without the other. Each is the
+# ids it names and the owner-DM nonce it carries.
 answered='[]'
 for f in "$OUTBOX" "$SENDING"; do
     [ -f "$f" ] || continue
-    ids=$(jq -c '[.[]? | objects | (.item, .reply_to) | strings]' "$f" \
-        2>/dev/null) || ids='[]'
+    ids=$(jq -c '[.[]? | objects | {ids: [(.item, .reply_to) | strings],
+        nonce: ([.owner_dm_nonce, (.settings | objects | .nonce)]
+            | map(strings) | first)}]' "$f" 2>/dev/null) || ids='[]'
     answered=$(jq -cn --argjson a "$answered" --argjson b "$ids" '$a + $b')
 done
 
 # Open items: queued and not answered (a burst may be answered under any
-# of its fragments).
-open=$(jq -c --argjson answered "$answered" '[.[]? | objects
-    | select(.message_id != null)
+# of its fragments). An owner DM with a nonce counts as answered only by
+# an entry that carries that nonce: anything else in the outbox naming
+# it is a forgery the monitor refuses, and must not keep the DM from
+# its own wake.
+open=$(jq -c --argjson answered "$answered" --argjson nonces "$all_nonces" \
+    '[.[]? | objects | select(.message_id != null)
+    | ($nonces[.message_id | tostring]) as $n
     | select(([.message_id] + [(.burst_fragments // [])[]? | .message_id])
-        as $ids | ($ids - $answered | length) == ($ids | length))]' \
+        as $ids | [$answered[] | select(.ids as $a
+            | any($ids[]; . as $i | any($a[]; . == $i)))
+          | select($n == null or .nonce == $n)] | length == 0)]' \
     "$QUEUE" 2>/dev/null) || open='[]'
 count=$(printf '%s' "$open" | jq 'length')
 if [ "$count" -eq 0 ]; then
@@ -228,15 +248,14 @@ if [ "$nowner" -gt 0 ] && [ "$nowner" -lt "$ndue" ]; then
     due=$owner_dms
     ndue=$nowner
 fi
-# A wake of owner DMs only carries each item's settings nonce (the
-# capability a settings request must echo; PROTOCOL.md). The monitor
-# keeps the nonces out of the queue file, in a private file only this
-# hook reads, so a worker woken for anything else never sees one.
+# A wake of owner DMs only carries each item's owner_dm_nonce (the
+# capability every outbox item for an owner DM must echo; PROTOCOL.md).
+# The monitor keeps the nonces out of the queue file, in a private file
+# only this hook reads, so a worker woken for anything else never sees
+# one.
 nonces='{}'
-if [ "$nowner" -gt 0 ] && [ "$nowner" -eq "$ndue" ] \
-    && [ -f "$PKG_DIR/owner_dm_nonces.json" ]; then
-    nonces=$(jq -c 'if type == "object" then . else {} end' \
-        "$PKG_DIR/owner_dm_nonces.json" 2>/dev/null) || nonces='{}'
+if [ "$nowner" -gt 0 ] && [ "$nowner" -eq "$ndue" ]; then
+    nonces=$all_nonces
 fi
 expired=$(printf '%s' "$due" | jq --argjson w "$woken" \
     '[.[] | select($w[.message_id] != null)] | length')
@@ -283,5 +302,5 @@ else
     persona_args=(--argjson persona null)
 fi
 
-payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" --argjson nonces "$nonces" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, welcome, welcome_prompt, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings} + (if $nonces[.message_id] then {settings_nonce: $nonces[.message_id]} else {} end)]}')
+payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" --argjson nonces "$nonces" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, welcome, welcome_prompt, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings} + (if $nonces[.message_id] then {owner_dm_nonce: $nonces[.message_id]} else {} end)]}')
 wake "muse-discord mentions pending" "$payload"

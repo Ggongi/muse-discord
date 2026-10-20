@@ -15,6 +15,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -243,6 +244,11 @@ def needs_ffmpeg(fn):
     return fn
 
 
+def nonce_of(state, mid):
+    """The owner-DM nonce an owner-DM-only wake would be handed."""
+    return state["nl_nonces"][mid]["nonce"]
+
+
 def enqueue_pair(state):
     """Owner asks for an image in a DM (X) and chats in a public channel
     (Y). Both get approvals (owner is an allowed user)."""
@@ -274,7 +280,7 @@ def f1_dm_image_bound_to_its_item():
     img = make_file(os.path.join(M.GENERATED_DIR, x["id"], "cat.png"))
     outbox([{"channel_id": GEN_CH, "text": "hi all", "reply_to": y["id"]},
             {"channel_id": DM_CH, "text": "here's your cat",
-             "reply_to": x["id"]}])
+             "reply_to": x["id"], "owner_dm_nonce": nonce_of(state, x["id"])}])
     M.process_outbox(state)
     pub = [s for s in FILE_SENDS if s["channel"] == GEN_CH]
     dm = [s for s in FILE_SENDS if s["channel"] == DM_CH]
@@ -340,7 +346,8 @@ def f2_burst_reply_under_last_fragment_gets_image():
     assert M.enqueue_message(x, "DM with owner", state, q, dm=True,
                              fragments=[f1])
     img = make_file(os.path.join(M.GENERATED_DIR, x["id"], "cat.png"))
-    outbox([{"channel_id": DM_CH, "text": "cat!", "reply_to": f1["id"]}])
+    outbox([{"channel_id": DM_CH, "text": "cat!", "reply_to": f1["id"],
+             "owner_dm_nonce": nonce_of(state, x["id"])}])
     M.process_outbox(state)
     assert FILE_SENDS and FILE_SENDS[0]["files"] == [os.path.realpath(img)], \
         f"burst reply missed its image: {FILE_SENDS}"
@@ -353,7 +360,8 @@ def f2_failed_send_retries_with_image_and_counts_once():
     x = msg(OWNER, DM_CH, "draw a cat")
     assert M.enqueue_message(x, "DM with owner", state, q, dm=True)
     img = make_file(os.path.join(M.GENERATED_DIR, x["id"], "cat.png"))
-    outbox([{"channel_id": DM_CH, "text": "cat!", "reply_to": x["id"]}])
+    outbox([{"channel_id": DM_CH, "text": "cat!", "reply_to": x["id"],
+             "owner_dm_nonce": nonce_of(state, x["id"])}])
     SEND_FILES_FAIL[0] = 1
     M.process_outbox(state)
     assert not FILE_SENDS
@@ -381,7 +389,8 @@ def f2_tampered_retry_attachments_rejected():
     x = msg(OWNER, DM_CH, "draw a cat")
     assert M.enqueue_message(x, "DM with owner", state, q, dm=True)
     make_file(os.path.join(M.GENERATED_DIR, x["id"], "cat.png"))
-    outbox([{"channel_id": DM_CH, "text": "cat!", "reply_to": x["id"]}])
+    outbox([{"channel_id": DM_CH, "text": "cat!", "reply_to": x["id"],
+             "owner_dm_nonce": nonce_of(state, x["id"])}])
     SEND_FILES_FAIL[0] = 1
     M.process_outbox(state)
     ob = read_outbox()
@@ -399,10 +408,16 @@ D_API = []
 D_UPLOADS = []
 
 
+D_CHANNELS = {}   # channel id -> GET /channels/<id> body (default: text)
+
+
 def d_api(method, path, data=None):
     D_API.append((method, path, data))
     if path == "/users/@me":
         return {"id": BOTID}
+    m = re.fullmatch(r"/channels/(\d+)", path)
+    if method == "GET" and m:
+        return D_CHANNELS.get(m[1], {"id": m[1], "type": 0})
     if method == "GET" and "/messages/" in path:
         return {"id": "1", "author": {"id": BOTID}, "attachments": []}
     if method == "GET" and path.endswith("/channels"):
@@ -417,6 +432,12 @@ def d_multipart(path, payload, file_path):
 
 D.api = d_api
 D.api_multipart = d_multipart
+
+
+def d_acts():
+    """The tool's API calls, without guard_channel's channel lookup."""
+    return [c for c in D_API
+            if not (c[0] == "GET" and re.fullmatch(r"/channels/\d+", c[1]))]
 
 
 def d_run(*args):
@@ -488,8 +509,8 @@ def f3_leading_for_accepted_and_ignored():
     for fid in [s["id"], "123456789012345678", live_owner_command(state),
                 "not-an-id"]:
         rc, err = d_run("--for", fid, "post", GEN_CH, "hello")
-        assert rc == 0 and len(D_API) == 1 and \
-            D_API[0][2]["content"] == "hello", (fid, rc, err, D_API)
+        assert rc == 0 and len(d_acts()) == 1 and \
+            d_acts()[0][2]["content"] == "hello", (fid, rc, err, D_API)
     rc, _ = d_run("--for", "123456789012345678")
     assert rc == 2 and not D_API, (rc, D_API)
 
@@ -525,11 +546,11 @@ def f4_pin_uses_current_endpoint():
     state = reset()
     oc = live_owner_command(state)
     rc, _ = d_run("--for", oc, "pin", GEN_CH, "123456789012345678")
-    assert D_API == [("PUT", f"/channels/{GEN_CH}/messages/pins/"
-                      "123456789012345678", None)], D_API
+    assert d_acts() == [("PUT", f"/channels/{GEN_CH}/messages/pins/"
+                         "123456789012345678", None)], D_API
     rc, _ = d_run("--for", oc, "unpin", GEN_CH, "123456789012345678")
-    assert D_API == [("DELETE", f"/channels/{GEN_CH}/messages/pins/"
-                      "123456789012345678", None)], D_API
+    assert d_acts() == [("DELETE", f"/channels/{GEN_CH}/messages/pins/"
+                         "123456789012345678", None)], D_API
 
 
 @test

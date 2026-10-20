@@ -201,6 +201,9 @@ def build_reply(item, a_id=None):
            "author": item.get("author")}
     if item.get("kind") != "welcome":
         out["reply_to"] = last  # system join messages cannot be replied to
+    if item.get("owner_dm_nonce"):
+        # An owner-DM-only wake's payload: every item for the DM echoes it.
+        out["owner_dm_nonce"] = item["owner_dm_nonce"]
     delay = SLOW_SECS if "slow" in flags else 0.0
     if "silent" in flags:
         out["silent"] = True
@@ -222,7 +225,7 @@ def build_reply(item, a_id=None):
         # The nonce comes in an owner-DM-only wake's payload; this
         # worker reads the queue file, which never has it, so its
         # actions only ever test the monitor's refusals.
-        out["settings"] = {"v": 1, "nonce": item.get("settings_nonce")
+        out["settings"] = {"v": 1, "nonce": item.get("owner_dm_nonce")
                            or NO_NONCE, "changes": settings_changes(item)}
     return out, delay
 

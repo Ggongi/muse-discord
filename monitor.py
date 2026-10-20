@@ -41,6 +41,7 @@ config.example.yaml for the schema; an old-layout file still works.
 import contextlib
 import fcntl
 import hashlib
+import hmac
 import importlib.util
 import ipaddress
 import json
@@ -2784,12 +2785,15 @@ def nl_journal(put=None, drop=None):
         return data
 
 
-def nl_mint_nonce(state, mid):
-    """A capability for one owner-DM queue item (see settings_nl): 128
-    random bits, kept in state and the hook's private file, never in
-    reply_queue.json."""
+def nl_mint_nonce(state, mid, channel_id=None):
+    """A capability for one owner-DM queue item (see owner_dm_gate and
+    settings_nl): 128 random bits, kept in state and the hook's private
+    file, never in reply_queue.json. channel_id: the DM's channel, so
+    the gate knows it even after item_meta has moved on."""
     n = state.setdefault("nl_nonces", {})
     n[str(mid)] = {"nonce": secrets.token_hex(16), "at": time.time()}
+    if channel_id:
+        n[str(mid)]["channel_id"] = str(channel_id)
     for old in list(n)[:-300]:
         del n[old]
     nl_write_nonces(state)
@@ -2812,6 +2816,193 @@ def nl_write_nonces(state):
         _NL_NONCES_WRITTEN["body"] = body
     except OSError as e:
         print(f"Could not write owner_dm_nonces.json: {e}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Owner DMs are bound to their wake. Any wake can be started by anyone's
+# message, so a worker may be reading a stranger's prompt injection. The
+# owner-DM nonce (above) is handed only to a wake that holds nothing but
+# owner DMs (hooks/mention-watch.sh), so it proves that the outbox item
+# was written in such a run. Every outbox item that answers an owner's
+# DM, settles it (silent, reactions, a reply under one of its
+# fragments) or posts in an owner's DM channel must carry that item's
+# nonce as owner_dm_nonce (a settings action's settings.nonce counts
+# too). Without it the item is refused before anything else looks at
+# it: set aside in reply_outbox.rejected.json, logged, and the queue
+# item stays open for the owner-DM-only wake that really holds it.
+# Other items are untouched.
+# ---------------------------------------------------------------------------
+OWNER_DM_NONCE_FIELD = "owner_dm_nonce"
+OWNER_DM_UPKEEP_SECS = 15
+_OWNER_DM_UPKEEP = {"next": 0.0}
+
+
+def _meta_owner_dm(meta):
+    """item_meta says this item is an owner's own DM (an older record
+    without the owner_dm flag: judged from its fields, failing closed)."""
+    if not isinstance(meta, dict):
+        return False
+    if "owner_dm" in meta:
+        return bool(meta["owner_dm"])
+    return bool(meta.get("dm")) \
+        and str(meta.get("author_id")) in OWNER_USER_IDS
+
+
+def is_owner_dm_item(state, mid):
+    """True when queue item mid (a trigger's message id) is an owner's
+    DM: the monitor minted it a nonce, or its record says so."""
+    if not mid:
+        return False
+    mid = str(mid)
+    if mid in (state.get("nl_nonces") or {}):
+        return True
+    return _meta_owner_dm((state.get("item_meta") or {}).get(mid))
+
+
+def owner_dm_channels(state):
+    """The owners' DM channels: resolved ones, and those of owner-DM
+    items the monitor recorded."""
+    out = {c for c, u in DM_CHANNEL_USER.items() if u in OWNER_USER_IDS}
+    for meta in (state.get("item_meta") or {}).values():
+        if _meta_owner_dm(meta) and meta.get("channel_id"):
+            out.add(str(meta["channel_id"]))
+    for e in (state.get("nl_nonces") or {}).values():
+        if isinstance(e, dict) and e.get("channel_id"):
+            out.add(str(e["channel_id"]))
+    return out
+
+
+def _owner_dm_channel_of(state, qid):
+    meta = (state.get("item_meta") or {}).get(qid) or {}
+    e = (state.get("nl_nonces") or {}).get(qid) or {}
+    cid = meta.get("channel_id") or (e.get("channel_id")
+                                     if isinstance(e, dict) else None)
+    return str(cid) if cid else None
+
+
+def item_nonce(item):
+    """The owner-DM nonce an outbox item carries: owner_dm_nonce, else
+    its settings action's nonce. (value, problem)."""
+    top = item.get(OWNER_DM_NONCE_FIELD)
+    s = item.get("settings")
+    sub = s.get("nonce") if isinstance(s, dict) else None
+    if top is not None and not isinstance(top, str):
+        return None, f"{OWNER_DM_NONCE_FIELD} is not a string"
+    if top is not None and sub is not None and top != sub:
+        return None, f"{OWNER_DM_NONCE_FIELD} and settings.nonce differ"
+    got = top if top is not None else sub
+    return (got if isinstance(got, str) else None), None
+
+
+def owner_dm_gate(state, item):
+    """None when this (well-formed) outbox item may go on; else why it is
+    refused. It must carry the nonce when it touches an owner's DM: its
+    item, or its reply_to (or that fragment's trigger), is an owner-DM
+    item, or its channel_id is an owner's DM channel. Then item and
+    reply_to must all name that one owner DM (item exactly; reply_to it
+    or one of its fragments), channel_id must be its channel, and the
+    nonce must match (constant time). Never consumes the nonce: settling
+    the item does (process_outbox), so retries and resends keep it."""
+    aliases = state.get("reply_aliases") or {}
+    named = [str(item[f]) for f in ("item", "reply_to") if item.get(f)]
+    triggers = {aliases.get(m, m) for m in named}
+    owner = {t for t in triggers if is_owner_dm_item(state, t)}
+    cid = str(item.get("channel_id") or "")
+    if not owner:
+        if cid not in owner_dm_channels(state):
+            return None
+        # An item may always answer in its own channel: one queued in
+        # this DM before its author became an owner. (Nobody else's
+        # item lives in an owner's 1:1 DM.)
+        meta = (state.get("item_meta") or {}).get(next(iter(triggers))) \
+            if len(triggers) == 1 else None
+        if meta and str(meta.get("channel_id")) == cid:
+            return None
+        return ("owner DM channel: the item names no owner DM that holds "
+                "a live nonce")
+    if len(owner) != 1 or len(triggers) != 1:
+        return ("owner DM: the item must answer exactly one owner DM, "
+                "named by item and reply_to, in its own channel")
+    qid = owner.pop()
+    if item.get("item") and str(item["item"]) != qid:
+        return "owner DM: item must be the DM's own message_id"
+    if cid != _owner_dm_channel_of(state, qid):
+        return f"owner DM {qid}: wrong channel"
+    got, problem = item_nonce(item)
+    if problem:
+        return f"owner DM {qid}: bad nonce ({problem})"
+    want = ((state.get("nl_nonces") or {}).get(qid) or {}).get("nonce")
+    if not want:
+        return (f"owner DM {qid}: bad nonce (none live: answered "
+                f"already, or not handed out yet)")
+    if not got:
+        return (f"owner DM {qid}: bad nonce (missing: copy the item's "
+                f"{OWNER_DM_NONCE_FIELD} from the wake payload)")
+    if not hmac.compare_digest(str(want).encode(),
+                               got.encode("utf-8", "replace")):
+        return f"owner DM {qid}: bad nonce (wrong)"
+    return None
+
+
+def redact_nonces(item):
+    """A copy of an outbox item for the rejected file and the log, its
+    nonces blanked (a refused item may still carry a live one)."""
+    if not isinstance(item, dict):
+        return item
+    out = dict(item)
+    if OWNER_DM_NONCE_FIELD in out:
+        out[OWNER_DM_NONCE_FIELD] = "(redacted)"
+    if isinstance(out.get("settings"), dict) \
+            and "nonce" in out["settings"]:
+        out["settings"] = dict(out["settings"], nonce="(redacted)")
+    return out
+
+
+def _queued_owner_dm(state, q):
+    """A queue item that is an owner's own DM: from the monitor's record
+    of it, else (state.json lost) from the item the monitor wrote, the
+    same test the wake hook uses to hand it out alone."""
+    mid = str(q.get("message_id") or "")
+    meta = (state.get("item_meta") or {}).get(mid)
+    if meta is not None:
+        return _meta_owner_dm(meta)
+    card = q.get("settings") if isinstance(q.get("settings"), dict) else {}
+    return q.get("kind") == "dm" and card.get("speaker") == "owner" \
+        and str(q.get("author_id")) in OWNER_USER_IDS
+
+
+def owner_dm_upkeep(state, force=False):
+    """Main loop (every OWNER_DM_UPKEEP_SECS): every owner DM still in
+    the queue holds a live nonce. Kept fresh while it is queued (the
+    24-hour prune is for spent ones), and minted again when it is
+    missing (state.json lost, or an item queued before nonces existed),
+    so an owner DM never sits unanswerable: its next owner-DM-only wake
+    carries the new one."""
+    now = time.time()
+    if not force and now < _OWNER_DM_UPKEEP["next"]:
+        return
+    _OWNER_DM_UPKEEP["next"] = now + OWNER_DM_UPKEEP_SECS
+    try:
+        queue = load_queue()
+    except (OSError, ValueError):
+        return
+    n = state.setdefault("nl_nonces", {})
+    for q in queue:
+        if not isinstance(q, dict) or not q.get("message_id") \
+                or not _queued_owner_dm(state, q):
+            continue
+        mid = str(q["message_id"])
+        e = n.get(mid)
+        if isinstance(e, dict) and e.get("nonce"):
+            e["at"] = now
+            if not e.get("channel_id") and q.get("channel_id"):
+                e["channel_id"] = str(q["channel_id"])
+            continue
+        n[mid] = {"nonce": secrets.token_hex(16), "at": now,
+                  "channel_id": str(q.get("channel_id") or "")}
+        print(f"Owner DM {mid} had no nonce; minted one for its next "
+              f"wake.", flush=True)
+    nl_write_nonces(state)
 
 
 def is_forwarded(msg):
@@ -2998,6 +3189,7 @@ def nl_upkeep(state):
     Muse made (silent DMs, with Undo)."""
     ctx = _NlCtx(state)
     nl_note_changes(state)
+    owner_dm_upkeep(state)
     nl_write_nonces(state)
     edits, logs = NL.expire(ctx, state)
     for line in logs:
@@ -5008,19 +5200,23 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     item.update(extra)
     queue.append(item)
     burst_note = f" (+{len(fragments)} fragment(s))" if fragments else ""
+    # An owner's own DM: every outbox item that answers it, settles it
+    # or posts in its channel must carry its nonce (owner_dm_gate).
+    # (The wake hook's test too: settings.speaker "owner" in a DM.)
+    owner_dm = bool(dm and str(author_id) in OWNER_USER_IDS)
     note_item_meta(state, msg["id"], author_id=author_id,
                    channel_id=msg["channel_id"], bot=from_bot, dm=dm,
-                   kind=item["kind"],
+                   kind=item["kind"], owner_dm=owner_dm,
                    # Settings requests: never from a forwarded message;
                    # attachments or a reply to someone else's message
                    # always need the owner's Apply.
                    forwarded=any(is_forwarded(m) for m in [msg] + fragments),
                    has_inputs=bool(media or documents) or bool(
                        reply_ctx and not reply_ctx.get("is_bot")))
-    if dm and str(author_id) in OWNER_USER_IDS and not from_bot:
-        # The settings-request capability for this owner DM (written
-        # for the wake hook before the item reaches the queue file).
-        nl_mint_nonce(state, msg["id"])
+    if owner_dm:
+        # The capability for this owner DM (written for the wake hook
+        # before the item reaches the queue file).
+        nl_mint_nonce(state, msg["id"], msg["channel_id"])
     print(f"Queued {item['kind']}{' (follow-up)' if item['follow_up'] else ''}"
           f" from {msg['author'].get('username')} in "
           f"{cname}{burst_note}: {content[:80]}", flush=True)
@@ -5271,7 +5467,16 @@ def process_outbox(state):
             print(f"Rejected outbox item for {where or '?'}: {problem} "
                   f"(set aside in "
                   f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
-            rejects.append((item, problem))
+            rejects.append((redact_nonces(item), problem))
+            continue
+        # Owner DMs first, before dedup, holds or anything that settles:
+        # only the owner-DM-only wake holding the DM's nonce may touch it.
+        refused = owner_dm_gate(state, item)
+        if refused:
+            print(f"Refused outbox item for {item.get('channel_name') or '?'}"
+                  f": {refused}; the owner DM stays open (set aside in "
+                  f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
+            rejects.append((redact_nonces(item), refused))
             continue
         reply_to = item.get("reply_to")
         qid = _answered_id(state, item)
@@ -5291,7 +5496,8 @@ def process_outbox(state):
             if outcome == "retry":
                 remaining.append(item)
             elif isinstance(outcome, tuple):
-                rejects.append((item, outcome[1]))  # the item stays open
+                # The item stays open.
+                rejects.append((redact_nonces(item), outcome[1]))
             else:
                 typing_clear(typing_keys)
                 settled.append(item)

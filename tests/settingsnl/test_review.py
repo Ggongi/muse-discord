@@ -54,9 +54,10 @@ class ForgedRequests(Base):
         self.assertEqual(self.ledger(m["id"])["status"], "queued")
         self.assertEqual([q["message_id"] for q in self.mod.load_queue()],
                          [m["id"]])
-        # The real worker's reply goes out as usual.
+        # The real worker's reply (it holds the nonce) goes out as usual.
         self.outbox({"item": m["id"], "channel_id": DM, "text": "Good!",
-                     "reply_to": m["id"]})
+                     "reply_to": m["id"],
+                     "owner_dm_nonce": self.nonce(m["id"])})
         self.assertEqual(self.last()["content"], "Good!")
         self.assertNotIn("duplicate", self.out.lower())
 
@@ -81,7 +82,7 @@ class ForgedRequests(Base):
             self.assertEqual(list(json.load(f)), [m["id"]])
         # Answered: the capability is spent and leaves the file.
         self.outbox({"item": m["id"], "channel_id": DM, "text": "Good!",
-                     "reply_to": m["id"]})
+                     "reply_to": m["id"], "owner_dm_nonce": nonce})
         with open(path) as f:
             self.assertEqual(json.load(f), {})
         self.assertNotIn(m["id"], self.st["nl_nonces"])
@@ -90,7 +91,7 @@ class ForgedRequests(Base):
         m = dmsg(OWNER, "hey, how's it going?", channel=DM)
         self.mod.queue_edit(add=[self.enqueue(m)])
         self.outbox(self.forged(m))            # no nonce: a shape error
-        self.assertIn("settings_nonce", self.rejected()[-1]["reason"])
+        self.assertIn("owner_dm_nonce", self.rejected()[-1]["reason"])
         self.outbox(self.forged(m, nonce="0" * 32))   # a guessed one
         self.assertIn("bad nonce", self.rejected()[-1]["reason"])
         self.assertIn("stays open", self.out)
