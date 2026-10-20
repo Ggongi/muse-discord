@@ -905,9 +905,11 @@ class CliNotices(Base):
         self.assertEqual(len(n), 2)   # one DM per owner
         self.assertTrue(n[0]["content"].startswith(
             "Changed by your Muse (muse.ai):"))
-        self.assertIn("Lounge, Reply length: Normal → Brief",
+        self.assertIn("\n1. In Lounge, Reply length: Normal → Brief",
                       n[0]["content"])
-        self.assertIn("DMs, Reply length: Normal → Detailed", n[0]["content"])
+        self.assertIn("\n2. In DMs, Reply length: Normal → Detailed",
+                      n[0]["content"])
+        self.assertNotIn("[1]", n[0]["content"])
         ids = self.custom_ids(n[0])
         self.assertEqual(len(ids), 2)
         self.assertEqual(self.custom_ids(n[1]), ids)
@@ -920,6 +922,18 @@ class CliNotices(Base):
         self.assertEqual(self.click(ids[0])["data"]["content"],
                          self.mod.NL.INACTIVE)
         self.assertNotIn("nl_notices", self.st)
+
+    def test_notice_numbers_groups_and_nests_multi_change_groups(self):
+        one = {"by": "muse.ai", "token": "a", "lines": ["A"]}
+        two = {"by": "muse.ai", "token": "b", "lines": ["B", "C"]}
+        self.assertEqual(self.mod.NL.notice_text([one]),
+                         "Changed by your Muse (muse.ai):\n- A")
+        self.assertEqual(self.mod.NL.notice_text([two]),
+                         "Changed by your Muse (muse.ai):\n- B\n- C")
+        self.assertEqual(
+            self.mod.NL.notice_text([one, two]),
+            "Changed by your Muse (muse.ai):\n1. A\n"
+            "2. 2 changes at once:\n   - B\n   - C")
 
     def test_settings_ui_changes_are_not_notices(self):
         with quiet():
