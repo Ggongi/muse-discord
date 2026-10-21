@@ -36,7 +36,7 @@ jobs:
       group: muse-discord-e2e
       cancel-in-progress: false
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     env:
       E2E_GUILD_ID: ${{ secrets.E2E_GUILD_ID }}
       E2E_SUT_TOKEN: ${{ secrets.E2E_SUT_TOKEN }}

@@ -17,7 +17,7 @@ fragments), unless the item's text (any fragment) carries a directive:
                  (allowed_mentions must stop both pings)
   [[mention_a]]  the reply mentions driver A as <@id> (driver A is the
                  config's first owner; --a-id overrides)
-  [[slow]]       wait 15 s before writing the outbox item
+  [[slow]]       wait 8 s before writing the outbox item
   [[say:<text>]] the reply goes on with " <text>" after `ack <n>` (the
                  never_share scenario plants a listed phrase this way)
   [[settings:<op> <key>=<value> @<place>]]
@@ -52,7 +52,7 @@ import sys
 import time
 
 LONG_CHARS = 3500
-SLOW_SECS = 15.0
+SLOW_SECS = 8.0
 WORKER_ITEMS = "e2e_worker_items.json"
 WORKER_ITEMS_KEEP = 200
 FLAGS = ("silent", "long", "everyone", "mention_a", "slow")

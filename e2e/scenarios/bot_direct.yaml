@@ -16,7 +16,7 @@ steps:
   - send: { as: b, text: "one more thing", label: q2 }
   - wait_for: { sut_messages: 1, timeout: 60 }
 expect:
-  settle: 15
+  settle: 8
   checks:
     - sut_reply_count: { eq: 1 }
     - replies_to: q2

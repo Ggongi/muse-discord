@@ -25,24 +25,21 @@ discovery line, and the gateway line for the requested mode, all in
 log output written since this start. Every message sent after that is
 either delivered by the gateway or read by the next REST poll.
 
-Config layouts. config.test.yaml is the settings layout
-muse_settings.py reads (owners, token_from, everywhere/dms/servers,
-engine); config.legacy.yaml is the old layout (bot, behavior, safety,
-owners.user_ids), used by scenarios that set legacy_config: true to
-prove an old config.yaml still loads. effective_config() writes the
-forced fields in whichever layout the config uses (mixing the two is
-a startup error in the monitor).
+Config. config.test.yaml is in the settings layout muse_settings.py
+reads (owners, token_from, everywhere/dms/servers, engine);
+effective_config() adds the fields the harness always controls.
 
 Overlay. <pkg>/config.discord.yaml is what /settings writes (and what
 a scenario's `settings` step writes, through the PR's own
 muse_settings.py). It is never copied from the tree, and run.py
-deletes it, with a monitor restart, before every scenario, so a live
-change never leaks into the next one.
+deletes it before every scenario (the running monitor reloads; a
+restart only when it does not), so a live change never leaks into the
+next one.
 
 What the SUT never does. config.yaml always turns updates off
-(updates.notify off; old layout: updates.check false), so the monitor
-never DMs the owners (driver A) about a release; the pkg copy also
-leaves out update_check.json and update_request.json.
+(updates.notify off), so the monitor never DMs the owners (driver A)
+about a release; the pkg copy also leaves out update_check.json and
+update_request.json.
 Nothing here runs watchdog.sh or hooks/mention-watch.sh: the harness
 starts and stops monitor.py itself, so the wake hook's restart of a
 dead monitor (watchdog.sh --from-hook) never fights a kill_monitor
@@ -71,9 +68,6 @@ import yaml
 
 E2E_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_TEMPLATE = os.path.join(E2E_DIR, "config.test.yaml")
-LEGACY_TEMPLATE = os.path.join(E2E_DIR, "config.legacy.yaml")
-# Top-level keys only the old config layout has.
-OLD_LAYOUT_KEYS = ("bot", "behavior", "safety")
 LOG_NAME = "monitor.log"
 # The overlay /settings writes (muse_settings.OVERLAY_NAME). Never
 # copied from the tree; the runner deletes it between scenarios.
@@ -162,52 +156,29 @@ def _placeholder(node):
     return None
 
 
-def is_old_layout(cfg):
-    """True for the old config layout (bot:, behavior:, safety:, or
-    owners/persona as blocks), as muse_settings.detect_layout tells
-    them apart."""
-    cfg = cfg or {}
-    return any(k in cfg for k in OLD_LAYOUT_KEYS) \
-        or isinstance(cfg.get("owners"), dict) \
-        or isinstance(cfg.get("persona"), dict)
-
-
 def guild_of(cfg):
-    """The test server id a rendered config names (engine.guild_ids,
-    old layout bot.guild_ids), or None."""
-    cfg = cfg or {}
-    for block in (cfg.get("engine"), cfg.get("bot")):
-        ids = (block or {}).get("guild_ids") if isinstance(block, dict) \
-            else None
-        if ids:
-            return str(ids[0])
-    return None
+    """The test server id a rendered config names (engine.guild_ids),
+    or None."""
+    ids = ((cfg or {}).get("engine") or {}).get("guild_ids")
+    return str(ids[0]) if ids else None
 
 
-def base_config(guild_id, a_id, b_id, template=None, legacy=False):
+def base_config(guild_id, a_id, b_id, template=None):
     """The rendered base test config (token and persona paths are
-    filled in by SUT). legacy=True: the old-layout config.legacy.yaml."""
+    filled in by SUT)."""
     if template is None:
-        template = load_template(LEGACY_TEMPLATE if legacy
-                                 else DEFAULT_TEMPLATE)
+        template = load_template(DEFAULT_TEMPLATE)
     return render_config(template, {"GUILD_ID": guild_id, "A_ID": a_id,
                                     "B_ID": b_id})
 
 
-def scenario_config(base, scenario, a_id, b_id, legacy_base=None,
-                    channel_id=None):
+def scenario_config(base, scenario, a_id, b_id, channel_id=None):
     """The config one scenario runs under: its `config:` overrides
     (placeholders {{GUILD_ID}}, {{A_ID}}, {{B_ID}} and {{CHANNEL_ID}},
     the scenario's own channel, rendered) deep-merged over base, and
     driver B left out of testing.treat_as_human when the scenario sets
-    b_is_bot (unless the overrides set treat_as_human themselves). A
-    scenario with legacy_config: true starts from legacy_base instead
-    (default: the old-layout config.legacy.yaml rendered for base's
-    server)."""
+    b_is_bot (unless the overrides set treat_as_human themselves)."""
     guild_id = guild_of(base)
-    if scenario.get("legacy_config"):
-        base = legacy_base if legacy_base is not None else base_config(
-            guild_id, a_id, b_id, legacy=True)
     over = render_config(scenario.get("config") or {},
                          {"GUILD_ID": guild_id, "A_ID": a_id,
                           "B_ID": b_id, "CHANNEL_ID": channel_id})
@@ -268,23 +239,13 @@ class SUT:
         return path
 
     def effective_config(self, cfg):
-        """cfg plus the fields the harness always controls, in cfg's
-        own layout (see the module docstring)."""
-        if is_old_layout(cfg):
-            forced = {
-                "bot": {"token_file": self.token_file, "token_env": None},
-                "presence": {"enabled": False},
-                "updates": {"check": False},
-                "persona": {"file": self.persona_file},
-            }
-        else:
-            forced = {
-                "token_from": self.token_file,
-                "presence": {"enabled": "off"},
-                "updates": {"notify": "off"},
-                "persona": self.persona_file,
-            }
-        cfg = deep_merge(cfg, forced)
+        """cfg plus the fields the harness always controls."""
+        cfg = deep_merge(cfg, {
+            "token_from": self.token_file,
+            "presence": {"enabled": "off"},
+            "updates": {"notify": "off"},
+            "persona": self.persona_file,
+        })
         cfg.setdefault("engine", {})["rest_poll_seconds"] = \
             REST_POLL_SECONDS
         return cfg

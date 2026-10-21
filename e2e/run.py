@@ -16,12 +16,13 @@ start SUT + worker -> wait ready -> run scenarios one by one -> delete
 channels (unless --keep-channels) -> stop everything -> results.
 
 Before each scenario the monitor is (re)started when its config
-differs or when a config.discord.yaml overlay is present (deleted
-first, so a `settings` step never leaks into the next scenario). The
-transcript is the scenario channel's history merged with every thread
-the scenario started (one list, sorted by id), and records how many
-times the monitor was (re)started while the steps ran
-(monitor_restarts).
+differs; a config.discord.yaml overlay left by a `settings` step is
+deleted first (the running monitor reloads; it is restarted only when
+no reload shows), so a live change never leaks into the next
+scenario. The transcript is the scenario channel's history merged
+with every thread the scenario started (one list, sorted by id), and
+records how many times the monitor was (re)started while the steps
+ran (monitor_restarts).
 
 Exit code: 1 when any scenario failed (or the scenarios do not load),
 else 0. "warn" (tier-2 judge said no while every check passed), "flake"
@@ -65,7 +66,7 @@ TOKEN_ENV = ("E2E_SUT_TOKEN", "E2E_DRIVER_A_TOKEN", "E2E_DRIVER_B_TOKEN",
              "CLAUDE_CODE_OAUTH_TOKEN")
 SUMMARY_MARKER = "<!-- muse-discord-e2e -->"
 READY_TIMEOUT = 180
-POLL_SECS = 3.0           # history polling cadence while waiting
+POLL_SECS = 1.5           # history polling cadence while waiting
 OUTBOX_POLL_SECS = 0.02   # wait_for outbox_processing (spec: <= 50 ms)
 CONVERSE_SETTLE_SECS = 6  # quiet gap that ends a multi-part SUT turn
 STALE_CHANNEL_SECS = 6 * 3600
@@ -106,6 +107,11 @@ DRIVER_PERMISSIONS = {
 
 class Flake(Exception):
     """Infrastructure trouble outside the PR's control."""
+
+
+class MonitorDown(Flake):
+    """The monitor could not be (re)started for a scenario: the rest of
+    the run is a flake too."""
 
 
 def fixture_path(name):
@@ -402,17 +408,29 @@ class Runner:
 
     def ensure_config(self, cfg):
         """(Re)start the monitor under cfg (gateway on) unless it is
-        already running exactly that with no config.discord.yaml. An
-        overlay (a `settings` step's live changes) is deleted while the
-        monitor is stopped, so it never leaks into the next scenario (and
-        the new process has no reload to log). Returns monitor.log's size
-        just before the new start (None when nothing was restarted)."""
+        already running exactly that. A config.discord.yaml (a
+        `settings` step's live changes) never leaks into the next
+        scenario: with the right config running, it is deleted and the
+        monitor reloads (the file is safe to delete: everything then
+        follows config.yaml), with a restart only when no reload shows;
+        otherwise it is deleted while the monitor is stopped. Returns
+        monitor.log's size where the scenario's log starts (None when
+        nothing changed)."""
         overlay = os.path.exists(self.overlay_path())
-        if not overlay and self.sut.alive() and self.sut.gateway \
-                and self.sut.config == self.sut.effective_config(cfg):
+        same = self.sut.alive() and self.sut.gateway \
+            and self.sut.config == self.sut.effective_config(cfg)
+        if same and not overlay:
             return None
-        log("restarting the monitor for this scenario's config"
-            + (" (clearing config.discord.yaml)" if overlay else ""))
+        if same:
+            mark = self.sut.log_size()
+            os.unlink(self.overlay_path())
+            if self._wait_reload(mark, SETTINGS_TIMEOUT,
+                                 "clearing config.discord.yaml"):
+                log("cleared config.discord.yaml (live reload)")
+                return self.sut.log_size()
+            log("no reload after clearing config.discord.yaml: restarting")
+        else:
+            log("restarting the monitor for this scenario's config")
         self.sut.stop()
         try:
             os.unlink(self.overlay_path())
@@ -431,10 +449,12 @@ class Runner:
         cfg = sut.scenario_config(self.base_cfg, sc, self.ids["A"],
                                   self.ids["B"], channel_id=channel_id)
         # The scenario's log starts just before its config (re)start, so
-        # it includes what the config prints at startup (the old-layout
-        # notice) and nothing the previous process wrote; with no
-        # restart, it starts now.
-        log_mark = self.ensure_config(cfg)
+        # it includes what the config prints at startup and nothing the
+        # previous process wrote; with no restart, it starts now.
+        try:
+            log_mark = self.ensure_config(cfg)
+        except sut.SUTError as e:
+            raise MonitorDown(f"monitor could not be (re)started: {e}")
         if log_mark is None and hasattr(self.sut, "log_size"):
             log_mark = self.sut.log_size()
         self.notes = []
@@ -738,13 +758,6 @@ class Runner:
             self.check_alive()
             self.sleep(POLL_SECS)
 
-    def normalize(self):
-        """After a scenario: the monitor running, gateway on, base
-        config, ready for the next one."""
-        cfg = sut.scenario_config(self.base_cfg, {}, self.ids["A"],
-                                  self.ids["B"])
-        self.ensure_config(cfg)
-
 
 # --- run modes ---------------------------------------------------------
 
@@ -778,9 +791,6 @@ def dry_run(args, scenarios):
         names = [next(iter(c)) if isinstance(c, dict) else str(c)
                  for c in expect]
         extra = []
-        if sc.get("legacy_config"):
-            extra.append("old-layout config.yaml (config.legacy.yaml, "
-                         "monitor restart)")
         if sc.get("config"):
             extra.append("config overrides (monitor restart)")
         if sc.get("b_is_bot"):
@@ -907,6 +917,8 @@ def run_one(runner, sc, channel_id, out_dir, use_judge):
     transcript = None
     try:
         transcript = runner.run(sc, channel_id)
+    except MonitorDown:
+        raise  # live_run marks this and every later scenario a flake
     except (Flake, sut.SUTError) as e:
         result.update(status="flake", error=f"infrastructure: {e}")
     except discord_rest.DiscordError as e:
@@ -976,11 +988,6 @@ def live_run(args, scenarios):
             if worker.poll() is not None:
                 raise Flake(f"{args.worker} worker exited (code "
                             f"{worker.returncode})")
-            if i + 1 < len(scenarios):
-                try:
-                    runner.normalize()
-                except sut.SUTError as e:
-                    raise Flake(f"monitor could not be restarted: {e}")
     except (Flake, sut.SUTError, discord_rest.DiscordError) as e:
         log(f"infrastructure trouble: {e}")
         done = {r["scenario"] for r in results}

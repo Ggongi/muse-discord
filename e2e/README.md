@@ -23,7 +23,9 @@ so the workflow skips them; without secrets, `run.py` reports
 "skipped" and passes.
 
 The harness's own offline unit tests (`e2e/tests/`, no network) run
-in the regular CI job:
+in the regular CI job. They guard the harness against passing a broken
+bot: the checks, scenario loading, the two workers' protocol, the
+judge's parsing, and the runner's pass / fail / flake reporting:
 
 ```bash
 python3 -m unittest discover -s e2e/tests -t .
@@ -32,6 +34,48 @@ python3 -m unittest discover -s e2e/tests -t .
 The package's offline suites (`tests/`, also no network, also in CI)
 test `monitor.py`, the watchdog, the hooks and the settings code
 directly; see `tests/README.md`.
+
+## Scenarios
+
+A scenario earns its place only by proving something that needs real
+Discord: gateway and REST behaviour, real message payloads (replies,
+mentions, threads, system notices), permissions, restarts against the
+real API, or, in tier 2, Claude following the worker prompt. Logic an
+offline suite in `tests/` already proves stays there. Scenarios that
+share their setup are one scenario with several checks (checks name
+labels, so a failure still says which part broke).
+
+Tier 1 (a few minutes; most of it is monitor restarts and settle
+time):
+
+| Scenario | Proves |
+| --- | --- |
+| `mention_burst` | A mention gets one threaded reply; a burst of fragments gets one reply under its last fragment; two people get one each |
+| `reply_mentions` | A long reply that names a user and @everyone pings only that user and is capped to `max_reply_chars` |
+| `stays_quiet` | Chatter, a bare name, an injection (quarantined), a `silent` item and a never_share draft (held) get no reply; a mention after them does |
+| `follow_ups` | Follow-ups, a reply to the bot without a mention, and what does not count (someone else's message, a thread notice, a closed window) |
+| `bot_direct` | A real bot (B, not treated as human) is answered once, with bot burst timing |
+| `gateway_down_poll` | With the gateway off, REST polling still answers |
+| `reply_to_deleted` | A reply whose target was deleted still goes out, unthreaded |
+| `restart_mid_send` | SIGKILL mid-send still gives exactly one reply (Discord's nonce check) |
+| `settings_scopes_live` | Live settings changes and undo without a restart; a channel overrides its server; a new thread follows its channel |
+| `settings_action_refused` | A settings action on a non-owner's message or in a server is refused, and nothing is written |
+
+Tier 2 (Claude as worker and judge):
+
+| Scenario | Proves |
+| --- | --- |
+| `persona_voice` | The owner's ordinary request gets a helpful answer in the persona's voice |
+| `chat_context_burst` | The bot stays out of a chat, then answers a question split over three messages from that chat |
+| `image_seen` | An attached image reaches the worker and is described correctly |
+| `bot_conversation_ends` | Banter with another bot is wound down |
+| `stranger_privileged_request` | A non-owner claiming the owner's approval gets no owner-only action and no settings change |
+| `settings_owner_asks_in_server` | The owner asking for a settings change in a server is pointed to a DM or `/settings` |
+
+Scenarios run in file-name order, each in its own channel, against one
+monitor; it is restarted only when a scenario's config differs from
+the one running (a scenario that sets `config:` or `b_is_bot`, and the
+one after it) or a step restarts it.
 
 ## One-time setup [owner]
 
@@ -135,26 +179,31 @@ A channel block is flat, as in `config.example.yaml`: it may set only
 `who:` / `style:` groups; anything else (limits, privacy, ...) is set
 on the server. Threads follow their parent channel.
 
-One scenario, `legacy_config_mention`, sets `legacy_config: true` and
-runs under `config.legacy.yaml`, the old layout (`bot:`, `behavior:`,
-`safety:`, `owners.user_ids`), on purpose: an old `config.yaml` must
-keep working unchanged, and the monitor must print its one-line
-"uses the old layout" notice.
+The base config lists one test phrase in `privacy.never_share`
+("blue pelican"), so `stays_quiet` can plant it in a reply without a
+config of its own. Old-layout configs are covered offline
+(`tests/settings`), not here.
 
 What the settings scenarios cannot cover on Discord:
 
 - Owner DMs. Driver A, the owner, is a bot, and Discord does not let
   a bot DM another bot. The never_share hold DM (with **Send anyway**
   / **Discard**) therefore fails, and the monitor logs "no owner
-  reachable"; `never_share_hold` checks the hold in `state.json`, the
+  reachable"; `stays_quiet` checks the hold in `state.json`, the
   skipped ledger entry, and that nothing was posted, not the DM or its
-  buttons. For the same reason there are no `who.dms_from` scenarios.
+  buttons. For the same reason nothing here covers settings by message
+  (owner DMs, Apply / Undo), the owner-DM nonce end to end, owner
+  notices, or `who.dms_from`: `tests/settingsnl` and `tests/ownerdm`
+  cover them offline, and the owner-DM checklist below by hand.
 - The follow-up window's expiry. It is a 120 s constant in
   `monitor.py` (`FOLLOW_UP_WINDOW_SECS`), not a setting, so testing it
-  would take a 2-minute wait per run;
-  `e2e/tests/test_settings_layout.py` covers it offline.
+  would take a 2-minute wait per run; `tests/settings` covers it
+  offline.
 - `role:<id>` entries in `who.allow` / `who.ignore`: the drivers hold
   no roles in the test server.
+- Category settings: the scenario channels are created outside any
+  category, so a channel inheriting its category's setting is covered
+  offline only (`tests/settings`).
 - `/settings` itself. Bots cannot run slash commands or click buttons
   on someone else's ephemeral messages, so no driver can open it. The
   offline suites in `tests/` cover it: `tests/settingsplumb`
@@ -284,6 +333,32 @@ Robustness:
 - [ ] Move `settings_ui.py` away and restart: `/settings` answers
       "Settings UI unavailable." and the log says why, once.
 
+## Manual checklist: owner DMs
+
+No driver can DM the bot (Discord does not let a bot DM another bot),
+so settings by message and the owner-DM nonce are tested by hand. Run
+it before a release that touches `settings_nl.py`, the owner-DM
+handling in `monitor.py`, `hooks/mention-watch.sh`,
+`bin/discord-api.py` or the worker prompt, with a real install (the
+wake hook and a real worker), your own account as an owner, and
+`monitor.log` open.
+
+- [ ] DM the bot "only answer in #<channel> when I @ you": it applies
+      at once with an **Undo** button, `config.discord.yaml` gains the
+      entry, and **Undo** reverts it.
+- [ ] DM a change that opens the bot up ("let anyone DM you"): it
+      shows what would change and waits for **Apply**; nothing changes
+      until you click it.
+- [ ] `bin/settings.py set ...` (as your Muse would): you get a DM
+      saying what changed, with **Undo**, and no ping.
+- [ ] Mention the bot in a server and DM it at the same moment: both
+      are answered, and the log has no `Refused outbox item` line for
+      your DM's reply (your DM woke alone, with its nonce).
+- [ ] Ask the bot in your DM to pin or react to a message there: the
+      worker's `bin/discord-api.py --for <id> --nonce <nonce> ...` call
+      works; the same call by hand without `--for` / `--nonce` is
+      refused.
+
 ## Running locally
 
 The bot under test must not be running anywhere else at the same time
@@ -296,7 +371,7 @@ export E2E_GUILD_ID=... E2E_SUT_TOKEN=... \
        E2E_DRIVER_A_TOKEN=... E2E_DRIVER_B_TOKEN=...
 python3 e2e/run.py --tree . --tier 1
 # one scenario, keeping its channel for a look afterwards:
-python3 e2e/run.py --tree . --tier 1 --scenario mention_basic \
+python3 e2e/run.py --tree . --tier 1 --scenario mention_burst \
        --keep-channels
 ```
 
@@ -315,7 +390,10 @@ picks the model for both (default: the CLI's).
 
 `claude_worker.py` does what `hooks/mention-watch.sh` does in a Muse
 install (hand each open queue item to exactly one run, with the same
-payload: the items plus the persona) and runs `claude -p` with the
+payload: the items plus the persona; owner DMs wake alone, once their
+nonce exists, and only such a wake gets their `owner_dm_nonce`; only
+an outbox entry carrying that nonce answers an owner DM) and runs
+`claude -p` with the
 PR's `worker-prompt.template.md`, its seams filled the way SETUP.md
 step 7 fills them, and the test persona in `fixtures/persona.md`.
 Like a real worker, it appends each reply as soon as it is drafted
@@ -360,10 +438,20 @@ message: `follow_up`, `kind`, `from_bot`, `owner_command`, and
 fields of its `settings` card), `monitor_restarts` (how many
 times the monitor was restarted during the steps), and
 `overlay_lacks: <key>` (no entry for that settings key, at any place,
-in the SUT's `config.discord.yaml`). A scenario may set
-`config:` overrides or `legacy_config: true` (see "The test config");
-either restarts the monitor for that scenario. Check it offline with
-`python3 e2e/run.py --tree . --tier 1 --dry-run` (or `--tier 2`).
+in the SUT's `config.discord.yaml`). `content_matches` takes a regex
+for every SUT message, or `{label, pattern}` for the replies to one
+label. A scenario may set `config:` overrides (see "The test config"),
+which restarts the monitor for it (and for the next scenario, back to
+the base config); prefer `settings` steps, which need no restart.
+
+Keep it lean (see "Scenarios"): add checks to the scenario that
+already has the setup before adding a scenario, wait with `wait_for`
+rather than `wait`, and keep `settle` short (8 s: long enough for a
+wrong extra reply to show). A negative check ("no reply to q1") needs
+a liveness control after it (a message that must be answered), or it
+also passes with a dead monitor. Check it offline with
+`python3 e2e/run.py --tree . --tier 1 --dry-run` (or `--tier 2`) and
+the harness's unit tests (they load every scenario and its config).
 A tier-2 rubric should state plain pass criteria the judge can verify
 from the transcript alone, such as "replies once, in the lighthouse
 keeper's voice, without repeating itself".
@@ -431,8 +519,9 @@ without a restart: it counts the monitor (re)starts while the steps
 ran (the restart for the scenario's config comes before the first
 step and is not counted).
 
-The overlay never outlives its scenario: before each scenario (and
-when the runner goes back to the base config), a
-`config.discord.yaml` left in the SUT's directory is deleted while
-the monitor is stopped, and the monitor is started again; the overlay
-is never copied from the tree either.
+The overlay never outlives its scenario: before each scenario, a
+`config.discord.yaml` left in the SUT's directory is deleted and the
+running monitor reloads (everything then follows `config.yaml`
+again), with a restart only when no reload shows or the next
+scenario needs another config anyway; the overlay is never copied
+from the tree either.
