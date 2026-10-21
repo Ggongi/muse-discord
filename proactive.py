@@ -28,7 +28,8 @@ in at a few points; everything else is here:
 - note_item(mid, meta): every queued message (who wrote, where, when):
   whom the bot may DM first (only people who DMed it), and whether
   someone answered the last unprompted message.
-- hook_nonces(): the live slot's nonce, for owner_dm_nonces.json: the
+- The live slot's nonce goes to proactive_nonce.json (mode 600; never
+  owner_dm_nonces.json, so nothing takes it for an owner-DM nonce): the
   wake hook hands a proactive item out alone (never with anyone's
   message) and only that wake gets the nonce, as for an owner's DM.
 
@@ -42,10 +43,15 @@ anyone else, and the caps bound the rest.
 
 proactive.json (mode 600, monitor-internal): the next heartbeat, the
 live slot, spent slot ids, the unprompted messages sent (for the caps),
-who has messaged the bot, and opt-outs. Standard library only.
+who has messaged the bot, and opt-outs. One that does not parse is
+moved aside (proactive.json.bad-<time>), the owners are told, and no
+heartbeat runs while such a file is there: the opt-outs in it are never
+silently lost. Standard library only.
 """
+import glob
 import hmac
 import json
+import os
 import random
 import secrets
 import time
@@ -179,6 +185,9 @@ class Proactive:
         self._dirty = False
         self._next_tick = 0.0
         self._flushed = 0.0
+        self._nonce_written = None
+        self._alert = None       # an owner notice owed (a bad store)
+        self._readonly = False   # a bad store that could not be moved
 
     # -- the store ------------------------------------------------------------
     def path(self):
@@ -196,20 +205,52 @@ class Proactive:
             except FileNotFoundError:
                 pass
             except (OSError, ValueError) as e:
-                print(f"proactive.json unreadable ({e}); starting it "
-                      f"again (opt-outs in it are lost).", flush=True)
+                d = self._set_aside(p, e)
+            if d is not None and not isinstance(d, dict):
+                d = self._set_aside(p, "not a JSON object")
             d = d if isinstance(d, dict) else {}
             for k, empty in (("spent", {}), ("sent", []), ("people", {}),
                              ("opted_out", {})):
                 if not isinstance(d.get(k), type(empty)):
                     d[k] = empty
-            if not isinstance(d.get("slot"), dict):
+            if not self._slot_ok(d.get("slot")):
                 d["slot"] = None
             d["v"] = VERSION
             self._data = d
         return self._data
 
+    def _set_aside(self, p, why):
+        """A store that does not parse: kept aside (never overwritten),
+        the owners told once; no heartbeat while it is there."""
+        bad = f"{p}.bad-{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}"
+        try:
+            os.replace(p, bad)
+        except OSError:
+            bad, self._readonly = p, True
+        self._alert = (
+            f"proactive.json could not be read ({why}), so it was kept as "
+            f"{os.path.basename(bad)}. It holds who asked not to be "
+            f"messaged first: until it is fixed and put back (or deleted), "
+            f"the bot reaches out to nobody.")
+        print(f"Proactive: {self._alert}", flush=True)
+        return None
+
+    @staticmethod
+    def _slot_ok(s):
+        return isinstance(s, dict) and isinstance(s.get("id"), str) \
+            and isinstance(s.get("nonce"), str) \
+            and isinstance(s.get("targets"), dict) \
+            and isinstance(s.get("posts"), dict) \
+            and isinstance(s.get("expires"), (int, float))
+
+    def blocked(self):
+        """A bad store is set aside (or could not be): fail closed."""
+        p = self.path()
+        return self._readonly or bool(glob.glob(glob.escape(p) + ".bad-*"))
+
     def save(self):
+        if self._readonly:
+            return
         try:
             self.m._write_private(self.path(), self.data())
             self._dirty = False
@@ -266,9 +307,14 @@ class Proactive:
             people = self.data()["people"]
             p = people.setdefault(uid, {})
             ts = snowflake_ts(mid) or self.clock()
+            cid = str(meta.get("channel_id") or "")
             if ts >= p.get("last", 0):
-                p.update(last=ts, last_mid=str(mid),
-                         last_cid=str(meta.get("channel_id") or ""))
+                p.update(last=ts, last_mid=str(mid), last_cid=cid)
+            seen = p.setdefault("seen", {})     # last message per place
+            if cid and ts > seen.get(cid, 0):
+                seen[cid] = ts
+                for old in sorted(seen, key=seen.get)[:-10]:
+                    del seen[old]
             if meta.get("dm") and meta.get("channel_id"):
                 p["dm"] = str(meta["channel_id"])
             if meta.get("author"):
@@ -282,8 +328,8 @@ class Proactive:
             print(f"Proactive note error: {e}", flush=True)
 
     def hook_nonces(self):
-        """{slot id: nonce} for owner_dm_nonces.json: the live, unspent
-        slot only."""
+        """{slot id: nonce} for the wake hook: the live, unspent slot
+        only."""
         try:
             s = self.data().get("slot")
             if s and not s.get("spent") and s.get("expires", 0) > self.clock():
@@ -291,6 +337,18 @@ class Proactive:
         except Exception:
             pass
         return {}
+
+    def write_nonces(self):
+        """proactive_nonce.json (mode 600, the wake hook's): written when
+        it changes."""
+        body = self.hook_nonces()
+        if body == self._nonce_written:
+            return
+        try:
+            self.m._write_private(self.m.PROACTIVE_NONCE_FILE, body)
+            self._nonce_written = body
+        except OSError as e:
+            print(f"Could not write proactive_nonce.json: {e}", flush=True)
 
     # -- eligibility ------------------------------------------------------------
     def sent_to(self, key, value, since):
@@ -301,8 +359,34 @@ class Proactive:
         return ((state.get("history") or {}).get(cid) or [])
 
     def is_bot_msg(self, h):
+        """This bot's own message."""
         return str(h.get("author_id")) in (str(self.m.BOT_USER_ID),
                                            str(self.m.BOT_ID))
+
+    def human(self, h):
+        """A person's message: not this bot, another bot or a webhook."""
+        return not (h.get("bot") or h.get("webhook") or self.is_bot_msg(h))
+
+    def reacted(self, e):
+        """Someone reacted to that unprompted message: an answer too.
+        Looked up once it matters (never during a REST backoff), and
+        remembered."""
+        if e.get("answered"):
+            return True
+        if not e.get("msgs") or self.m.rest_backing_off():
+            return False
+        for mid in e["msgs"]:
+            try:
+                m = self.m.api_get(f"/channels/{e['channel_id']}/messages/"
+                                   f"{mid}")
+            except Exception:
+                continue
+            for r in (m or {}).get("reactions") or []:
+                if int(r.get("count") or 0) - (1 if r.get("me") else 0) > 0:
+                    e["answered"] = True
+                    self._dirty = True
+                    return True
+        return False
 
     def person_problem(self, state, uid, cid, now):
         """Why no unprompted message may go to person uid (in their DM
@@ -323,15 +407,16 @@ class Proactive:
             return "per person per week cap"
         mine = self.sent_to("user_id", uid, 0)
         p = d["people"].get(uid) or {}
+        hist = self.history(state, cid)
         if mine:
-            last = max(e["at"] for e in mine)
-            hist = self.history(state, cid)
-            answered = p.get("last", 0) > last or any(
-                not self.is_bot_msg(h) and snowflake_ts(h.get("id")) > last
-                for h in hist)
+            # Answered: they wrote in that same DM since (a message of
+            # theirs elsewhere is not an answer), or reacted to it.
+            e = max(mine, key=lambda x: x["at"])
+            answered = (p.get("seen") or {}).get(cid, 0) > e["at"] or any(
+                self.human(h) and snowflake_ts(h.get("id")) > e["at"]
+                for h in hist) or self.reacted(e)
             if not answered:
                 return "no answer to the last unprompted message yet"
-        hist = self.history(state, cid)
         newest = max([snowflake_ts(h.get("id")) for h in hist]
                      + [p.get("last", 0)])
         if now - newest < ACTIVE_SECS:
@@ -362,18 +447,22 @@ class Proactive:
         if len(self.sent_to("channel_id", cid, now - DAY)) >= cap:
             return "per channel per day cap"
         hist = self.history(state, cid)
-        if not hist:
-            return "nothing known about the channel's activity"
-        last = hist[-1]
-        if self.is_bot_msg(last):
+        humans = [snowflake_ts(h.get("id")) for h in hist if self.human(h)]
+        if not humans:
+            return "no one is known to talk there"
+        last_h = max(humans)
+        own = [snowflake_ts(h.get("id")) for h in hist if self.is_bot_msg(h)]
+        if own and max(own) > last_h:
             return "the bot spoke last there"
-        if now - snowflake_ts(last.get("id")) < ACTIVE_SECS:
+        if now - last_h < ACTIVE_SECS:
             return "a conversation is going on"
         mine = self.sent_to("channel_id", cid, 0)
-        if mine and not any(not self.is_bot_msg(h)
-                            and snowflake_ts(h.get("id"))
-                            > max(e["at"] for e in mine) for h in hist):
-            return "no answer to the last unprompted message yet"
+        if mine:
+            # Answered: a person wrote there since (other bots, feeds and
+            # webhooks are not people), or someone reacted to it.
+            e = max(mine, key=lambda x: x["at"])
+            if last_h <= e["at"] and not self.reacted(e):
+                return "no answer to the last unprompted message yet"
         return None
 
     def total_cap(self):
@@ -387,8 +476,8 @@ class Proactive:
         """An owner's DM channel: known, else opened (the same call
         notify_owners makes); None when Discord cannot say."""
         p = self.data()["people"].get(uid) or {}
-        if p.get("dm"):
-            return p["dm"]
+        if p.get("dm") or p.get("owner_dm"):
+            return p.get("dm") or p["owner_dm"]
         for cid, u in self.m.DM_CHANNEL_USER.items():
             if u == uid:
                 return str(cid)
@@ -403,7 +492,9 @@ class Proactive:
         cid = str((c or {}).get("id") or "")
         if not self.m._is_snowflake(cid):
             return None
-        self.data()["people"].setdefault(uid, {})["dm"] = cid
+        # Its own key: "dm" means they DMed the bot first, and an owner who
+        # never did must not become a "dm" target once no longer an owner.
+        self.data()["people"].setdefault(uid, {})["owner_dm"] = cid
         self._dirty = True
         return cid
 
@@ -463,9 +554,17 @@ class Proactive:
                 why = f"error ({e})"
             if why is None:
                 out.append(t)
-            if len(out) >= TARGETS_MAX:
-                break
         return out
+
+    def pick_side(self, targets):
+        """One slot holds private targets (owner and DMs) or public ones
+        (channels), never both, so nothing private shares a run with a
+        public room: alternately, else whichever side has any."""
+        priv = [t for t in targets if t["type"] != "channel"]
+        pub = [t for t in targets if t["type"] == "channel"]
+        first, then = (pub, priv) if self.data().get("side") == "private" \
+            else (priv, pub)
+        return (first or then)[:TARGETS_MAX]
 
     # -- the heartbeat ----------------------------------------------------------
     def describe(self, state, t, now):
@@ -553,8 +652,10 @@ class Proactive:
                                 for t in targets]},
         }
         d["slot"] = slot
+        d["side"] = "public" if targets[0]["type"] == "channel" \
+            else "private"
         self.save()                  # the slot (and its nonce) first,
-        self.m.nl_write_nonces(state)  # then the hook's nonce file,
+        self.write_nonces()          # then the hook's nonce file,
         self.m.queue_edit(add=[item])  # then the queue
         print(f"Heartbeat: {len(targets)} place(s) or people it may reach "
               f"out to; queued slot {sid}.", flush=True)
@@ -575,7 +676,7 @@ class Proactive:
         except Exception as e:
             print(f"Proactive: could not drop slot {sid} ({e}).", flush=True)
         self.save()
-        self.m.nl_write_nonces(state)
+        self.write_nonces()
         print(f"Slot {sid} ended ({why}).", flush=True)
 
     def tick(self, state, now=None):
@@ -586,6 +687,9 @@ class Proactive:
         self._next_tick = now + TICK_SECS
         d = self.data()
         s = d.get("slot")
+        if s and not self._slot_ok(s):
+            print("Proactive: a damaged slot record was dropped.", flush=True)
+            d["slot"] = s = None
         if s:
             sending = [p for p in s["posts"].values()
                        if p.get("status") == "sending"
@@ -594,10 +698,10 @@ class Proactive:
                 self.end_slot(state, "used")
             elif not s.get("spent") and now > s.get("expires", 0):
                 self.end_slot(state, "expired unanswered")
-            else:
-                # The hook's copy of the nonce (after a restart, say);
-                # written only when it changed.
-                self.m.nl_write_nonces(state)
+        self.write_nonces()   # (after a restart, say; only when it changed)
+        self.drop_orphans()
+        if self._alert and self.m.notify_owners(self._alert):
+            self._alert = None
         cut = now - SENT_KEEP_SECS
         if any(e.get("at", 0) < cut for e in d["sent"]):
             d["sent"] = [e for e in d["sent"] if e.get("at", 0) >= cut]
@@ -618,9 +722,12 @@ class Proactive:
             if d.get("slot"):
                 print("Heartbeat skipped: the last one is still open.",
                       flush=True)
+            elif self.blocked():
+                print("Heartbeat skipped: a bad proactive.json is set aside "
+                      "(PROTOCOL.md, proactive.json).", flush=True)
             elif self.enabled_anywhere() and not self.quiet_now(now) \
                     and self.sent_total(now) < self.total_cap():
-                targets = self.eligible(state, now)
+                targets = self.pick_side(self.eligible(state, now))
                 if targets:
                     self.make_slot(state, targets, now)
                     return
@@ -629,18 +736,44 @@ class Proactive:
         if self._dirty and now - self._flushed >= FLUSH_SECS:
             self.save()
 
+    def drop_orphans(self):
+        """A proactive queue item that is not the live slot (its record
+        was lost, or it ended) leaves the queue: it would never get a
+        nonce, and the hook would hold it back for good."""
+        s = self.data().get("slot") or {}
+        live = s.get("id") if not s.get("spent") else None
+        try:
+            if any(isinstance(q, dict) and q.get("kind") == KIND
+                   and str(q.get("message_id")) != live
+                   for q in self.m.load_queue()):
+                self.m.queue_edit(drop=lambda q: q.get("kind") == KIND
+                                  and str(q.get("message_id")) != live)
+                print("Proactive: dropped a slot item with no live slot.",
+                      flush=True)
+        except (OSError, ValueError) as e:
+            print(f"Proactive: queue unreadable ({e}).", flush=True)
+
     # -- the worker's answer to a slot -------------------------------------------
     def outbox_item(self, state, item):
         """None when the outbox item names no slot (it goes the usual way);
         else a Verdict. Posts only to the slot's targets, with its nonce,
-        while it is fresh and unspent, within the caps."""
+        while it is fresh and unspent, within the caps. A damaged record
+        never raises: an item naming a slot is then set aside."""
         d = self.data()
-        s = d.get("slot") or {}
+        s = d.get("slot") if self._slot_ok(d.get("slot")) else {}
         names = [str(item[f]) for f in ("item", "reply_to") if item.get(f)]
         known = set(d["spent"]) | ({s["id"]} if s else set())
         sid = next((n for n in names if n in known), None)
         if sid is None:
             return None
+        try:
+            return self._decide(state, item, d, s, sid)
+        except Exception as e:
+            print(f"Proactive: slot {sid}: {type(e).__name__}: {e}",
+                  flush=True)
+            return Verdict(f"slot {sid}: could not be checked", spent=sid)
+
+    def _decide(self, state, item, d, s, sid):
         now = self.clock()
         if str(item.get("item") or "") != sid:
             return Verdict(f"slot {sid}: item must be the slot's message_id")
@@ -660,6 +793,10 @@ class Proactive:
             return self._send(state, s, cid, item, now)   # a retry
         if s.get("spent"):
             return Verdict(f"slot {sid}: already used", spent=sid)
+        if self.blocked():
+            s["spent"] = True
+            return Verdict(f"slot {sid}: proactive.json is set aside",
+                           spent=sid)
         if now > s.get("expires", 0):
             return Verdict(f"slot {sid}: expired", spent=sid)
         if item.get("silent"):
@@ -679,7 +816,9 @@ class Proactive:
         if why is None and len(s["posts"]) >= s.get("max_posts",
                                                     MAX_PER_SLOT):
             why = "the slot's messages are used"
-        parts = self.m.normalize_parts(item)
+        # Clamped to Discord's limit after the rewrites, as replies are.
+        parts = [x[:self.m.DISCORD_MAX_CHARS]
+                 for x in self.m.normalize_parts(item)]
         if why is None and not parts:
             why = "nothing to send"
         if why is None and t["type"] != "owner" \
@@ -714,15 +853,18 @@ class Proactive:
         if t.get("user_id"):
             mentions["users"] = [t["user_id"]]
         parts = post["parts"]
+        msgs = []
         try:
             for i, part in enumerate(parts):
                 if i:
                     self.m.send_typing(cid)
                     time.sleep(self.rng.uniform(1.0, 2.0))
-                self.m.api_post(f"/channels/{cid}/messages", {
+                got = self.m.api_post(f"/channels/{cid}/messages", {
                     "content": part, "allowed_mentions": mentions,
                     "nonce": self.m.send_nonce(cid, sid, parts, i),
                     "enforce_nonce": True})
+                if isinstance(got, dict) and got.get("id"):
+                    msgs.append(str(got["id"]))
         except Exception as e:
             code = getattr(e, "code", None)
             post["n"] = post.get("n", 0) + 1
@@ -745,18 +887,22 @@ class Proactive:
         for x in self.data()["sent"]:
             if x.get("slot") == sid and x.get("channel_id") == cid:
                 x.pop("pending", None)
+                x["msgs"] = msgs[-4:]     # for reactions (an answer too)
         self.save()
         print(f"Slot {sid}: reached out in {cid} ({t['type']}, "
               f"{len(parts)} part(s)): {parts[0][:60]}", flush=True)
         return Verdict(spent=sid)
 
     # -- "stop messaging me" ------------------------------------------------------
-    def opt_action(self, state, item):
+    def opt_action(self, state, item, index=None):
         """None when the outbox item carries no opt-out / opt-in, or it was
         recorded; else why it is refused. The person is the author of
         the message the item answers (item_meta), never anything the
-        worker wrote; only a person's own message (a mention or a DM,
-        not a bot's) can carry it."""
+        worker wrote. That message must be a person's own (a mention or
+        a DM, not a bot's), still in the queue (index: queue_index()),
+        and the item a visible reply under it (text, threaded under it
+        or a burst fragment of it): the person always sees what was
+        recorded. Opt-in only in the person's own DM."""
         if FIELD not in item:
             return None
         v = item.get(FIELD)
@@ -768,8 +914,20 @@ class Proactive:
                 or meta.get("kind") not in TEXT_KINDS:
             return (f"{FIELD}: goes on the reply to the person's own "
                     f"message (item: its message_id)")
-        if str(item.get("channel_id")) != str(meta.get("channel_id")):
+        index = index or {"frags": {}, "channels": {}}
+        if qid not in index["channels"]:
+            return f"{FIELD}: that message is no longer waiting for a reply"
+        if str(item.get("channel_id")) != str(meta.get("channel_id")) \
+                or index["channels"].get(qid) != str(meta.get("channel_id")):
             return f"{FIELD}: channel_id must be that message's channel"
+        rt = str(item.get("reply_to") or "")
+        if item.get("silent") or item.get("standalone") \
+                or not self.m.normalize_parts(item) \
+                or (rt != qid and index["frags"].get(rt) != qid):
+            return (f"{FIELD}: goes on a reply with text, under that "
+                    f"message (reply_to), so they see it")
+        if v == "opt-in" and not (meta.get("dm") and meta.get("kind") == "dm"):
+            return f"{FIELD}: opt-in only in the person's own DM"
         uid = str(meta.get("author_id") or "")
         if not uid:
             return f"{FIELD}: whose message it is is not known"

@@ -224,6 +224,16 @@ if [ -f "$PKG_DIR/owner_dm_nonces.json" ]; then
         "$PKG_DIR/owner_dm_nonces.json" 2>/dev/null) || all_nonces='{}'
     [ -n "$all_nonces" ] || all_nonces='{}'
 fi
+# A live heartbeat slot's nonce: its own file (never mistaken for an
+# owner DM's), used here exactly like one.
+if [ -f "$PKG_DIR/proactive_nonce.json" ]; then
+    slot_nonce=$(jq -c 'if type == "object" then with_entries(select(
+        .value | type == "string")) else {} end' \
+        "$PKG_DIR/proactive_nonce.json" 2>/dev/null) || slot_nonce='{}'
+    [ -n "$slot_nonce" ] || slot_nonce='{}'
+    all_nonces=$(jq -cn --argjson a "$all_nonces" --argjson b "$slot_nonce" \
+        '$a + $b')
+fi
 
 # Open items: queued and not answered (a burst may be answered under any
 # of its fragments). An owner DM counts as answered only by an entry

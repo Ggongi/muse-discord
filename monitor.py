@@ -191,6 +191,8 @@ TM = _import_telemetry()
 # "Unprompted messages"). Off by default; when proactive.py cannot be
 # loaded the bot only replies.
 PROACTIVE_FILE = os.path.join(BASE_DIR, "proactive.json")
+# The live heartbeat slot's nonce, for the wake hook only (mode 600).
+PROACTIVE_NONCE_FILE = os.path.join(BASE_DIR, "proactive_nonce.json")
 
 
 class _NoProactive:
@@ -3026,7 +3028,6 @@ def nl_write_nonces(state):
               > NL.MAX_AGE]:
         del n[k]
     body = {k: v["nonce"] for k, v in n.items()}
-    body.update(PRO.hook_nonces() or {})  # a live heartbeat slot's
     if body == _NL_NONCES_WRITTEN["body"]:
         return
     try:
@@ -4993,6 +4994,8 @@ def record_history(state, channel_id, messages):
         # The name people see (server nickname or global display name),
         # when it differs from the username: what someone typing "@Name"
         # by hand is most likely to use.
+        if m.get("webhook_id"):
+            entry["webhook"] = True   # not a person (proactive.py)
         display = ((m.get("member") or {}).get("nick")
                    or author.get("global_name"))
         if display and display != entry["author"]:
@@ -5847,7 +5850,11 @@ def process_outbox(state):
             continue
         # An unprompted message (proactive.py): bound to its heartbeat
         # slot's targets, nonce and caps, and sent there; never below.
-        pro = PRO.outbox_item(state, item)
+        try:
+            pro = PRO.outbox_item(state, item)
+        except Exception as e:   # never blocks the replies
+            print(f"Proactive outbox error: {e}", flush=True)
+            pro = None
         if pro is not None:
             if pro.reject:
                 print(f"Refused outbox item: {pro.reject} (set aside in "
@@ -5881,7 +5888,10 @@ def process_outbox(state):
             continue
         # "Stop messaging me": recorded for the author of the message
         # this item answers (proactive.py); the reply goes out as usual.
-        bad = PRO.opt_action(state, item)
+        try:
+            bad = PRO.opt_action(state, item, index)
+        except Exception as e:   # not recorded: the item stays open
+            bad = f"proactive: could not record it ({e})"
         if bad:
             print(f"Rejected outbox item for {item.get('channel_name') or '?'}"
                   f": {bad} (set aside in "

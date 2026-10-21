@@ -182,6 +182,8 @@ def open_items(pkg, answered=None):
     queue = read_json(os.path.join(pkg, "reply_queue.json"), [])
     nonces = read_json(os.path.join(pkg, OWNER_DM_NONCES), {})
     nonces = nonces if isinstance(nonces, dict) else {}
+    pro = read_json(os.path.join(pkg, "proactive_nonce.json"), {})
+    nonces.update(pro if isinstance(pro, dict) else {})   # a live slot's
     out = []
     for item in queue if isinstance(queue, list) else []:
         if not isinstance(item, dict) or item.get("message_id") is None:

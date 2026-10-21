@@ -30,6 +30,9 @@ update_check.json
 update_request.json
 directory.json
 owner_dm_nonces.json
+proactive.json
+proactive.json.bad-*
+proactive_nonce.json
 nl_journal.json
 telemetry.json
 telemetry_id
