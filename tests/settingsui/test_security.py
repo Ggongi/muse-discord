@@ -78,7 +78,10 @@ class AdminForgery(Base):
                     f"{P}pg:s{G3}:h", f"{P}pg:x:h", f"{P}pg:d:h",
                     f"{P}val:x:r:off", f"{P}val:d:r:off",
                     f"{P}val:c{G1}.71999999999999999999:r:off",
-                    f"{P}un:s{G3}", f"{P}un:x"):
+                    # an Undo without its group skips the stale check
+                    # (review E #3): the admins' newest change stays
+                    f"{P}un:s{G1}", f"{P}un:s{G1}:",
+                    f"{P}un:s{G3}:g1", f"{P}un:x:g1"):
             self.assertAdminRefused(self.admin(cid))
         # their own server's panel from another server: refused too
         self.assertAdminRefused(self.admin(f"{P}pg:s{G1}:h", guild=G2))
@@ -93,10 +96,12 @@ class AdminForgery(Base):
         self.assertAdminRefused(self.admin(f"{P}fx:s{G1}:ig:-{BOB}"))
         # The admin's Undo never reaches an owner's change
         owner_apply(self.ctx, [MS.Change(S1, "privacy.memory", "nothing")])
-        self.admin(f"{P}un:s{G1}")         # their own: spam1
+        theirs = H.undo_id(self.ctx, S1, admin_gid=G1)
+        self.admin(theirs)                 # their own: spam1
         self.assertEqual(self.ctx.value("who.ignore", S1), [BOB])
         self.assertEqual(self.ctx.value("privacy.memory", S1), "nothing")
-        self.admin(f"{P}un:s{G1}")         # nothing of theirs left
+        self.assertIsNone(H.undo_id(self.ctx, S1, admin_gid=G1))
+        self.admin(theirs)                 # nothing of theirs left
         self.assertEqual(self.ctx.value("privacy.memory", S1), "nothing")
 
     def test_owner_only_verbs(self):
@@ -137,7 +142,7 @@ class AdminForgery(Base):
         self.admin(f"{P}val:s{G1}:r:off")
         self.admin(f"{P}ppl:s{G1}:ig", [KAI],
                    resolved=H.resolved_for(7, [KAI]))
-        self.admin(f"{P}un:s{G1}")
+        self.admin(H.undo_id(self.ctx, S1, admin_gid=G1))
         self.assertEqual([n[:2] for n in self.ctx.notified],
                          [(G1, ADMIN)] * 3)
         # admin entries are recorded as an admin's
@@ -189,6 +194,7 @@ class Ids(Base):
                "mdset:y:d:df:anyone", "mdset:1:pg:x:b",
                # the previous design's ids, from messages already posted
                "mdset:2:pg:x:b", f"mdset:2:set:s{G1}:r",
+               f"{P}un:s{G1}", f"{P}un:s{G1}:",    # no group (review E #3)
                f"mdset:2:val:s{G1}:r:off:b", "mdset:2:pz:x",
                f"mdset:2:un:s{G1}", f"mdset:2:pre:s{G1}",
                # malformed ones in the current grammar

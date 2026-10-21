@@ -117,7 +117,8 @@ token_from: env:MUSE_TEST_TOKEN
 
 
 HOSTILE_MD = ("**b** __u__ @everyone @here <@&55500000000000000001> "
-              "[x](https://evil.example) ||s|| `c` # h ")
+              "[x](https://evil.example) ||s|| `c` # h https://e.x/a "
+              "\u202e ")
 
 
 def go_hostile():
@@ -177,7 +178,23 @@ OUTCOMES = [
     _outcome(16, 30, "not-allowed", author=SAM, channel=THREAD,
              parent=MUSECHAT),
     _outcome(17, 10, "not-allowed", author=KAI, guild=G3, channel=ART),
+    # The same cause twice (one fix each would be a duplicate custom_id).
+    _outcome(18, 6, "not-allowed", author=SPAM),
+    _outcome(19, 190, "replies-off", channel=GENERAL, author=SAM),
+    _outcome(20, 365, "bots-ignore", author=OTHERBOT),
 ]
+
+
+def undo_id(ctx, place, admin_gid=None):
+    """The Undo custom_id a page renders for place now (with its group),
+    or None when there is nothing to undo."""
+    _t, gid = MS.undo_preview(ctx.reload(), place,
+                              include_children=place.kind == "server",
+                              admin_gid=admin_gid)
+    tok = {"defaults": "x", "dms": "d"}.get(place.kind) or (
+        f"s{place.guild_id}" if place.kind == "server"
+        else f"c{place.guild_id}.{place.channel_id}")
+    return f"{P}un:{tok}:{gid}" if gid else None
 
 
 def install_determinism():
