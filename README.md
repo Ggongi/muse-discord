@@ -7,20 +7,23 @@ replies in a personality you shape, and sees the images and files people share.
 
 ## 🚀 Getting started
 
-**You need:** a Muse and a Discord server where you can add bots.
+**You need:** a Muse, a computer, and a Discord server you own or manage (no
+server yet? click **+** in Discord's server list). About 10 minutes.
 
-Send your Muse this message:
+1. Send your Muse this message:
 
-```
-Set up muse-discord for me by following SETUP.md in https://github.com/cszach/muse-discord
-```
+   ```
+   Set up muse-discord for me by following SETUP.md in https://github.com/cszach/muse-discord
+   ```
 
-Your Muse walks you through creating the Discord app, stores the token,
-interviews you about the bot's personality, and tests the result. Your part is a
-few clicks in Discord and answering its questions.
+2. Make the bot's Discord app, named after your Muse. Your Muse tells you
+   exactly what to click.
+3. Press **Reset Token**, **Copy**, and paste it to your Muse in chat.
+4. Click the invite link your Muse gives you and pick your server.
+5. Mention the bot once in a channel. It answers within seconds. 🎉
 
-To check it, mention the bot in any channel it can post in. It should reply
-within seconds. 🎉
+That's all: no IDs, settings files or terminals. The bot is your Muse itself;
+to shape how it talks, DM it in plain words.
 
 ## 🔄 Updating
 

@@ -1753,6 +1753,13 @@ def _join_summary(gid, ginfo, channels):
         shown += f", and {len(visible) - 40} more"
     st = settings()
     res = st.resolve(MS.Scope.server(gid, name))
+    if owners_absent(gid):
+        return (f"I was added to **{name}** (server ID {gid}), where none "
+                f"of you is a member, so I answer nobody there.\n"
+                f"Channels I can see ({len(visible)}): {shown or 'none'}\n"
+                f"If you want me to talk there, press **Configure** and "
+                f"choose When it answers. To remove me, a server admin "
+                f"there can kick me.")
     replies = {"off": "I stay quiet there",
                "when-addressed": "I answer @mentions and replies to my "
                                  "messages there",
@@ -1772,6 +1779,79 @@ def _join_summary(gid, ginfo, channels):
             f"Channels I can see ({len(visible)}): {shown or 'none'}\n"
             f"To change what I do there, press "
             f"**Configure** (or use /settings), or {how}.")
+
+
+# Servers none of the owners is in (2026-10-21). A public bot can be
+# added to any server by anyone with its install link, and there it would
+# answer strangers on the owner's Muse. So in a server where no owner is a
+# member it answers nobody until an owner chooses When it answers for that
+# server itself (Configure on the join DM, /settings, a DM, config.yaml).
+# Membership is checked when the bot joins a server (it counts as
+# ownerless until the check says otherwise), then hourly while no owner
+# is there. Servers the bot was in before (the first run's, or from
+# before this check existed) are not checked: the owner set the bot up
+# there. An owner's own message in a server settles it at once.
+# state["owner_in_guild"]: {gid: [an owner is a member?, checked at]}
+OWNER_IN_GUILD = {}
+OWNER_RECHECK_SECS = 3600
+OWNER_CHECKS_PER_PASS = 5
+
+
+def owner_member(gid):
+    """Whether any owner is in the server; None when Discord could not
+    say (checked again later)."""
+    for uid in sorted(OWNER_USER_IDS):
+        try:
+            api_get(f"/guilds/{gid}/members/{uid}")
+            return True
+        except Exception as e:
+            if getattr(e, "code", None) in (403, 404):
+                continue  # not a member
+            return None
+    return False
+
+
+def check_owner_presence(state, guilds, joined=()):
+    """Refresh OWNER_IN_GUILD (and its copy in state): servers just
+    joined start ownerless and are checked, then rechecked while
+    ownerless, a few per pass."""
+    seen = state.setdefault("owner_in_guild", {})
+    now = time.time()
+    for gid in list(seen):
+        if not isinstance(seen[gid], list) or len(seen[gid]) != 2:
+            del seen[gid]
+    for gid, present in OWNER_IN_GUILD.items():
+        if present and gid in seen and not seen[gid][0]:
+            seen[gid] = [True, now]  # an owner spoke there
+    for gid in joined:
+        seen.setdefault(gid, [False, 0])
+    if OWNER_USER_IDS and not rest_backing_off():
+        n = 0
+        for gid in sorted(seen):
+            cur = seen[gid]
+            if cur[0] or now - cur[1] < OWNER_RECHECK_SECS \
+                    or gid not in guilds:
+                continue
+            if n >= OWNER_CHECKS_PER_PASS:
+                break
+            n += 1
+            res = owner_member(gid)
+            if res is not None:
+                seen[gid] = [res, now]
+                if not res:
+                    print(f"No owner is in server {gid}: answering nobody "
+                          f"there until an owner chooses When it answers "
+                          f"for it.", flush=True)
+    OWNER_IN_GUILD.clear()
+    OWNER_IN_GUILD.update({g: bool(v[0]) for g, v in seen.items()})
+
+
+def owners_absent(gid):
+    """True when no owner is in this server (as last checked) and no
+    owner chose When it answers for it: then it answers nobody there."""
+    if not gid or not OWNER_USER_IDS or OWNER_IN_GUILD.get(gid) is not False:
+        return False
+    return not settings().owner_sets_server(gid, "who.replies")
 
 
 def configure_button(gid):
@@ -1804,6 +1884,8 @@ def sync_guilds(state, guilds, channels):
                   flush=True)
             if gid not in notices:
                 notices.append(gid)
+    check_owner_presence(state, guilds,
+                         [g for g in notices if g in guilds])
     flush_join_notices(state, guilds, channels)
     try:
         warn_stale_labels()
@@ -1861,8 +1943,13 @@ def on_guild_event(state, ev):
         known = state.get("known_guilds")
         if known is not None and gid not in known:
             _FORCE_DISCOVERY = True
+            # A join: ownerless until the owner check (sync_guilds).
+            state.setdefault("owner_in_guild", {}).setdefault(gid, [False, 0])
+            OWNER_IN_GUILD.setdefault(gid, False)
     else:
         name = state.get("known_guilds", {}).pop(gid, None)
+        state.get("owner_in_guild", {}).pop(gid, None)
+        OWNER_IN_GUILD.pop(gid, None)
         state.get("guild_joined", {}).pop(gid, None)
         state.get("guild_first_seen", {}).pop(gid, None)
         print(f"Removed from server {name or gid}.", flush=True)
@@ -3524,8 +3611,14 @@ def trigger_verdict(msg, guild_id=None, state=None):
     here = settings().resolve(scope_for(gid, msg.get("channel_id")))
     replies = here["who.replies"]
     direct = addresses_bot(msg)
+    owner = str(author.get("id") or "") in OWNER_USER_IDS
+    if owner and gid and OWNER_IN_GUILD.get(gid) is False:
+        OWNER_IN_GUILD[gid] = True  # an owner wrote there: a member
     if replies == "off":
         return None, "who.replies is off here" if direct else None
+    if not owner and owners_absent(gid):
+        return None, ("who.replies is off here: none of the owners is in "
+                      "this server" if direct else None)
     if is_bot_author(author) and here["who.bots"] == "ignore":
         return None, "who.bots: ignore" if direct else None
     if not direct and not (state is not None

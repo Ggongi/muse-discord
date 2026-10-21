@@ -58,6 +58,14 @@
 
 set -u
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The package's own Python: bin/install.sh makes .venv when pip cannot
+# install into the system Python. Every python3 below (and the monitor
+# and presence it starts) then has the packages.
+PIP_FLAGS=(--break-system-packages)
+if [ -x "$DIR/.venv/bin/python3" ]; then
+  PATH="$DIR/.venv/bin:$PATH"
+  PIP_FLAGS=()
+fi
 LOG="$DIR/watchdog.log"
 STATE="$DIR/watchdog_state.json"
 CONFIG="$DIR/config.yaml"
@@ -254,14 +262,14 @@ TOKEN_BAD=0
 WEBSOCKETS_OK=1
 if ! python3 -c "import websockets" 2>/dev/null; then
   log "websockets missing; reinstalling"
-  if ! pip install --break-system-packages -q websockets >>"$LOG" 2>&1; then
+  if ! python3 -m pip install ${PIP_FLAGS[@]+"${PIP_FLAGS[@]}"} -q websockets >>"$LOG" 2>&1; then
     log "websockets reinstall failed"
     WEBSOCKETS_OK=0
   fi
 fi
 if ! python3 -c "import yaml" 2>/dev/null; then
   log "PyYAML missing; reinstalling"
-  pip install --break-system-packages -q pyyaml >>"$LOG" 2>&1 || \
+  python3 -m pip install ${PIP_FLAGS[@]+"${PIP_FLAGS[@]}"} -q pyyaml >>"$LOG" 2>&1 || \
     log "PyYAML reinstall failed (monitor cannot load config without it)"
 fi
 
@@ -280,7 +288,7 @@ if alive "[m]onitor.py"; then
     echo "OK monitor alive"
     GW_OFF="$(grep -o -m1 'GATEWAY DISABLED ([^)]*)' "$DIR/monitor.log" 2>/dev/null)"
     if [ -n "$GW_OFF" ]; then
-      DEGRADED_SIG="monitor degraded: $GW_OFF in monitor.log; realtime ingest is off, so replies wait for the REST poll. See SETUP.md Troubleshooting, then restart the monitor."
+      DEGRADED_SIG="monitor degraded: $GW_OFF in monitor.log; realtime ingest is off, so replies wait for the REST poll. See TROUBLESHOOTING.md, then restart the monitor."
     fi
   fi
 fi

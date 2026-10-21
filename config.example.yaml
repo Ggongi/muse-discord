@@ -1,8 +1,9 @@
 # muse-discord settings.
 #
-# Copy this file to config.yaml. Setup fills in the first three
-# settings; everything else already has a careful default, so change
-# only what you want different. Saved edits apply without a restart.
+# Setup (bin/connect-discord.py) copies this file to config.yaml with
+# your Discord user id filled in; everything else already has a careful
+# default, so change only what you want different. Saved edits apply
+# without a restart.
 #
 #   Check your edits:          python3 bin/settings.py validate
 #   What does the bot do here: python3 bin/settings.py show --explain
@@ -74,9 +75,9 @@ everywhere:
     per_person_per_day: none
                           # replies per day to any one person. Owners are
                           # never limited.
-  media:                  # images and video, if your Muse can make
-                          # them; off by default
-    enabled: off
+  media:                  # images and video, when your Muse can make
+                          # them: on by default, for owners only
+    enabled: on
     who: owners           # owners, everyone, or a list like allow
     per_day: none         # generated replies per day: a number, or none
 

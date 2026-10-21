@@ -5,6 +5,12 @@ config.discord.yaml
 config.discord.yaml.lock
 config.yaml.bak-*
 
+# Made by setup: the rendered worker prompt, the virtual environment
+# bin/install.sh falls back to, and the hooks' "it ran" stamps
+worker-prompt.md
+.venv/
+.seen-*
+
 # Runtime state and queues (created by the monitor)
 state.json
 reply_queue.json

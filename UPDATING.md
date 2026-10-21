@@ -7,17 +7,23 @@ say-so.
 
 Commands run from `<package dir>`. Never print the bot token.
 
+An update never repeats SETUP.md: `config.yaml`, `persona.md` and the
+token stay exactly as they are, and the owner is not asked to do
+anything in Discord. Run `bin/connect-discord.py` again only when the
+token was rejected (TROUBLESHOOTING.md).
+
 ## What belongs to the owner
 
 Updates never need to overwrite these, so never discard them:
 
 - `config.yaml` (untracked), its backups, `config.discord.yaml`
   (settings changed through the bot, if any), and the token file.
-- `persona.md`: tracked as a placeholder, rewritten during setup.
-  Upstream never changes it, so it never conflicts.
+- `persona.md`: tracked as the default persona; setup writes the
+  Muse's name into it, and the owner may have rewritten it. When a
+  release changes the default, step 2 keeps theirs.
 - Custom plugins: their own folders under `plugins/` (untracked).
-- The installed worker prompt, which lives in the agent runtime, not
-  in this repo.
+- `worker-prompt.md` (rendered from the template, untracked) and the
+  hooks registered in the agent runtime.
 - Runtime state: `state.json`, `mention_ledger.json`, the queue and
   outbox, logs.
 
@@ -66,6 +72,17 @@ Otherwise read the CHANGELOG diff and note every **Action needed**
 item; they are handled in step 4.
 
 ## Step 2: Decide which path
+
+First, `persona.md`. If `git status` lists it and the release changes
+the default (`git diff --quiet HEAD "$TAG" -- persona.md` fails), set
+the owner's copy aside so the merge can't touch it, and put it back
+after step 3:
+
+```bash
+cp persona.md persona.md.mine && git checkout HEAD -- persona.md
+# ... step 3a or 3b ...
+mv persona.md.mine persona.md
+```
 
 - **Clean**: `git status` lists nothing (or only `persona.md`) and
   there are no local commits. Go to 3a.
@@ -132,7 +149,8 @@ only releases, and skips any release HEAD already contains.
 ## Step 4: Bring the rest of the install along
 
 - **Dependencies**: if `git diff "$OLD" HEAD -- requirements.txt`
-  shows changes, run `pip install -r requirements.txt`.
+  shows changes, run `bash bin/install.sh` (or, from a release without
+  it, `pip install -r requirements.txt`).
 - **Config**: `git diff "$OLD" HEAD -- config.example.yaml` shows new
   settings. Every new setting has a safe default in the code, so an
   older `config.yaml` keeps working. Mention each new setting to the
@@ -144,20 +162,29 @@ only releases, and skips any release HEAD already contains.
   below.
 - **Action needed** items from the CHANGELOG: walk through each one
   with the owner and do the ones they agree to.
-- **Worker prompt**: `git diff "$OLD" HEAD --
-  worker-prompt.template.md` shows prompt changes. Apply them to the
-  installed prompt in the agent runtime, keeping what the owner put
-  inside the seams (persona, generation policy, judgment tweaks).
+- **Worker prompt**: render it again, with the same `--media` as
+  before (what this runtime can generate): `python3
+  bin/render-worker-prompt.py --media <none|images|video|images,video>`.
+  Once, on an install whose wake hook still carries the whole prompt
+  inline (from before the renderer), replace that wake prompt with the
+  short one in SETUP.md step 5's table, which points at
+  `worker-prompt.md`; from then on, re-rendering is enough. If the
+  owner had asked for changes inside a seam, apply them to
+  `worker-prompt.md` again after rendering.
 - **Wake hook**: if `hooks/mention-watch.sh` changed and the runtime
   registered a copy rather than the file itself, update the copy.
+- **Watchdog hook**: if the runtime has no hook for
+  `hooks/watchdog-hook.sh` yet, register it as SETUP.md step 5's table
+  says (every 10 minutes, main chat), and remove the old scheduler
+  entry for `watchdog.sh` if it had one.
 - **Settings guide**: if the release has `SETTINGS.md` and your memory
   has no note about it yet, save one: "To change muse-discord's
   settings, read `<package dir>/SETTINGS.md` first and follow it."
   Then follow that file whenever the owner asks you to change how the
   bot behaves.
 - **Update hook**: if the runtime has no hook for
-  `hooks/update-watch.sh` yet, register it as SETUP.md step 10
-  describes (main chat, ~60 s poll, its wake prompt). From then on
+  `hooks/update-watch.sh` yet, register it as SETUP.md step 5's table
+  says (main chat, every 60 s, its wake prompt). From then on
   the owner can start an update from the bot's update DM. If the
   script changed and the runtime registered a copy, update the copy.
 
@@ -197,11 +224,9 @@ converting is optional, and never done without the owner.
 4. If the owner wants to undo it, copy the backup back over
    `config.yaml`; the old layout still works.
 
-Reinstall the worker prompt for this release, not only the seams'
-diff: the new SETTINGS section is how the Muse learns each place's
-reply length, house rules, and how much of the owner's memory it may
-use. Apply `worker-prompt.template.md` from the release to the
-installed prompt, keeping what the owner put inside the seams.
+Render the worker prompt for this release (step 4, "Worker prompt"):
+the new SETTINGS section is how the Muse learns each place's reply
+length, house rules, and how much of the owner's memory it may use.
 
 ## Step 5: Restart
 
@@ -216,8 +241,9 @@ bash watchdog.sh
 
 ## Step 6: Check, then report
 
-1. Run smoke test 1 from SETUP.md (owner @mentions the bot; expect a
-   reply).
+1. Run `python3 bin/doctor.py --no-dm` and fix what it reports (or,
+   from a release without it, have the owner @mention the bot and
+   expect a reply).
 2. Tell the owner, briefly: the version now running (`$TAG`;
    `git describe --tags` shows it, plus any local commits on top),
    what changed in a few sentences, which Action needed items were
@@ -232,7 +258,10 @@ If the new version misbehaves and the owner wants to roll back:
 
 ## For maintainers
 
-- Never edit `persona.md` upstream: it is the owner's file.
+- `persona.md` is the owner's file. Change its shipped default only
+  for a good reason, keep the line `Your name is the name your owner
+  knows you by.` (bin/connect-discord.py fills it in), and say so in
+  the CHANGELOG; step 2 keeps installs' own copies.
 - Every user-visible change gets a CHANGELOG entry, with an **Action
   needed** list whenever an existing install must do something.
 - Installs are offered releases: semver tags `vX.Y.Z` (pre-release

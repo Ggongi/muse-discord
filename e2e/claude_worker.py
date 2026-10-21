@@ -11,8 +11,8 @@ with `claude -p` as the agent:
     python3 e2e/claude_worker.py --pkg <pkg_dir> [--log FILE]
 
 Runs until SIGTERM. Each wake renders the PR's own
-worker-prompt.template.md with its seams filled the way SETUP.md step 7
-fills them (persona from the wake payload, no media tools, default
+worker-prompt.template.md with bin/render-worker-prompt.py, as SETUP.md
+step 5 does (persona from the wake payload, no media tools, default
 judgment), appends the same payload the wake hook builds (the items
 plus the persona text), and runs the CLI in the package dir with a
 hard timeout. Every wake's duration, exit code, and how it ended go to
@@ -47,6 +47,7 @@ a fake script; $E2E_CLAUDE_MODEL picks a model (default: the CLI's).
 Auth comes from the environment (CLAUDE_CODE_OAUTH_TOKEN in CI).
 """
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -80,14 +81,25 @@ PAYLOAD_FIELDS = (
 # bin/discord-api.py may resolve it through token_from (env:NAME).
 SCRUB_ENV = ("E2E_DRIVER_A_TOKEN", "E2E_DRIVER_B_TOKEN")
 
-# Seam fills for the test install (SETUP.md step 7).
-PERSONA_SEAM = """\
-Use the persona text from the wake payload (`persona`, step 1 above);
-the wake hook reads it fresh on every wake."""
-GENERATION_LIMITS = """\
-- Know and state your limits honestly: this runtime has NO media
-  generation tools. You cannot produce images, video, or audio, so
-  never generate and never claim to; if asked, say so briefly."""
+# The installed prompt is rendered by the same code a Muse install uses
+# (bin/render-worker-prompt.py, SETUP.md step 5): persona from the wake
+# payload, no media tools, default judgment. The package's own copy
+# when it has one (the PR's code), else this checkout's.
+RENDERER = "render-worker-prompt.py"
+_RENDERERS = {}
+
+
+def renderer(pkg):
+    path = os.path.join(pkg, "bin", RENDERER)
+    if not os.path.exists(path):
+        path = os.path.join(os.path.dirname(HERE), "bin", RENDERER)
+    if path not in _RENDERERS:
+        spec = importlib.util.spec_from_file_location(
+            "render_worker_prompt", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _RENDERERS[path] = mod
+    return _RENDERERS[path]
 
 
 def claude_bin():
@@ -224,37 +236,14 @@ def build_payload(items, persona, nonces=None):
 
 
 # ---------------------------------------------------------------------------
-# The prompt (worker-prompt.template.md, installed as SETUP.md step 7 does)
+# The prompt (worker-prompt.template.md, rendered as SETUP.md step 5 does)
 # ---------------------------------------------------------------------------
 
-def fill_seam(text, name, body):
-    """Replace the body of `=== SEAM: name ===` (markers kept). Returns
-    (text, found)."""
-    pat = re.compile(r"(=== SEAM: %s ===\n).*?(\n=== END SEAM: %s ===)"
-                     % (re.escape(name), re.escape(name)), re.S)
-    new, n = pat.subn(lambda m: m.group(1) + body + m.group(2), text,
-                      count=1)
-    return new, n == 1
-
-
 def render_prompt(template, pkg):
-    """The installed worker prompt for package dir `pkg`, plus a list of
-    warnings for seams the template no longer has (the PR may have
-    changed it; the prompt is then used as it is)."""
-    warnings = []
-    # The part above the first `---` line is the installer's notes.
-    m = re.search(r"^---[ \t]*$", template, re.M)
-    text = template[m.end():].lstrip("\n") if m else template
-    text, ok = fill_seam(text, "PERSONA", PERSONA_SEAM)
-    if not ok:
-        warnings.append("PERSONA seam not found")
-    text, n = re.subn(r"- Know and state your limits honestly:.*?"
-                      r"(?=\n- |\n=== END SEAM)", GENERATION_LIMITS, text,
-                      count=1, flags=re.S)
-    if not n:
-        warnings.append("GENERATION POLICY limits bullet not found")
-    text = text.replace("<package dir>", pkg)
-    return text, warnings
+    """The installed worker prompt for package dir `pkg` (no media
+    tools), plus warnings for seams the template no longer has (the PR
+    may have changed it; the prompt is then used as it is)."""
+    return renderer(pkg).render(template, pkg, media="none")
 
 
 def run_ending(result):

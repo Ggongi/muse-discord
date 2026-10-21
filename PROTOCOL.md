@@ -555,7 +555,7 @@ application id comes from the gateway's READY (else `GET
 | `default_member_permissions` | `null`   | visible to every member; see below         |
 
 The `bot` invite scope includes `applications.commands`, so the
-invite URL in SETUP.md step 2 needs no other scope.
+invite URL `bin/connect-discord.py` prints needs no other scope.
 
 Who may use it (checked on every interaction, never trusted from a
 custom id):

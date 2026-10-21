@@ -15,13 +15,15 @@
 #
 # Like hooks/mention-watch.sh, this targets Muse's hook runtime (it
 # sources $HATCH_HOOK_RUNTIME for the silent/wake/log/hook_state
-# helpers). Register it with the wake prompt in SETUP.md (step 10),
+# helpers). Register it with the wake prompt in SETUP.md (step 5),
 # delivered to the owner's main chat.
 set -euo pipefail
 # shellcheck source=/dev/null
 source "$HATCH_HOOK_RUNTIME"
 
 PKG_DIR="${MUSE_DISCORD_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# Proof for bin/doctor.py that this hook runs (never fails the hook).
+touch "$PKG_DIR/.seen-update-watch" 2>/dev/null || true
 REQUEST="$PKG_DIR/update_request.json"
 LEASE_SECS=21600
 
