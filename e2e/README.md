@@ -92,9 +92,9 @@ one after it) or a step restarts it.
 3. **Invite them to the test server** (replace `<APP_ID>` with each
    application's ID):
    - `muse-test`, with the same permissions as a real install
-     (SETUP.md step 2: View Channel, Send Messages, Send Messages in
-     Threads, Read Message History, Attach Files, Embed Links, Add
-     Reactions, Pin Messages):
+     (the invite `bin/connect-discord.py` prints: View Channel, Send
+     Messages, Send Messages in Threads, Read Message History, Attach
+     Files, Embed Links, Add Reactions, Pin Messages):
      `https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=2252074691710016`
      (this already includes Send Messages in Threads, so it can answer
      in the threads the scenarios start)
@@ -404,8 +404,9 @@ payload: the items plus the persona; owner DMs wake alone, once their
 nonce exists, and only such a wake gets their `owner_dm_nonce`; only
 an outbox entry carrying that nonce answers an owner DM) and runs
 `claude -p` with the
-PR's `worker-prompt.template.md`, its seams filled the way SETUP.md
-step 7 fills them, and the test persona in `fixtures/persona.md`.
+PR's `worker-prompt.template.md`, rendered by
+`bin/render-worker-prompt.py` as SETUP.md step 5 does (no media
+tools), and the test persona in `fixtures/persona.md`.
 Like a real worker, it appends each reply as soon as it is drafted
 (one `bin/outbox-append.py` call per item) and ends the run with the
 single line `done`. Each wake gets 240 s; its duration, exit code, and

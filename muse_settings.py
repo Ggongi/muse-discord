@@ -170,7 +170,7 @@ CORE = {
     # the owners (add them to keep them). per_day counts replies with
     # generated files actually sent, in the scope where it is set.
     # legacy: the old plugin's param names (see moved_key).
-    "media.enabled": Spec("on-off", False, "EDASC"),
+    "media.enabled": Spec("on-off", True, "EDASC"),
     "media.who": Spec("people", "owners", "ES", values=("owners",
                                                          "everyone"),
                       risky=True, legacy="allowed_user_ids"),
@@ -1277,6 +1277,11 @@ class Settings:
             return False, None
         ok, norm = normalize(self.spec(key), v)
         return (True, norm) if ok else (False, None)
+
+    def owner_sets_server(self, guild_id, key):
+        """True when config.yaml or an owner's Discord change sets key for
+        this server itself (a server admin's change does not count)."""
+        return self._owner_layer(("servers", str(guild_id)), key)[0]
 
     def _owner_value(self, chain, key):
         for path, _name in reversed(chain):

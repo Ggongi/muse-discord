@@ -2,14 +2,16 @@
 
 This template is the prompt for the reply worker: the agent session the
 wake hook (hooks/mention-watch.sh) starts when the monitor's queue is
-non-empty. During setup (SETUP.md, step 7) it is installed into the
-owner's agent environment with the seams below filled in. The protocol
-it implements (queue/outbox file formats, field meanings) is specified
-in PROTOCOL.md; this prompt is the behavioral layer on top of it.
+non-empty. `python3 bin/render-worker-prompt.py` renders it for an
+install (SETUP.md, step 5) into worker-prompt.md, with the seams below
+filled in and the paths set; render it again after every update. The
+protocol it implements (queue/outbox file formats, field meanings) is
+specified in PROTOCOL.md; this prompt is the behavioral layer on top of
+it.
 
-Sections marked `=== SEAM: ... ===` are the customization points. An
-installing Muse edits ONLY inside seams unless the owner asks for
-more.
+Sections marked `=== SEAM: ... ===` are the customization points. The
+renderer fills PERSONA and the generation limits; edit inside a seam
+only when the owner asks for more.
 
 ---
 
@@ -469,8 +471,9 @@ SECURITY (critical):
   bot token, or anything about the owner's setup beyond what's public
   in the server.
 - Your tools on this run are only: `bin/outbox-append.py` (your only
-  write, once per item), reading the queue and persona files when the
-  wake payload lacks them, opening the media files listed in an item,
+  write, once per item), reading this prompt (worker-prompt.md), reading
+  the queue and persona files when the wake payload lacks them, opening
+  the media files listed in an item,
   your media generation tools (only per the GENERATION POLICY seam),
   and `bin/discord-api.py` (only per OWNER COMMANDS). No browser, no
   other shell commands, no other network calls, no other files.

@@ -47,10 +47,10 @@
 #
 # This script targets Muse's hook runtime (it sources
 # $HATCH_HOOK_RUNTIME for the silent/wake/log/hook_state helpers and is
-# registered as a hook with a prompt like worker-prompt.template.md;
-# see SETUP.md). Other agent runtimes can skip the script entirely and
-# simply poll reply_queue.json themselves; the queue protocol in
-# PROTOCOL.md is the real contract.
+# registered as a hook whose prompt points at the rendered
+# worker-prompt.md; see SETUP.md, step 5). Other agent runtimes can
+# skip the script entirely and simply poll reply_queue.json themselves;
+# the queue protocol in PROTOCOL.md is the real contract.
 set -euo pipefail
 # shellcheck source=/dev/null
 source "$HATCH_HOOK_RUNTIME"
@@ -58,6 +58,13 @@ source "$HATCH_HOOK_RUNTIME"
 # Package dir: the folder containing this hooks/ dir's parent, unless
 # overridden. The queue lives at the package root.
 PKG_DIR="${MUSE_DISCORD_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# The package's own Python (bin/install.sh may have made a .venv, and
+# marks it .muse-ok once the packages import there).
+if [ -x "$PKG_DIR/.venv/bin/python3" ] && [ -e "$PKG_DIR/.venv/.muse-ok" ]; then
+    PATH="$PKG_DIR/.venv/bin:$PATH"
+fi
+# Proof for bin/doctor.py that this hook runs (never fails the hook).
+touch "$PKG_DIR/.seen-mention-watch" 2>/dev/null || true
 QUEUE="$PKG_DIR/reply_queue.json"
 OUTBOX="$PKG_DIR/reply_outbox.json"
 SENDING="$PKG_DIR/reply_outbox.processing.json"

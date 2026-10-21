@@ -128,6 +128,6 @@ hand (it is re-read on save, no restart), then check it:
 python3 bin/settings.py validate
 ```
 
-A config that fails `validate` keeps the bot from starting. SETUP.md
-("Changing settings later") explains the file's layout, and
-PROTOCOL.md ("Settings") has the details.
+A config that fails `validate` keeps the bot from starting.
+`config.example.yaml` shows the file's layout, and PROTOCOL.md
+("Settings") has the details.

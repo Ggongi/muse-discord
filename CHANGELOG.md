@@ -6,6 +6,58 @@ entries below the releases are pre-release history. **Action
 needed** lists what an existing install must do after updating;
 UPDATING.md walks a Muse through it.
 
+## 2026-10-21: Setup in five steps
+
+New:
+
+- Setting up takes about 10 minutes and five things from you: send
+  your Muse the setup message, make the Discord app (named after your
+  Muse), press Reset Token and paste it to your Muse, click the invite
+  link, and mention the bot once. No IDs, settings files, Developer
+  Mode, intents or terminals; your Muse does the rest and tells you
+  exactly what to click.
+- The bot is your Muse itself by default: its name is your Muse's name
+  and it is told to be itself, as in your main chat. There is no
+  personality interview any more; to shape how it talks, DM it in plain
+  words. Setup writes this default into `persona.md` (only while it is
+  still the shipped placeholder).
+- New scripts for your Muse: `bin/install.sh` (prerequisites, with a
+  fallback when pip can't install), `bin/connect-discord.py` (checks the
+  pasted token and says what to copy if it is the wrong thing, turns on
+  Message Content itself, writes the config, prints the invite link),
+  `bin/render-worker-prompt.py`, and `bin/doctor.py` (one health check
+  with a fix for each problem; it DMs you "I'm online" after setup).
+- `hooks/watchdog-hook.sh` runs the watchdog as a Muse hook and wakes
+  your Muse's main chat only when something needs attention.
+  TROUBLESHOOTING.md collects the fixes.
+- Safer when someone else adds your bot: in a server none of the owners
+  is in, it now answers nobody until you choose When it answers for
+  that server (the join DM's Configure button), and that server
+  doesn't count as shared for "DMs from people in a server with the
+  bot". **Why no reply?** says so. Setup also has you make the bot
+  private, so only you can add it.
+
+Changed:
+
+- **Image and video generation is now on by default, for owners
+  only** (`media.enabled: on`, `media.who: owners`), including on
+  existing installs that never set it. Nobody else can ask for it
+  unless you allow them. To turn it off, DM the bot "turn off images
+  and video", or set `everywhere: media: enabled: off` in
+  `config.yaml`.
+
+Existing installs are unaffected otherwise: your config, persona and
+token stay as they are, and nothing about setup runs again.
+
+**Action needed:**
+
+- Render the worker prompt with `python3 bin/render-worker-prompt.py
+  --media <none|images|video|images,video>` and, once, replace the wake
+  hook's inline prompt with the short one in SETUP.md step 5's table,
+  which reads `worker-prompt.md` (later updates then only re-render).
+- Optional: register `hooks/watchdog-hook.sh` (SETUP.md step 5) in place
+  of a cron or scheduled `watchdog.sh`, so alerts reach your Muse.
+
 ## 2026-10-21: /settings, simpler
 
 Changed:
