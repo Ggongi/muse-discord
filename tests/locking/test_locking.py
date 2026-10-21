@@ -225,8 +225,11 @@ def test_monitor_removes_answered_items():
     st = new_state()
     mention, plain, trig, frag1, frag2, silent_id, gone = (
         snowflake() for _ in range(7))
-    unnamed = snowflake()
+    unnamed, never = snowflake(), snowflake()
     st["reply_aliases"] = {frag1: trig, frag2: trig}
+    # gone was queued here (the monitor's record of it), and its queue
+    # item is already gone; never was never queued at all.
+    m.note_item_meta(st, gone, channel_id="101", kind="mention")
     write(m.QUEUE_FILE, [
         qitem(mention),
         qitem(plain),
@@ -246,15 +249,19 @@ def test_monitor_removes_answered_items():
          "silent": True},
         # old worker already removed its queue item: nothing breaks
         {"channel_id": "101", "reply_to": gone, "text": "late"},
-        # neither item nor reply_to: posted, the queue item is left for
-        # the worker to remove
+        # refused: a message the monitor never queued, and neither item
+        # nor reply_to (the queue item is left open)
+        {"channel_id": "101", "reply_to": never, "text": "unknown"},
         {"channel_id": "101", "text": "a loose post"},
     ])
     with capture():
         m.process_outbox(st)
     assert [q["message_id"] for q in read(m.QUEUE_FILE)] == [unnamed], \
         read(m.QUEUE_FILE)
-    assert len(sent_texts()) == 5, sent_texts()
+    assert sent_texts() == ["hello", "a post", "burst reply", "late"], \
+        sent_texts()
+    assert len(read(m.OUTBOX_REJECTED_FILE)) == 2
+    assert never not in st["replied_to"]
     for mid in (mention, plain, trig, frag2, silent_id):
         assert mid in st["replied_to"], mid
     # a second worker drafts the same item: suppressed
@@ -262,7 +269,7 @@ def test_monitor_removes_answered_items():
                            "text": "a post again"}])
     with capture():
         m.process_outbox(st)
-    assert len(sent_texts()) == 5
+    assert len(sent_texts()) == 4
 
 
 def test_malformed_items_rejected_without_blocking():
@@ -317,8 +324,8 @@ def test_corrupt_outbox_file():
 def test_retry_merges_with_appends():
     pkg = fresh_pkg()
     st = new_state()
-    a, b = snowflake(), snowflake()
-    write(m.QUEUE_FILE, [qitem(a), qitem(b)])
+    a, b, c = snowflake(), snowflake(), snowflake()
+    write(m.QUEUE_FILE, [qitem(a), qitem(b), qitem(c)])
     write(m.OUTBOX_FILE, [{"item": a, "channel_id": "101", "reply_to": a,
                            "text": "flaky"}])
     orig = m.api_post
@@ -338,9 +345,9 @@ def test_retry_merges_with_appends():
     out = read(m.OUTBOX_FILE)
     assert [i["item"] for i in out] == [a, b], out
     assert out[0]["_retry"]["n"] == 1 and "picked" in out[0]["_retry"]
-    assert len(read(m.QUEUE_FILE)) == 2  # nothing settled yet
+    assert len(read(m.QUEUE_FILE)) == 3  # nothing settled yet
     # crash leftover: processing file is merged back first
-    write(m.OUTBOX_PROCESSING_FILE, [{"item": "77", "channel_id": "101",
+    write(m.OUTBOX_PROCESSING_FILE, [{"item": c, "channel_id": "101",
                                       "text": "leftover"}])
     out[0]["_retry"]["next"] = 0
     write(m.OUTBOX_FILE, out)

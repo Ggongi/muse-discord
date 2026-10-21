@@ -160,12 +160,14 @@ class ForgottenChannels(Base):
                          ["hi u1"])
         self.assertEqual(lookups, [])
         # Nothing on record at all (an older worker's late item): looked
-        # up once, a non-owner's DM: sent.
+        # up once, a non-owner's DM, then refused all the same: it
+        # answers no message the monitor queued.
         self.outbox({"channel_id": DM_U1, "text": "late", "standalone":
                      True}, {"channel_id": DM_U1, "text": "later",
                              "standalone": True})
         self.assertEqual([x["content"] for x in self.sends(DM_U1)],
-                         ["hi u1", "late", "later"])
+                         ["hi u1"])
+        self.assertEqual(len(self.rejected()), self.n_rejected + 2)
         self.assertEqual(lookups, [f"/channels/{DM_U1}"])
 
 

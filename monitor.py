@@ -5769,6 +5769,30 @@ def _log_latency(state, qid, picked, sent):
 SEND_RETRY_SECS = 90
 
 
+def own_channel_problem(state, item, index):
+    """None when this outbox item answers a message the monitor queued,
+    in that message's own channel (a thread, for a message in a thread);
+    else why it is refused. So a run cannot post anywhere else under a
+    made-up item: an owner's command to post elsewhere goes through
+    bin/discord-api.py with the item's owner_command_nonce. A held reply
+    an owner chose to send was checked when it was first drafted."""
+    hid = item.get("_hold")
+    if hid and hid in (state.get("hold_released") or {}):
+        return None
+    qid = _answered_id(state, item)
+    if not qid:
+        return "answers no queued message (set item to its message_id)"
+    t = trigger_of(state, qid, index["frags"])
+    meta = (state.get("item_meta") or {}).get(t) or {}
+    known = {str(meta.get("channel_id") or ""),
+             index["channels"].get(t, "")} - {""}
+    if not known:
+        return f"{t} is not a message the monitor queued"
+    if str(item.get("channel_id")) not in known:
+        return f"channel_id is not the channel of {t}"
+    return None
+
+
 def process_outbox(state):
     """Send replies drafted by the worker, with output guardrails + dedup.
 
@@ -5824,6 +5848,14 @@ def process_outbox(state):
                   f": {refused}; the owner DM stays open (set aside in "
                   f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
             rejects.append((redact_nonces(item), refused))
+            continue
+        # Then: it answers a queued message, in that message's channel.
+        stray = own_channel_problem(state, item, index)
+        if stray:
+            print(f"Refused outbox item for {item.get('channel_name') or '?'}"
+                  f": {stray} (set aside in "
+                  f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
+            rejects.append((redact_nonces(item), stray))
             continue
         reply_to = item.get("reply_to")
         qid = _answered_id(state, item)

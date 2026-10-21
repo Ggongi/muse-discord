@@ -189,9 +189,12 @@ elif scenario == "outbox":
     rec["outbox_written"] = []
 
     def write_outbox(inbox, status):
+        # A message the monitor queued there (an outbox item answers one).
+        mid = H.sf(0)
+        mod.queue_edit(add=[{"message_id": mid, "channel_id": "500"}])
         tmp = mod.OUTBOX_FILE + ".w"
         with open(tmp, "w") as f:
-            json.dump([{"channel_id": "500", "reply_to": H.sf(0),
+            json.dump([{"item": mid, "channel_id": "500", "reply_to": mid,
                         "text": "hello"}], f)
         os.replace(tmp, mod.OUTBOX_FILE)
         rec["outbox_written"].append(rel(time.time()))

@@ -246,6 +246,15 @@ def nonce_of(state, mid):
     return state["nl_nonces"][mid]["nonce"]
 
 
+def queued_in(state, channel=GEN_CH):
+    """A message the monitor queued in channel (an outbox item must
+    answer one, in its channel): its id."""
+    m = msg(OWNER, channel, "hey")
+    assert M.enqueue_message(m, "Guild #general", state, [],
+                             guild_id=GUILD)
+    return m["id"]
+
+
 def enqueue_pair(state):
     """Owner asks for an image in a DM (X) and chats in a public channel
     (Y). Both get approvals (owner is an allowed user)."""
@@ -695,7 +704,7 @@ def f6_bot_own_reply_context_and_clean_doc_pass():
 def f7_role_mention_not_allowed():
     state = reset()
     outbox([{"channel_id": GEN_CH, "text": "ping <@&123456789012345678>",
-             "reply_to": "123456789012345670"}])
+             "reply_to": queued_in(state)}])
     M.process_outbox(state)
     msgs = [d for p, d in API_POSTS if p.endswith("/messages")]
     assert msgs and msgs[0].get("allowed_mentions") == \
@@ -754,7 +763,7 @@ def f7_overlong_parts_clamped():
         state["replied_to"] = []
         M.MAX_REPLY_CHARS = cap
         outbox([{"channel_id": GEN_CH, "text": text,
-                 "reply_to": new_id()}])
+                 "reply_to": queued_in(state)}])
         M.process_outbox(state)
         msgs = [d for p, d in API_POSTS if p.endswith("/messages")]
         assert msgs and all(len(d["content"]) <= 2000 for d in msgs), \
