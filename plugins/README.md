@@ -30,7 +30,9 @@ def register(api):
 ```
 
 The monitor loads a plugin once some scope turns it on
-(`plugins.<id>.enabled: on` in `config.yaml`, or from `/settings`), and
+(`plugins.<id>.enabled: on` in `config.yaml`, or by DMing the bot "turn
+on example"; `/settings` lists installed plugins but has no controls for
+them, and server admins can turn one off there), and
 runs its hooks only where it is on. The hooks, and what `ctx` carries,
 are listed in `monitor.py` (search for "Plugins. A plugin is a folder");
 the setting types are those of `muse_settings.load_manifests`. A

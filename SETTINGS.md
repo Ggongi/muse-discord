@@ -104,9 +104,9 @@ What the owner says, and the key and values to use:
 | Status line, update notices (`defaults`) | `presence.status`, `updates.notify` | text up to 128; on/off |
 | Anonymous usage stats (`defaults`; README, Privacy and usage stats) | `telemetry.usage_stats` | on/off |
 
-A channel takes only When it answers, Instructions and Extras on/off
-(`media.enabled`, and `plugins.<name>.enabled` for an installed
-plugin). The values' names work too ("Only when
+A channel takes only When it answers, Instructions, and on/off for
+images and video (`media.enabled`) and for an installed plugin
+(`plugins.<name>.enabled`). The values' names work too ("Only when
 @mentioned"), and so do the settings' names ("When it answers").
 
 ## 4. Tell the owner
@@ -128,6 +128,6 @@ hand (it is re-read on save, no restart), then check it:
 python3 bin/settings.py validate
 ```
 
-A config that fails `validate` keeps the bot from starting. SETUP.md
-("Changing settings later") explains the file's layout, and
-PROTOCOL.md ("Settings") has the details.
+A config that fails `validate` keeps the bot from starting.
+`config.example.yaml` shows the file's layout, and PROTOCOL.md
+("Settings") has the details.
