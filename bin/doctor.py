@@ -10,7 +10,8 @@
 Checks: the config and token; the monitor process; that Discord accepted
 the token and the realtime connection is up (Message Content intent
 on); the /settings command; that the three hooks ran recently (each
-leaves a .seen-<hook> stamp in the package dir); the last reply sent.
+leaves a .seen-<hook> stamp in the package dir), and a note when the
+optional web watch hook does not; the last reply sent.
 Each problem is printed with its fix, in plain words. Then, unless
 --no-dm, it DMs each owner that the bot is online (the only thing it
 ever changes), with the invite to the Muse Agent server.
@@ -40,6 +41,8 @@ HOOKS = (
     ("mention-watch", "wake hook (hooks/mention-watch.sh)", 5, 60),
     ("update-watch", "update hook (hooks/update-watch.sh)", 60, 300),
     ("watchdog-hook", "watchdog hook (hooks/watchdog-hook.sh)", 600, 1800),
+    # Optional: only web watches need it (a note, never a problem).
+    ("watch-due", "web watch hook (hooks/watch-due.sh)", 60, 300),
 )
 HEARTBEAT_STALE_SECS = 600
 ONLINE_DM = ("Hi! I'm online and ready. Mention me in any channel I can "
@@ -205,15 +208,20 @@ def check(d, st, args):
         p = d.path(f".seen-{stamp}")
         waited = 0
         while not args.quick and not os.path.exists(p) \
-                and waited < min(every + 10, 70) and stamp != \
-                "watchdog-hook":
+                and waited < min(every + 10, 70) and stamp not in \
+                ("watchdog-hook", "watch-due"):
             time.sleep(1)
             waited += 1
         try:
             age = now - os.path.getmtime(p)
         except OSError:
             age = None
-        if age is None and stamp == "watchdog-hook":
+        if stamp == "watch-due" and (age is None or age > stale):
+            d.add("note", f"The {what} isn't running, so web watches are "
+                  f"never checked (each ends after a few tries and tells "
+                  f"whoever set it). Register it if you want them "
+                  f"(SETUP.md, step 5).")
+        elif age is None and stamp == "watchdog-hook":
             d.add("note", f"The {what} hasn't run yet; it runs every 10 "
                   f"minutes. If this note is still here in 15 minutes, "
                   f"register it (SETUP.md, step 5).")

@@ -32,7 +32,9 @@ Fixed (security):
 - An owner's server message now wakes alone, as owner DMs already did,
   so a stranger's message never shares the run that can act for you.
   Other people's messages that arrive with it wait a few seconds for
-  the next run.
+  the next run. An owner's server messages that may set web watches
+  (Reminders and watches) join that wake: one run, with both the
+  `owner_command_nonce` and the `web_nonce`.
 
 Changed:
 
@@ -52,6 +54,56 @@ Changed:
 - Restart the monitor if your update path does not (UPDATING.md).
   Until a monitor that writes `owner_items.json` runs, owner commands
   get a reply but no action.
+
+## 2026-10-21: Reminders and watches
+
+New:
+
+- Reminders: "@bot ping me in 30 minutes and remind me to look into
+  this project" now works. The bot confirms the time, then comes back
+  once, as a reply to the request (or to the person's newest message
+  there, if the request is gone), and pings only that person. If the
+  bot was down when a reminder was due, it comes once, late, and says
+  so; several due at once come as one message.
+- Watches: "tell me when someone mentions pizza". The bot watches the
+  messages it already reads, in one channel or a whole server, and
+  only where the person who asked can read. It never counts their own
+  messages, links the message instead of quoting it, says so at most
+  once every 15 minutes, and stops after the first match (unless they
+  asked for every time) or after a week (30 days at most).
+- Web watches: "tell me when the tickets go on sale". Your Muse checks
+  the web now and then (at most every 30 minutes, with a daily limit),
+  in a session of its own that can only read the web and report back.
+  Only for you, unless you allow others ("Who can set web watches").
+- One list and one cancel: "what are you watching for me?" and "stop
+  watching for pizza". Everyone sees and cancels only their own; you
+  can cancel anyone's, and your Muse can list and cancel them all with
+  `bin/watches.py`.
+- Limits: none for you. Anyone else can have 25 reminders and watches
+  going, and each one that comes due counts as a reply toward
+  "Replies per person per day" (and the daily total) where it lands.
+  Over that cap it waits and goes out, late, once the cap allows; it
+  is never lost. Web watches also have a daily check budget. A refused
+  or waiting one shows up in **Why no reply?**.
+- Two new settings: "Who can set reminders and watches" (everyone) and
+  "Who can set web watches" (only you). DM the bot to change them, or
+  ask your Muse.
+
+The bot doesn't know people's time zones: for "tomorrow at 9" it asks
+which zone, and remembers it if they like. Times it writes show in
+each reader's own time zone.
+
+**Action needed:**
+
+- Render the worker prompt again: `python3 bin/render-worker-prompt.py
+  --media <none|images|video|images,video>`. It teaches your Muse
+  reminders and watches.
+- If the runtime registered a copy of `hooks/mention-watch.sh`, update
+  the copy.
+- For web watches: register `hooks/watch-due.sh` as SETUP.md step 5's
+  table says (every 60 s, in a chat of its own). Without it, web
+  watches are never checked, and each one ends after a few tries and
+  tells the person who set it.
 
 ## 2026-10-21: Setup in five steps
 

@@ -197,6 +197,30 @@ class OwnerCommandsWakeAlone(_Hook):
         self.assertNotIn(self.C, out)
         self.assertNotIn(N1, out)
 
+    def test_owner_items_share_a_wake_web_holders_after(self):
+        """The owners' server messages (commands, and those holding a
+        web watch capability) share one wake with both nonces; someone
+        else holding a web_nonce then goes alone; the rest last."""
+        W1, W2, W3 = "c" * 32, "d" * 32, "f" * 32
+        web_owner = item("8", "mention", "owner")        # no command
+        web_member = item("9", "mention", "member")      # web_watches
+        self.write("web_nonces.json", {self.OWN: W1, "8": W2, "9": W3})
+        self.write("reply_queue.json", self.queue + [web_owner, web_member])
+        out, p = self.run_hook()
+        self.assertEqual(
+            [(i["message_id"], i.get("owner_command_nonce"),
+              i.get("web_nonce")) for i in p["items"]],
+            [(self.OWN, self.C, W1), ("8", None, W2)])
+        out, p = self.run_hook()
+        self.assertEqual([(i["message_id"], i.get("web_nonce"))
+                          for i in p["items"]], [("9", W3)])
+        for n in (self.C, W1, W2):
+            self.assertNotIn(n, out)
+        out, p = self.run_hook()
+        self.assertEqual([i["message_id"] for i in p["items"]], ["5"])
+        for n in (self.C, W1, W2, W3):
+            self.assertNotIn(n, out)
+
     def test_owner_dm_command_gets_its_dm_nonce(self):
         self.write("reply_queue.json", [dict(item("1"), owner_command=True)])
         out, p = self.run_hook()

@@ -31,6 +31,13 @@ fragments), unless the item's text (any fragment) carries a directive:
                  take comma-separated ids. Several directives make
                  several changes. The monitor decides what happens;
                  the reply still says `ack <n>`.
+  [[remind:<seconds> <note>]]
+                 the reply carries a schedule action (PROTOCOL.md,
+                 Reminders and watches) asking for a reminder that
+                 many seconds after the message; the reply still says
+                 `ack <n>`. The reminder item the monitor queues later
+                 (kind "reminder") is answered `reminder <k>`, k = the
+                 number of reminders it carries.
 
 Directives combine ([[slow]] [[long]] is a slow long reply); [[silent]]
 wins over the rest (a silent item carries no settings action).
@@ -58,6 +65,7 @@ WORKER_ITEMS_KEEP = 200
 FLAGS = ("silent", "long", "everyone", "mention_a", "slow")
 SAY_RE = re.compile(r"\[\[say:([^\]]*)\]\]")
 SETTINGS_RE = re.compile(r"\[\[settings:([^\]]*)\]\]")
+REMIND_RE = re.compile(r"\[\[remind:(\d+)(?: ([^\]]*))?\]\]")
 NO_NONCE = "0" * 32
 
 
@@ -100,6 +108,8 @@ def directives(item):
         found.add("say")
     if SETTINGS_RE.search(text):
         found.add("settings")
+    if REMIND_RE.search(text):
+        found.add("remind")
     return found
 
 
@@ -208,6 +218,9 @@ def build_reply(item, a_id=None):
         out["silent"] = True
         return out, delay
     text = f"ack {n}"
+    if item.get("kind") == "reminder":
+        due = (item.get("reminder") or {}).get("items") or []
+        text = f"reminder {len(due)}"
     if "mention_a" in flags and a_id:
         text += f" <@{a_id}>"
     if "say" in flags and say_text(item):
@@ -226,6 +239,11 @@ def build_reply(item, a_id=None):
         # actions only ever test the monitor's refusals.
         out["settings"] = {"v": 1, "nonce": item.get("owner_dm_nonce")
                            or NO_NONCE, "changes": settings_changes(item)}
+    if "remind" in flags:
+        secs, note = REMIND_RE.search(item_texts(item)).groups()
+        out["schedule"] = {"v": 1, "changes": [
+            {"op": "add", "kind": "remind", "after": int(secs),
+             "note": (note or "").strip()}]}
     return out, delay
 
 

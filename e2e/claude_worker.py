@@ -5,7 +5,8 @@ Plays the production reply worker against a test package dir. It does
 what hooks/mention-watch.sh does in a Muse install (poll the queue,
 hand each open item to exactly one worker run, re-hand it only after
 its lease runs out; owner DMs wake alone, with their owner_dm_nonce,
-and so do owner commands, with their owner_command_nonce)
+and so do the owners' server messages, with their owner_command_nonce
+and web_nonce)
 and what the worker session does (follow worker-prompt.template.md),
 with `claude -p` as the agent:
 
@@ -76,7 +77,7 @@ PAYLOAD_FIELDS = (
     "author_id", "content", "media", "documents", "unviewable", "history",
     "may_generate", "owner_command", "reply_to", "burst",
     "burst_fragments", "from_bot", "bot_turns", "participants",
-    "follow_up", "settings")
+    "follow_up", "settings", "watches", "reminder")
 
 # Env vars the worker run has no business seeing. The SUT token stays:
 # bin/discord-api.py may resolve it through token_from (env:NAME).
@@ -134,8 +135,13 @@ OWNER_ITEMS = "owner_items.json"
 
 
 def is_owner_dm(item):
-    return item.get("kind") == "dm" \
-        and (item.get("settings") or {}).get("speaker") == "owner"
+    """An owner's own DM, or a reminder or web watch firing in one (the
+    hook's test)."""
+    card = item.get("settings") or {}
+    notice = item.get("kind") in ("reminder", "watch-met") \
+        and card.get("where") == "dm"
+    return (item.get("kind") == "dm" or notice) \
+        and card.get("speaker") == "owner"
 
 
 def is_owner_command(item):
@@ -229,12 +235,14 @@ def persona_file(pkg, override=None):
     return os.path.join(pkg, os.path.expanduser(name or "persona.md"))
 
 
-def build_payload(items, persona, nonces=None, cmds=None):
+def build_payload(items, persona, nonces=None, cmds=None, web=None):
     """The wake payload: {count, persona, items} with the hook's fields,
     plus owner_dm_nonce on the items `nonces` has one for (the caller
-    passes nonces only for a wake of owner DMs alone), and
+    passes nonces only for a wake of owner DMs alone),
     owner_command_nonce on the owner commands `cmds` has one for (only
-    for a wake of owner items alone)."""
+    for a wake of owner items alone), and web_nonce on those `web` has
+    one for (only for a wake of the owners' server messages, or of that
+    item alone)."""
     out = []
     for item in items:
         p = {k: item.get(k) for k in PAYLOAD_FIELDS}
@@ -243,6 +251,8 @@ def build_payload(items, persona, nonces=None, cmds=None):
             p["owner_dm_nonce"] = nonces[mid]
         if is_owner_command(item) and (cmds or {}).get(mid):
             p["owner_command_nonce"] = cmds[mid]
+        if (web or {}).get(mid):
+            p["web_nonce"] = web[mid]
         out.append(p)
     return {"count": len(items), "persona": persona, "items": out}
 
@@ -465,13 +475,16 @@ class Worker:
 
     def due(self):
         """(items for the next wake, their owner-DM nonces, their
-        owner-command nonces): open items no live lease covers, as the
-        hook picks them. An owner DM or owner command whose nonce the
-        monitor has not written yet waits, unleased (an owner command
-        only once owner_items.json exists); owner DMs wake
-        alone, else owner commands do (the rest wait for the next poll),
-        and only such a wake gets their nonces. Refreshes the leases
-        (kept only for items still queued, like the hook's state)."""
+        owner-command nonces, their web watch nonces): open items no
+        live lease covers, as the hook picks them. An owner DM or owner
+        command whose nonce the monitor has not written yet waits,
+        unleased (an owner command only once owner_items.json exists).
+        Owner DMs wake alone (real DMs before notices), else the owners'
+        server messages (commands, web watch holders), else one item
+        holding a web watch capability; the rest wait for the next
+        poll, and only such a wake gets those nonces. Refreshes the
+        leases (kept only for items still queued, like the hook's
+        state)."""
         now = time.time()
         items, nonces = open_items(self.pkg, self.answered)
         cmd_file = os.path.exists(os.path.join(self.pkg, OWNER_ITEMS))
@@ -493,11 +506,31 @@ class Worker:
                    and not (is_owner_command(i) and cmd_file
                             and str(i["message_id"]) not in cmds)]
             owner = [i for i in due if is_owner_dm(i)]
-            commands = [i for i in due if is_owner_command(i)]
+            if any(i.get("kind") == "dm" for i in owner):
+                # The owner's own messages never share a run with the
+                # bot's notices to them (the hook's rule).
+                owner = [i for i in owner if i.get("kind") == "dm"]
+            web = read_json(os.path.join(self.pkg, "web_nonces.json"),
+                            {}) or {}
+            # The owners' server messages: commands, and those holding a
+            # web watch capability. All the owner's, so they share a wake.
+            commands = [] if owner else [
+                i for i in due if is_owner_command(i) or (
+                    (i.get("settings") or {}).get("speaker") == "owner"
+                    and str(i["message_id"]) in web)]
+            wake_web = {}
             if owner:
                 due = owner
             elif commands:
                 due = commands
+                wake_web = web
+            else:
+                # An item holding a web watch capability wakes alone
+                # (the hook's rule), with its web_nonce.
+                solo = [i for i in due if str(i["message_id"]) in web][:1]
+                if solo:
+                    due = solo
+                    wake_web = web
             expired = [i for i in due if i["message_id"] in self.leases]
             for i in due:
                 self.leases[i["message_id"]] = now
@@ -505,25 +538,26 @@ class Worker:
             self.log("re-waking: item lease expired for %s"
                      % [i["message_id"] for i in expired])
         return (due, (nonces if owner else {}),
-                (cmds if owner or commands else {}))
+                (cmds if owner or commands else {}), wake_web)
 
     def poll(self):
         """One hook pass: start a wake for the due items, if any."""
         if self.stopping:
             return None
-        items, nonces, cmds = self.due()
+        items, nonces, cmds, web = self.due()
         if not items:
             return None
         with self.lock:
             self.wakes += 1
             n = self.wakes
         t = threading.Thread(target=self.run_wake,
-                             args=(n, items, nonces, cmds), daemon=True)
+                             args=(n, items, nonces, cmds, web),
+                             daemon=True)
         self.threads.append(t)
         t.start()
         return t
 
-    def run_wake(self, n, items, nonces=None, cmds=None):
+    def run_wake(self, n, items, nonces=None, cmds=None, web=None):
         ids = [i["message_id"] for i in items]
         try:
             with open(os.path.join(self.pkg,
@@ -541,7 +575,7 @@ class Worker:
         except OSError:
             persona = None  # the worker then reads the file itself
         prompt = wake_prompt(rendered, build_payload(items, persona, nonces,
-                                                     cmds))
+                                                     cmds, web))
         args = worker_args(self.pkg, self.persona)
         self.log("wake %d: start items=%s" % (n, ids))
         start = time.monotonic()

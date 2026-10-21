@@ -18,7 +18,9 @@ Nothing is appended if any item has an obvious mistake (the monitor
 would set it aside unsent); the errors are printed so the worker can fix
 them and run it again. An item with a `settings` action (a settings
 request from an owner's DM; PROTOCOL.md) gets the monitor's own shape
-checks (settings_nl.shape_problems). An item for an owner's DM
+checks (settings_nl.shape_problems), and so does an item with a
+`schedule` action (reminders and watches: muse_watches.shape_problems).
+An item for an owner's DM
 carries that DM's `owner_dm_nonce` from the wake payload, passed
 through as is (checked here only for its shape: the monitor holds the
 real one). The monitor re-validates every item on its side. Never
@@ -64,6 +66,20 @@ def settings_problems(item):
                                                          "plugins"))
 
 
+def schedule_problems(item):
+    """The monitor's shape rules for a schedule action (reminders and
+    watches; PROTOCOL.md)."""
+    try:
+        if PACKAGE_DIR not in sys.path:
+            sys.path.insert(0, PACKAGE_DIR)
+        import muse_watches
+    except Exception as e:  # the monitor checks it anyway
+        print(f"note: could not load muse_watches.py to check the schedule "
+              f"action ({e}); the monitor will check it", file=sys.stderr)
+        return []
+    return muse_watches.shape_problems(item)
+
+
 def problems(item):
     """Mistakes the monitor would reject the item for (a subset of its
     checks, so nothing valid is ever refused here)."""
@@ -95,6 +111,10 @@ def problems(item):
                        "the item's owner_dm_nonce")
     if out:
         return out
+    if "schedule" in item:
+        out = schedule_problems(item)
+        if out:
+            return out
     if "settings" in item or any(str(k).startswith("_nl") for k in item):
         return settings_problems(item)
     if item.get("silent"):
