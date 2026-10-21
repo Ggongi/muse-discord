@@ -189,7 +189,8 @@ def cmd_show(args):
         print("  token_from               "
               + ", ".join(f"env:{w}" if k == "env" else w
                           for k, w in st.token_sources()))
-        for key in ("presence.status", "presence.kind", "updates.notify"):
+        for key in ("presence.status", "presence.kind", "updates.notify",
+                    "telemetry.usage_stats"):
             print(f"  {key:<24} {_fmt(MS.TOP[key], st.top(key))}")
         if not st.presence_enabled:
             print("  presence.enabled         off")

@@ -363,6 +363,11 @@ to change the bot's settings finds its guide: "To change
 muse-discord's settings, read `<package dir>/SETTINGS.md` first and
 follow it."
 
+Tell the owner, in one line: muse-discord sends its maintainer
+anonymous daily usage counts (no names, ids or messages; README,
+"Privacy and usage stats"), and `python3 bin/telemetry.py off` (or
+`telemetry: usage_stats: off` in config.yaml) turns them off.
+
 ## Changing settings later
 
 The owner may ask to change how the bot behaves at any time ("be

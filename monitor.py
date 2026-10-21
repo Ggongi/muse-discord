@@ -154,6 +154,37 @@ def _import_nl():
 
 
 NL = _import_nl()
+
+# Anonymous daily usage counts (telemetry.py; README, "Privacy and usage
+# stats"). Off with telemetry.usage_stats: off or MUSE_DISCORD_TELEMETRY=off.
+TELEMETRY_FILE = os.path.join(BASE_DIR, "telemetry.json")
+TELEMETRY_ID_FILE = os.path.join(BASE_DIR, "telemetry_id")
+TELEMETRY_WAKES_FILE = os.path.join(BASE_DIR, "telemetry.wakes")
+
+
+class _NoTelemetry:
+    def __getattr__(self, name):
+        return lambda *a, **kw: ""
+
+
+def _import_telemetry():
+    """A telemetry.Recorder; a stand-in that does nothing when
+    telemetry.py cannot be loaded (it never stops the bot)."""
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "muse_telemetry", os.path.join(BASE_DIR, "telemetry.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.Recorder(lambda: (TELEMETRY_FILE, TELEMETRY_ID_FILE,
+                                     TELEMETRY_WAKES_FILE),
+                            ms=MS, pkg_dir=BASE_DIR)
+    except Exception as e:
+        print(f"Telemetry not loaded ({type(e).__name__}); usage counts "
+              f"are off.", flush=True)
+        return _NoTelemetry()
+
+
+TM = _import_telemetry()
 # The raw file (test-only keys such as testing: live here).
 CFG = _S0.raw
 if _S0.notice:
@@ -1192,6 +1223,7 @@ def ledger_record_many(mids, status, reason="", channel_id=None,
         return
     d = _ledger_load()
     code = ledger_code(status, reason)
+    TM.ledger(code, [d["entries"].get(m) for m in mids])
     # Where it happened, as the monitor knows it now (a thread's parent
     # only for a thread): /settings' Why reads it later, when the
     # channel may be gone from discovery.
@@ -1735,7 +1767,8 @@ def _join_summary(gid, ginfo, channels):
             f". Plugins on there: {', '.join(on) or 'none'}.\n"
             f"Channels I can see ({len(visible)}): {shown or 'none'}\n"
             f"To change what I do there (welcomes, for one), press "
-            f"**Configure** (or use /settings), or {how}.")
+            f"**Configure** (or use /settings), or {how}."
+            + TM.notice_line(st))
 
 
 def configure_button(gid):
@@ -4873,6 +4906,7 @@ def classify_message(state, msg, channel_name, guild_id=None):
     author = msg.get("author", {}) or {}
     if author.get("id") == BOT_ID:
         return None  # the bot's own messages: never triggers or fragments
+    TM.count("messages_seen")
     if is_bot_author(author) and settings().get(
             "who.bots", scope_for(guild_id, msg.get("channel_id"))) \
             == "ignore":
@@ -5543,6 +5577,7 @@ def _log_latency(state, qid, picked, sent):
         t0 = min(t0, picked)
         print(f"Latency {qid}: send {sent - picked:.1f}s, total "
               f"{sent - t0:.1f}s", flush=True)
+    TM.latency(sent - t0)
 
 
 # A failed send is retried with growing gaps, but only for this long:
@@ -6792,6 +6827,7 @@ def outbox_waiting(since):
 def main():
     global BOT_USER_ID, BOT_ID, BOT_NAME, CHANNELS, GUILDS, _FORCE_DISCOVERY
     _acquire_singleton()
+    TM.start()
     touch_heartbeat()
     # Identity FIRST, discovery second: the watchdog's health check waits
     # for the identity marker, and full discovery (a probe per channel
@@ -7128,6 +7164,7 @@ def main():
         except Exception as e:
             print(f"Cleanup error: {e}", flush=True)
 
+        TM.tick(settings, GUILDS, _MEMBER_COUNTS)  # never raises
         # Event-driven wait: a gateway MESSAGE_CREATE wakes the loop at
         # once. Otherwise it idles in ticks of at most 2s, shorter while
         # REST slices are due (none while they are behind), a burst is
@@ -7164,4 +7201,8 @@ def main():
         _gateway_status["wake"].clear()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException as e:
+        TM.crashed(e)  # its class name only; SystemExit is not a crash
+        raise

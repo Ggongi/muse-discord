@@ -323,4 +323,8 @@ else
 fi
 
 payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" --argjson nonces "$nonces" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, welcome, welcome_prompt, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings} + (if $nonces[.message_id] then {owner_dm_nonce: $nonces[.message_id]} else {} end)]}')
+# Usage counts (telemetry.py): one line per wake, once a monitor that
+# keeps them (telemetry.json) has run; it counts and removes the file.
+[ -e "$PKG_DIR/telemetry.json" ] \
+    && { echo >> "$PKG_DIR/telemetry.wakes"; } 2>/dev/null || true
 wake "muse-discord mentions pending" "$payload"

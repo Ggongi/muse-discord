@@ -174,9 +174,11 @@ TOP = {
     "presence.enabled": Spec("on-off", True, "E", hidden=True,
                              discord_editable=False),
     "updates.notify": Spec("on-off", True, "E"),
+    # Anonymous daily usage counts to the maintainer (telemetry.py).
+    "telemetry.usage_stats": Spec("on-off", True, "E"),
 }
 TOP_DISCORD_EDITABLE = ("presence.status", "presence.kind",
-                        "updates.notify")
+                        "updates.notify", "telemetry.usage_stats")
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +482,7 @@ def parse_key(s):
     if not parts or any(p == "" for p in parts):
         raise ValueError("empty key part")
     head = parts[0]
-    if head in ("presence", "updates"):
+    if head in ("presence", "updates", "telemetry"):
         return ("top",), ".".join(parts)
     if head in ("everywhere", "dms", "all_servers"):
         return (head,), _canon(parts[1:], False)
@@ -752,6 +754,8 @@ def map_old(raw, manifests):
     if (raw.get("updates") or {}).get("check") is False:
         put(out, "updates.notify", "off")
         lines.append("updates.check: false -> updates.notify: off")
+    if (raw.get("telemetry") or {}).get("usage_stats") in (False, "off"):
+        put(out, "telemetry.usage_stats", "off")
     for name, block in (raw.get("plugins") or {}).items():
         man = None
         for m in manifests.values():
@@ -1021,6 +1025,10 @@ class Settings:
     @property
     def updates_notify(self):
         return self.top("updates.notify")
+
+    @property
+    def usage_stats(self):
+        return self.top("telemetry.usage_stats")
 
     def token_sources(self):
         """[("env", NAME) | ("file", path)], tried in order."""
@@ -1547,8 +1555,8 @@ def load(config_path, plugins_dir=None, overlay_path=None,
 
 def _parse_new(p, data, aliases, st):
     allowed = {"version", "owners", "persona", "token_from", "presence",
-               "updates", "everywhere", "dms", "all_servers", "servers",
-               "engine", "testing"}
+               "updates", "telemetry", "everywhere", "dms", "all_servers",
+               "servers", "engine", "testing"}
     for k in data:
         if k not in allowed:
             p.err(str(k), "unknown top-level key; valid: "
@@ -1587,7 +1595,8 @@ def _parse_new(p, data, aliases, st):
             st.token_from = [i.strip() for i in items] \
                 if isinstance(tf, list) else tf.strip()
     for sect, keys in (("presence", ("status", "kind", "enabled")),
-                       ("updates", ("notify",))):
+                       ("updates", ("notify",)),
+                       ("telemetry", ("usage_stats",))):
         block = data.get(sect)
         if block is None:
             continue
@@ -2343,8 +2352,8 @@ def build_migrated(config_path, plugins_dir=None, state_path=None):
         name = block.pop("name", None) or known.get(gid)
         servers[gid] = ({"name": name} if name else {}) | block
     order = ["version", "owners", "persona", "token_from", "presence",
-             "updates", "everywhere", "dms", "all_servers", "servers",
-             "engine", "testing"]
+             "updates", "telemetry", "everywhere", "dms", "all_servers",
+             "servers", "engine", "testing"]
     data["version"] = 1
     out = {k: data[k] for k in order if k in data}
     header = ("# muse-discord settings (converted from the old layout by "
@@ -2767,6 +2776,7 @@ LABELS = {
     "presence.status": "Status line",
     "presence.kind": "Status kind",
     "updates.notify": "Update notices",
+    "telemetry.usage_stats": "Anonymous usage stats",
 }
 VALUE_LABELS = {
     ("who.replies", "conversational"): "Chatty",

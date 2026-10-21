@@ -103,6 +103,7 @@ What the owner says, and the key and values to use:
 | Welcome new members (servers) | `plugins.welcome.enabled`, `plugins.welcome.channel` | on/off; a channel id or `system` |
 | Images and video | `plugins.media.enabled`, `plugins.media.who`, `plugins.media.per_day` | on/off; `owners`, `everyone`, ids; a number, `none` |
 | Status line, update notices (`defaults`) | `presence.status`, `updates.notify` | text up to 128; on/off |
+| Anonymous usage stats (`defaults`; README, Privacy and usage stats) | `telemetry.usage_stats` | on/off |
 
 A channel takes only When it answers, Instructions and Extras on/off
 (`plugins.<name>.enabled`). The values' names work too ("Only when
