@@ -18,9 +18,10 @@ New:
 - A report holds: a random install id, the day, the muse-discord,
   Python and OS versions (like 3.12, linux), how many servers the bot
   is in and their total members rounded down to a power of 2, and
-  that day's counts (messages seen, replies sent, unanswered messages
-  by reason, wakes, reply times, settings changes and presets,
-  images and videos sent, restarts, crashes by exception name) plus a
+  that day's counts (messages seen in servers and DMs, replies sent,
+  unanswered messages by reason, wakes, reply times, settings changes
+  and presets, images and videos sent, restarts, crashes by exception
+  name) plus a
   few bot-wide settings as plain values (DMs on or off, memory mode,
   ...). Never message content, names, Discord ids, tokens, file paths,
   error messages, IP addresses or times finer than the day. README,
@@ -31,7 +32,10 @@ New:
   bin/telemetry.py off`, set `telemetry: usage_stats: off` in
   config.yaml, or set `MUSE_DISCORD_TELEMETRY=off`. Days it was off are
   never sent. `bin/telemetry.py reset-id` replaces the install id.
-- The "I just joined" DM says so in one line.
+- Before anything is sent, the bot DMs each owner once about it, and
+  the first report waits at least 24 hours after that DM. If no owner
+  can be reached, nothing is sent (the DM is tried again hourly). If
+  you turn it off first, you never get the DM.
 
 **Action needed:**
 

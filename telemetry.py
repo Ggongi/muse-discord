@@ -25,6 +25,11 @@ Nothing is sent either while no endpoint is configured (TELEMETRY_URL
 below, or MUSE_DISCORD_TELEMETRY_URL); the counts are still kept, so
 `show` works.
 
+The owners hear about it first: while it is on and an endpoint is set,
+the monitor DMs each owner NOTICE once per install (retried hourly
+until at least one DM lands; never when no owner can be reached), and
+the first report goes out no sooner than NOTICE_WAIT_SECS after that.
+
 The monitor must never block, crash or slow down because of this: every
 Recorder method swallows its own errors, the send runs on a daemon
 thread with a short timeout, and a failed send is tried again the next
@@ -66,6 +71,14 @@ TIMEOUT_SECS = 10           # per request
 LATENCY_MAX_SECS = 3600     # longer latencies count as this
 MAX_CRASH_NAMES = 20
 MAX_WAKES_BYTES = 1 << 20   # a wakes file past this is just dropped
+NOTICE_WAIT_SECS = 86400    # the first send waits this long after the notice
+NOTICE_RETRY_SECS = 3600    # an undelivered notice is tried again this often
+NOTICE = ("Heads-up: muse-discord sends its maintainer a small anonymous "
+          "report once a day: counts such as how many messages the bot saw "
+          "and answered, and its version. Never messages, names or ids. "
+          "Nothing is sent for at least 24 hours. To stop it, reply \"turn "
+          "off usage stats\". To see exactly what would be sent, run "
+          "`python3 bin/telemetry.py show` in the bot's folder.")
 
 REFUSAL_CODES = (
     "replies-off", "dm-off", "bots-ignore", "not-allowed", "dm-not-allowed",
@@ -674,10 +687,12 @@ class Recorder:
     # -- the main loop ----------------------------------------------------------
     @_safe
     def tick(self, settings=None, guilds=None, member_counts=None,
-             force=False):
+             notify=None, force=False):
         """Main loop, every iteration (cheap: does its work at most every
         TICK_SECS). settings: a callable giving the current Settings;
-        guilds: the servers the bot is in; member_counts: {id: count}."""
+        guilds: the servers the bot is in; member_counts: {id: count};
+        notify(text): DM the owners, True when at least one DM landed
+        (the one-time notice; nothing is ever sent before it)."""
         now = self.clock()
         if not force and now - self._last_tick < TICK_SECS:
             return
@@ -714,10 +729,34 @@ class Recorder:
                     or self._flushed_day != rec["day"]:
                 self._flushed_day = rec["day"]
                 self._flush_locked()
+        if notify is not None and on and endpoint(self.environ):
+            self._notice(notify, now)
+
+    def _notice(self, notify, now):
+        """DM the owners NOTICE once per install (telemetry.json keeps
+        notice_at); an undelivered one is tried again hourly."""
+        with self.lock:
+            d = self._load()
+            if d.get("notice_at") \
+                    or now < float(d.get("notice_next_try") or 0):
+                return
+            d["notice_next_try"] = now + NOTICE_RETRY_SECS
+        try:
+            ok = bool(notify(NOTICE))
+        except Exception:
+            ok = False
+        with self.lock:
+            if ok:
+                d["notice_at"] = now
+            self._flush_locked()
 
     def _send_due(self, d, now):
         """One attempt per UTC day, after a random time within the first
-        JITTER_SECS of it (drawn once per day)."""
+        JITTER_SECS of it (drawn once per day), and never before the
+        owners' notice is NOTICE_WAIT_SECS old."""
+        at = d.get("notice_at")
+        if not isinstance(at, (int, float)) or now < at + NOTICE_WAIT_SECS:
+            return False
         today = utc_day(now)
         if d.get("last_attempt") == today:
             return False
@@ -770,27 +809,11 @@ class Recorder:
                           "ok": not d["pending"]}
         self._flush_locked()
 
-    # -- words ----------------------------------------------------------------
-    def notice_line(self, st):
-        """One line for the owners' join notice ("" when it is off)."""
-        try:
-            if not enabled(st, self.environ):
-                return ""
-        except Exception:
-            return ""
-        return ("\nmuse-discord sends its maintainer anonymous daily usage "
-                "counts (no names, ids or messages; see README, Privacy "
-                "and usage stats). To stop it, DM me \"turn off usage "
-                "stats\" or set `telemetry: usage_stats: off` in "
-                "config.yaml.")
-
 
 class _Null:
     """Stands in for a Recorder when telemetry.py cannot be loaded."""
 
     def __getattr__(self, name):
-        if name == "notice_line":
-            return lambda *a, **kw: ""
         return lambda *a, **kw: None
 
 

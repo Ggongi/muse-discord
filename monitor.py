@@ -1835,8 +1835,7 @@ def flush_join_notices(state, guilds, channels):
         if gid not in state.get("known_guilds", {}):
             continue  # removed again before the notice went out
         if not notify_owners(_join_summary(gid, guilds.get(gid) or {},
-                                           channels)
-                             + TM.notice_line(settings()),
+                                           channels),
                              components=configure_button(gid)):
             left.append(gid)
     state["join_notices"] = left
@@ -5029,6 +5028,7 @@ def check_dm_channel(dm_id, dm_name, state):
                 or m["id"] in gw_done \
                 or m.get("type", 0) not in CONVERSATION_TYPES:
             continue
+        TM.count("messages_seen")
         if not dm_sender_allowed(m.get("author")):
             note_dm_refused(m)
             continue
@@ -6228,6 +6228,8 @@ def drain_gateway(state, inbox, channels):
                 record_history(state, cid, [m])
                 note_gateway_seen(state, cid, m["id"])
                 continue  # own messages are context only
+            TM.count("messages_seen",
+                     int(m.get("type", 0) in CONVERSATION_TYPES))
             if not dm_sender_allowed(author):
                 note_dm_refused(m)
                 continue
@@ -7164,7 +7166,9 @@ def main():
         except Exception as e:
             print(f"Cleanup error: {e}", flush=True)
 
-        TM.tick(settings, GUILDS, _MEMBER_COUNTS)  # never raises
+        TM.tick(settings, GUILDS, _MEMBER_COUNTS,  # never raises
+                lambda text: bool(OWNER_USER_IDS) and not rest_backing_off()
+                and notify_owners(text))
         # Event-driven wait: a gateway MESSAGE_CREATE wakes the loop at
         # once. Otherwise it idles in ticks of at most 2s, shorter while
         # REST slices are due (none while they are behind), a burst is

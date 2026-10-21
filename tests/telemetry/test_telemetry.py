@@ -11,6 +11,8 @@
    monitor: tick() returns at once, the day stays waiting and is tried
    again the next day, never in a loop.
 4. At most one send per UTC day, and each closed day is sent once.
+5. Nothing is sent before the owners' one-time notice is 24 h old, and
+   nothing at all while it cannot be delivered.
 
 Every send goes to a local fake endpoint; nothing leaves the machine.
 
@@ -96,6 +98,8 @@ class Base(unittest.TestCase):
         self.tm.clock = self.clock
         self.tm.environ = {}       # on, unless a test says otherwise
         self.ep = None
+        self.notices = []          # owner notices "sent"
+        self.notice_ok = True
 
     def tearDown(self):
         if self.ep:
@@ -107,10 +111,14 @@ class Base(unittest.TestCase):
         self.tm.post = lambda url, obj: T.post_json(url, obj, timeout=1)
         return self.ep
 
+    def notify(self, text):
+        self.notices.append(text)
+        return self.notice_ok
+
     def tick(self):
         with quiet():
             self.tm.tick(self.m.settings, self.m.GUILDS,
-                         {G1: 37, "x": 3}, force=True)
+                         {G1: 37, "x": 3}, notify=self.notify, force=True)
 
     def wait_send(self, secs=5):
         """Until the send thread finished and its result was taken."""
@@ -254,6 +262,7 @@ class OffBySetting(Base):
         time.sleep(0.2)
         self.assertEqual(ep.reports, [])
         self.assertEqual(self.pending(), [])
+        self.assertEqual(self.notices, [])   # off: no notice either
         # Turned on again (as a DM or bin/telemetry.py on would): the
         # days it was off are still never sent; the next full day is.
         with quiet():
@@ -388,6 +397,40 @@ class OncePerDay(Base):
         self.assertEqual(len(ep.reports), 2)
         self.assertNotEqual(ep.reports[0]["day"], ep.reports[1]["day"])
         self.assertEqual(len({r["install_id"] for r in ep.reports}), 1)
+
+
+# ---------------------------------------------------------------------------
+# 5. The owners' notice comes first.
+# ---------------------------------------------------------------------------
+class NoticeFirst(Base):
+
+    def test_nothing_sent_before_notice_is_a_day_old(self):
+        ep = self.serve()
+        self.tm.count("replies_sent")
+        t0 = self.clock.t
+        self.tick()                       # the notice goes out now (noon)
+        self.assertEqual(len(self.notices), 1)
+        for hours in (13, 16, 23):        # the day closed, < 24 h later
+            self.clock.t = t0 + 3600 * hours
+            self.tick()
+        time.sleep(0.2)
+        self.assertEqual(ep.reports, [])
+        self.clock.t = t0 + DAY
+        self.tick()
+        self.wait_send()
+        self.assertEqual(len(ep.reports), 1)
+        self.assertEqual(len(self.notices), 1)   # once per install
+
+    def test_never_sent_while_notice_undelivered(self):
+        ep = self.serve()
+        self.notice_ok = False            # DMs closed / no owners
+        self.tick()
+        for _ in range(3):
+            self.next_day()
+        time.sleep(0.2)
+        self.assertEqual(ep.reports, [])
+        self.assertGreater(len(self.notices), 1)   # retried later
+        self.assertEqual(len(self.pending()), 3)
 
 
 if __name__ == "__main__":

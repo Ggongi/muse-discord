@@ -128,6 +128,9 @@ report, so we can see how many installs there are and what breaks. It
 is **on by default**, and easy to turn off. It goes only to the
 project's own Cloudflare Worker ([telemetry/worker](telemetry/worker),
 which keeps no IP addresses), at most once a day, after the day is over.
+Before the first report, the bot DMs you once about it and then waits
+at least 24 hours, so you can turn it off before anything is sent; if
+it cannot reach you, it sends nothing.
 
 What a report holds, for one UTC day:
 
@@ -137,7 +140,7 @@ What a report holds, for one UTC day:
   family (linux, darwin, ...);
 - how many servers the bot is in, and their total members rounded down
   to a power of 2;
-- counts: messages seen in servers, messages queued for your Muse,
+- counts: messages seen (in servers and DMs), messages queued for your Muse,
   replies sent, messages quarantined, unanswered messages by reason
   (cap, not allowed, replies off, ...), wakes, images and videos
   sent, restarts, settings changes by where they were made (/settings,
