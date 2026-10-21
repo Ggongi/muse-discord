@@ -316,6 +316,12 @@ except Exception:
 print(os.path.join(sys.argv[2], os.path.expanduser(name or "persona.md")))
 PY
 ) || persona_file="$PKG_DIR/persona.md"
+
+# Usage counts (telemetry.py): one line per wake, once a monitor that
+# keeps them (telemetry.json) has run; it counts and removes the file.
+[ -e "$PKG_DIR/telemetry.json" ] \
+    && { echo >> "$PKG_DIR/telemetry.wakes"; } 2>/dev/null || true
+
 if [ -r "$persona_file" ]; then
     persona_args=(--rawfile persona "$persona_file")
 else

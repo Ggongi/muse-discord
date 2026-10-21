@@ -31,6 +31,10 @@ presence:
   status: ""              # a line shown under the bot's name; "" = none
 updates:
   notify: on              # DM you when a new version is out: on or off
+telemetry:
+  usage_stats: on         # anonymous daily usage counts to the maintainer
+                          # (no names, ids or messages): on or off. See
+                          # README, "Privacy and usage stats".
 
 # --- Everywhere: DMs and every server, unless set more narrowly ----
 everywhere:

@@ -428,6 +428,9 @@ def check_key(st, place, key, names):
         | set(MS.place_keys(st, place, "more"))
     if key in offered:
         return
+    if place.kind == "defaults" and key in MS.TOP_DISCORD_EDITABLE \
+            and key not in MS.HIDDEN_KEYS:
+        return   # bot-wide, not on a /settings page (usage stats)
     spec = st.spec(key)
     if spec is None:
         raise MS.SettingsError(f"{key} is not a setting here.")

@@ -733,6 +733,12 @@ names it knows itself (its channel list, discovery); the outbox's
 member count) and their channels (id, name, type, parent), written
 when they change. `bin/settings.py` reads it for names and `places`.
 
+`telemetry.json`, `telemetry_id`, `telemetry.wakes` (monitor-internal):
+the anonymous daily usage counts (`telemetry.py`; README, "Privacy and
+usage stats"). The wake hook appends one line to `telemetry.wakes` per
+wake once `telemetry.json` exists; a runtime without the shipped hook
+may do the same, or not (wakes then count 0).
+
 Security: these rules hold for what reaches the monitor through the
 outbox. A worker given a general-purpose shell is out of scope: it
 could read `owner_dm_nonces.json` or edit `config.discord.yaml`

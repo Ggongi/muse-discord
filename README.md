@@ -118,6 +118,49 @@ crash. This one was hardened in production against each of them.
 - **Token:** stored in one private file outside the repo by default. Only the
   bot's own processes read it; your Muse never gets it while replying.
 
+## 📊 Privacy and usage stats
+
+Once a day the bot sends the muse-discord maintainer a small anonymous
+report, so we can see how many installs there are and what breaks. It
+is **on by default**, and easy to turn off. It goes only to the
+project's own Cloudflare Worker ([telemetry/worker](telemetry/worker),
+which keeps no IP addresses), at most once a day, after the day is over.
+Before the first report, the bot DMs you once about it and then waits
+at least 24 hours, so you can turn it off before anything is sent; if
+it cannot reach you, it sends nothing.
+
+What a report holds, for one UTC day:
+
+- a random install id (not tied to you or Discord; `python3
+  bin/telemetry.py reset-id` makes a new one), the day, the
+  muse-discord version, the Python version (like 3.12) and the OS
+  family (linux, darwin, ...);
+- how many servers the bot is in, and their total members rounded down
+  to a power of 2;
+- counts: messages seen (in servers and DMs), messages queued for your Muse,
+  replies sent, messages quarantined, unanswered messages by reason
+  (cap, not allowed, replies off, ...), wakes, images and videos
+  sent, restarts, settings changes by where they were made (/settings,
+  DM, command line) and presets applied (Friends, Community, Work);
+- how long replies took (median and 90th percentile, in whole seconds);
+- crashes, by exception class name only (like `ValueError`);
+- a few bot-wide settings as plain values (like DMs on or off,
+  follow-ups on or off, memory mode, media on or off).
+
+Never: message content, names, Discord ids of any kind, tokens, file
+paths, error messages, IP addresses, or any time finer than the day.
+`python3 bin/telemetry.py show` prints exactly what would be sent next,
+and `status` shows whether it is on and when it last sent.
+
+To turn it off, any one of these:
+
+- DM the bot "turn off usage stats";
+- `python3 bin/telemetry.py off`;
+- `telemetry: usage_stats: off` in `config.yaml`;
+- the environment variable `MUSE_DISCORD_TELEMETRY=off`.
+
+Days it was off are never sent, even if you turn it back on later.
+
 ## 🔧 How it works
 
 Your Muse does the talking, a small monitor does the plumbing, and a watchdog

@@ -102,6 +102,7 @@ What the owner says, and the key and values to use:
 | Replies per day / per person per day | `limits.per_day`, `limits.per_person_per_day` | a number, `none` |
 | Images and video | `media.enabled`, `media.who`, `media.per_day` | on/off; `owners`, `everyone`, ids; a number, `none` |
 | Status line, update notices (`defaults`) | `presence.status`, `updates.notify` | text up to 128; on/off |
+| Anonymous usage stats (`defaults`; README, Privacy and usage stats) | `telemetry.usage_stats` | on/off |
 
 A channel takes only When it answers, Instructions and Extras on/off
 (`media.enabled`, and `plugins.<name>.enabled` for an installed

@@ -354,6 +354,8 @@ SETTINGS REQUESTS (the owner's own DMs only):
     (`owners`, `everyone`, ids), `media.per_day` (a number, `none`).
   - Status line, update notices (defaults only): `presence.status`
     (text up to 128), `updates.notify` (on, off).
+  - Anonymous usage stats sent to the muse-discord maintainer
+    (defaults only): `telemetry.usage_stats` (on, off).
   - Presets for a server: the `preset` op.
   Not changeable this way: owners, the token, the persona, never-share
   phrases, Owner requests, the status kind. Say they live in
