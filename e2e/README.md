@@ -245,60 +245,66 @@ Registration:
 
 Owner, in a server:
 
-- [ ] `/settings` in a channel opens that channel's page, visible only
-      to you; in a thread or forum post, its parent's page with "You
-      ran this in a thread".
-- [ ] *client* Components V2 render: the coloured box, the separator,
-      the buttons beside text, `-#` small text. Open the server's page
-      (35 components) and the admin panel with a banner (37): nothing
-      is cut off or fails to load, on mobile too.
-- [ ] Pick "Only when @mentioned": the page updates in place with
-      **Done:** and **Undo**, `config.discord.yaml` gains the entry
-      with your id as `by`, the log says `Settings reloaded`, and the
-      bot's next reply follows it without a restart. **Undo** puts it
-      back.
-- [ ] The channel picker (type 8) finds any channel by typing.
-- [ ] Apply the Community preset from the server's page: the preview
-      lists the changes, Apply makes them, one **Undo** reverts all.
-- [ ] Caps: **Change** opens the modal with empty boxes (never
-      "none"); "lots" is not saved and **Try again** reopens it with
-      "lots" typed; blank saves "no cap here".
-- [ ] *client* A modal submit updates the page in place (type 7 after
-      a modal), with no "This interaction failed".
-- [ ] *client* Instructions: the modal's **Reply length** string
-      select (a select inside a modal) shows, keeps its choice, and
-      saves.
+- [ ] `/settings` in a channel opens one page for that channel,
+      visible only to you; in a thread or forum post, its parent's
+      page, saying threads follow it.
+- [ ] *client* Components V2 render: the coloured box, the
+      separators, the selects, the buttons beside text, `-#` small
+      text. Open the server's page (Where › All of the server, about
+      28 components) and the admin panel with a banner: nothing is cut
+      off or fails to load, on mobile too, and no select label is
+      clipped badly at phone width.
+- [ ] **When I reply** › "Only when @mentioned": the page updates in
+      place with **Done.** and **Undo**, `config.discord.yaml` gains
+      the entry with your id as `by`, the log says `Settings
+      reloaded`, and the bot's next reply follows it without a
+      restart. **Undo** puts it back; "Like the server" removes the
+      channel's own setting.
+- [ ] **Where** › All of the server, then Everywhere: each shows its
+      own settings (reply length, images and video, replies a person
+      a day; everywhere also who can DM it), and changes land there.
+- [ ] **Images & video** › Everyone on the server's page asks first
+      (it can cost money); Apply, then **Undo**.
+- [ ] **Style** › Community: one click applies it, the **Done** line
+      lists what changed, one **Undo** reverts all of it. A server
+      that matches no style says it is customized.
+- [ ] The last change shows as one short line with **Undo** (which
+      settings, who, when), never a long list of values.
 - [ ] **Why no reply?** on the channel page lists a message you sent
       while the bot was set to ignore you, with a fix button; the fix
       works and the line says to send again.
-- [ ] Pause the server: the page turns grey and names the channels
-      that still answer; Resume.
+- [ ] **Pause here**: the page turns grey and says it is paused;
+      **Resume here**. Pause the server from its page, then open a
+      channel's page: it says the server is paused and offers
+      **Resume server**.
 
 Owner, in a DM:
 
-- [ ] `/settings` opens DMs. **Go to…** reaches Defaults and every
-      server (paged past 22), and a server's channel picker is a paged
-      list with "Find a channel by name…" past 3 pages.
-- [ ] Who can DM it: **Add by ID** with a friend's id lets them DM the
-      bot (have them try), with no confirmation; Remove takes them
-      off. Pause everywhere asks first; Apply, then **Undo**.
+- [ ] `/settings` opens DMs: who can DM it, reply length, images and
+      video. **Where** › Everywhere has **Pause everywhere**, which
+      asks first; Apply, then **Undo**.
+- [ ] Who can DM me › Anyone asks first; a list of people you picked
+      by DMing the bot shows as "You and N people you picked".
+- [ ] **Why no reply?** › Check someone by ID with a friend's id says
+      whether they can DM the bot, with a **Let … DM me** button.
 - [ ] *client* DM user select (flip `DM_USER_SELECT_SEARCHES` in
       `settings_ui.py` to try it): in a bot DM, does a user select
-      find a friend or a mutual-server member by name? Do its
-      `default_values` show people who are not in the DM? Are
-      mentions of unknown users shown as "@unknown-user"? If search
-      works everywhere, leave the constant on.
-- [ ] Not offered: owners, token, persona, never_share (shown as "N
-      set in config.yaml", read-only), categories, plugin
-      installation.
+      find a friend or a mutual-server member by name? If search works
+      everywhere, leave the constant on.
+- [ ] Not offered on the page (the footer says to DM the bot):
+      instructions, memory, caps other than replies a person a day,
+      other bots, prompt injection, people lists, status line, update
+      notices, plugins. Never from Discord: owners, token, persona,
+      never_share, categories, installing plugins.
 
 Server admin (the second account, with Manage Server in one server,
 not an owner):
 
 - [ ] `/settings` there shows only **Quiet the bot**: quieter buttons
-      for here and the whole server, Add to Never answer, Turn off
-      for extras that are on, and the admins' changes with Undo. No
-      privacy, caps, presets, Defaults, DMs or other servers.
+      for here and the whole server, Ignore someone, Stop ignoring
+      (admins' picks), Turn off for images and video (or a plugin)
+      when on, and Undo of admins' last change. No privacy, caps,
+      styles, Where, DMs or other servers.
 - [ ] Off in all of the server, then the banner's **Undo**: back to
       what you (the owner) set.
 - [ ] Make a change: about a minute later the owner gets one DM
@@ -323,10 +329,10 @@ Owner DMs:
 
 Robustness:
 
-- [ ] *client* An old classic `/settings` page (from before the
-      update, still open in a channel): clicking it answers "This
-      settings page is out of date" in a new message, and the old
-      message stays as it was.
+- [ ] *client* An old `/settings` page (from before the update, still
+      open in a channel, its buttons `mdset:2:…`): clicking it answers
+      "This settings page is out of date" in a new message, nothing is
+      written, and the old message stays as it was.
 - [ ] Click through pages while the bot is busy replying: every
       click answers at once ("This interaction failed" never shows).
 - [ ] Restart the monitor between a confirm card and **Apply**: Apply

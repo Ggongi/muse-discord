@@ -20,8 +20,8 @@ class Crawl(unittest.TestCase):
         self.assertEqual(bad, [], "\n".join(bad[:40]))
         # A sanity floor: the crawl really went through the pages.
         self.assertEqual(set(res), {e[0] for e in crawl.entries()})
-        self.assertGreater(res["owner_channel"].count, 100)
-        self.assertGreater(res["owner_dm"].count, 100)
+        self.assertGreater(res["owner_channel"].count, 8)
+        self.assertGreater(res["owner_dm"].count, 5)
         self.assertGreater(res["admin_panel"].count, 5)
 
 

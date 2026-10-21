@@ -330,7 +330,7 @@ SETTINGS REQUESTS (the owner's own DMs only):
   narrowly; for When it answers it means all servers), `"dms"`,
   `"server:<server id>"`, `"channel:<server id>:<channel id>"`. Ids
   come from `settings.places`. A channel takes only When it answers,
-  Instructions, and Extras on/off.
+  Instructions, and on/off for images and video and for plugins.
 - What they say, and the key and values:
   - When it answers: chatty / only when @mentioned / off:
     `who.replies`: `conversational`, `when-addressed`, `off`

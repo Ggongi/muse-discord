@@ -6,6 +6,37 @@ entries below the releases are pre-release history. **Action
 needed** lists what an existing install must do after updating;
 UPDATING.md walks a Muse through it.
 
+## 2026-10-21: /settings, simpler
+
+Changed:
+
+- `/settings` is one page now. It opens on the place you typed it in
+  (a channel, or DMs in the bot's DM) with one line on how the bot
+  behaves there, and a **Where** select for that server or
+  everywhere. Each place shows a few settings as selects: when it
+  replies, reply length, images and video, who can DM it and replies
+  a person a day (whichever that place has; a channel can follow its
+  server again with "Like the server"). Then the server's style
+  (Friends, Community, Work, applied in one click with Undo), Pause
+  or Resume, **Why no reply?**, and Undo for the last change. There
+  are no More / Extras / Bot-wide pages, no Defaults page, no "Same
+  as" choices and no server or channel browsing any more.
+- Moved to DM-only (DM the bot what you want, or ask your Muse):
+  instructions, what it may say about you (a style still sets it),
+  other bots and replies in a row to bots, the total daily cap,
+  possible prompt injection, Only answer these people and the owners'
+  Never answer list, picking people by name for DMs or for images and
+  video, images and video per day, the status line, update notices,
+  and plugins (the page lists installed plugins and says so).
+- Server admins' **Quiet the bot** panel is unchanged in what it
+  allows (quieter only, never past the owners), but shorter: the
+  ignore list, a Turn off button for images and video or a plugin
+  that is on, and Undo of admins' last change.
+- Buttons on `/settings` messages sent before this update answer
+  "This settings page is out of date" and change nothing; run
+  `/settings` again. The join notice's **Configure** button still
+  works.
+
 ## 2026-10-21: Anonymous usage stats, on by default
 
 New:

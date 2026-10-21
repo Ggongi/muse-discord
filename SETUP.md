@@ -367,33 +367,39 @@ friend's DMs through"). There are three ways:
   restart). Edit `config.yaml` by hand only for what that does not
   offer (owners, persona, never_share, plugins).
 
-The owner can also change most settings from Discord, without the
-Muse: type `/settings` in any channel the bot is in, or in a DM with
-the bot. Only the person who typed it sees the pages it opens.
+The owner can also change the most-used settings from Discord,
+without the Muse: type `/settings` in any channel the bot is in, or in
+a DM with the bot. Only the person who typed it sees the page it
+opens, and it is one page:
 
-- In a channel it opens that channel's page (in a thread, its parent
-  channel's): When it answers there, instructions added for it, and
-  image and video on or off. Buttons go to the server's page,
-  **Defaults** (what every server and DM follows unless it sets its
-  own), **DMs** and **Other servers**; a channel picker goes to any
-  other channel. In a DM with the bot it opens **DMs**.
-- A server's page has the basics (When it answers, What it may say
-  about you, Instructions and reply length, Replies per person per
-  day, Image and video on or off), a preset picker
-  (Friends, Community, Work: it shows what would change before
-  anything is applied), **More settings** (Only answer these people,
-  Never answer, Other bots, caps, Possible prompt injection) and
-  **Extras settings** (who may ask for images and video, and how many
-  a day).
-- Every choice starts with "Same as <place>: <value>": pick it to go
-  back to following the server or Defaults. A value set on that page
-  says who changed it and when, and says when it overrides
-  config.yaml.
-- Each change shows a **Done** line with **Undo**; the bottom of a
-  page shows the last change made there, with Undo (on a server's
-  page this includes its channels). Changes with risky results (DMs
-  opened to more people, memory shared in a big server, Pause
-  everywhere) show what they mean and wait for **Apply**.
+- At the top, one line on how the bot behaves there ("I reply only
+  when @mentioned · shares only public facts about people"), and a
+  **Where** select: the channel you typed it in (in a thread, its
+  parent channel), all of that server, or everywhere (every server
+  and DM that has no setting of its own). In a DM with the bot it
+  opens DMs.
+- Below it, a few settings for that place, each a select: **When I
+  reply** (Chat freely, Only when @mentioned), **Reply length**,
+  **Images & video** (Off, Only you, Everyone), **Who can DM me**
+  (in DMs and everywhere) and **Replies a person a day** (for a
+  server and everywhere). A channel has only When I reply and Images
+  & video, and either can be "Like the server" to follow the server
+  again.
+- **Style** for the whole server: Friends, Community or Work, applied
+  in one click (it lists what changed, with **Undo**).
+- **Pause here** (on the Everywhere page, **Pause everywhere**) and
+  **Resume**, **Why no reply?**, and **Undo** for the last change
+  made there (on a channel's page, the newest change in its server).
+- Everything else is changed by DMing the bot (above) or asking your
+  Muse: instructions, what it may say about you, other bots, the
+  total daily cap, prompt injection, who it answers or ignores, who
+  may DM it or make images by name, images and video per day, the
+  status line, update notices, and plugins. The page's last line says
+  so.
+- Each change shows a **Done** line with **Undo**. Changes with risky
+  results (DMs opened to more people, images and video for everyone
+  without a cap, a cap removed in a big server, Pause everywhere)
+  show what they mean and wait for **Apply**.
 - **Why no reply?** lists the last messages that addressed the bot
   there and got no answer, why, and a fix button where one helps.
   Right-click a message, Apps, **Why no reply?** does the same for one
@@ -404,9 +410,10 @@ the bot. Only the person who typed it sees the pages it opens.
   **Configure** button that opens that server's page.
 - Server admins (Manage Server) who type `/settings` in their own
   server get **Quiet the bot**: answer only @mentions or nothing, in
-  that channel or the whole server; add people to Never answer; turn
-  extras off; and undo what admins changed (back to the owner's
-  setting, never louder). The owner gets one DM per minute summing up
+  that channel or the whole server; ignore people (and stop ignoring
+  those admins added); turn images and video or a plugin off; and
+  undo what admins changed (back to the owner's setting, never
+  louder). The owner gets one DM per minute summing up
   what admins changed. Anyone else is told only the owners can change
   settings.
 - Not editable from Discord: `owners`, `token_from`, `persona`, the
