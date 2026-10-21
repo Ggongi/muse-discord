@@ -100,12 +100,12 @@ What the owner says, and the key and values to use:
 | What it may say about you | `privacy.memory` | `everything`, `public-only`, `nothing` |
 | Possible prompt injection | `privacy.suspicious` | `hold-for-review`, `ignore` |
 | Replies per day / per person per day | `limits.per_day`, `limits.per_person_per_day` | a number, `none` |
-| Welcome new members (servers) | `plugins.welcome.enabled`, `plugins.welcome.channel` | on/off; a channel id or `system` |
-| Images and video | `plugins.media.enabled`, `plugins.media.who`, `plugins.media.per_day` | on/off; `owners`, `everyone`, ids; a number, `none` |
+| Images and video | `media.enabled`, `media.who`, `media.per_day` | on/off; `owners`, `everyone`, ids; a number, `none` |
 | Status line, update notices (`defaults`) | `presence.status`, `updates.notify` | text up to 128; on/off |
 
 A channel takes only When it answers, Instructions and Extras on/off
-(`plugins.<name>.enabled`). The values' names work too ("Only when
+(`media.enabled`, and `plugins.<name>.enabled` for an installed
+plugin). The values' names work too ("Only when
 @mentioned"), and so do the settings' names ("When it answers").
 
 ## 4. Tell the owner

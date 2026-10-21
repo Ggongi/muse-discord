@@ -72,9 +72,9 @@ WAKE_TIMEOUT = 240
 PAYLOAD_FIELDS = (
     "message_id", "channel_id", "channel_name", "kind", "author",
     "author_id", "content", "media", "documents", "unviewable", "history",
-    "may_generate", "owner_command", "welcome", "welcome_prompt",
-    "reply_to", "burst", "burst_fragments", "from_bot", "bot_turns",
-    "participants", "follow_up", "settings")
+    "may_generate", "owner_command", "reply_to", "burst",
+    "burst_fragments", "from_bot", "bot_turns", "participants",
+    "follow_up", "settings")
 
 # Env vars the worker run has no business seeing. The SUT token stays:
 # bin/discord-api.py may resolve it through token_from (env:NAME).

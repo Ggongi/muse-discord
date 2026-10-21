@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "_lib"))
 from settings_harness import (BOT, CAT, CH, CH2, CH_G2, G1, G2,  # noqa: E402
                               MS, MUT, OTHER_BOT, OWNER, ROLE, THREAD, U1, U2,
-                              author, bump, dmsg, gmsg, load_monitor, quiet,
+                              bump, dmsg, gmsg, load_monitor, quiet,
                               sf, state, tmpdir, write)
 
 PLUGINS = os.path.join(MUT, "plugins")
@@ -51,6 +51,31 @@ def S(gid=G1, name="Lounge", ch=None, cat=None):
     return MS.Scope.server(gid, name, ch, cat)
 
 
+FAKE_PLUGIN = """
+def register(api):
+    def gate_message(ctx, msg, guild_id):
+        ctx["state"].setdefault("example_saw", []).append(msg["id"])
+        return {"example_note": ctx["settings"]["note"],
+                "may_generate": True}
+    return {"gate_message": gate_message}
+"""
+
+
+def fake_plugins(safe=True):
+    """A plugins dir holding one minimal plugin, "example" (setting
+    note; its gate_message records the message and tries to grant
+    generation)."""
+    d = os.path.join(tmpdir("plugins_"), "plugins")
+    os.makedirs(os.path.join(d, "example"))
+    write(os.path.join(d, "example", "plugin.yaml"),
+          "id: example\nhooks: [gate_message]\n"
+          f"safe_in_new_servers: {'true' if safe else 'false'}\n"
+          "settings:\n  enabled: {type: on-off, default: off}\n"
+          "  note: {type: text, default: hi, scopes: [everywhere, server]}\n")
+    write(os.path.join(d, "example", "plugin.py"), FAKE_PLUGIN)
+    return d
+
+
 # ---------------------------------------------------------------------------
 class Validation(unittest.TestCase):
     def test_invalid_configs_refused(self):
@@ -76,7 +101,8 @@ class Validation(unittest.TestCase):
             ('everywhere:\n  style:\n    notes: "' + "x" * 501 + '"\n',
              "style.notes"),
             ("everywhere:\n  who:\n    repliez: off\n", "repliez"),
-            ("everywhere:\n  plugins:\n    welcome:\n      bogus: 1\n",
+            ("everywhere:\n  media:\n    bogus: 1\n", "bogus"),
+            ("everywhere:\n  plugins:\n    media:\n      bogus: 1\n",
              "bogus"),
             ("everywhere:\n  plugins:\n    nope: {enabled: on}\n", "nope"),
             ("colour: blue\n", "colour"),
@@ -133,8 +159,6 @@ servers:
       notes: "S notes"
     limits:
       per_day: none
-    plugins:
-      welcome: {{enabled: on}}
     channels:
       "{CAT}":
         name: Staff
@@ -191,12 +215,21 @@ class Resolution(unittest.TestCase):
         self.assertIsNone(r["limits.per_person_per_day"])
 
     def test_unsafe_plugin_off_in_new_servers(self):
-        st, _ = load_text(NEW_BASE + "everywhere:\n  plugins:\n    welcome: "
-                          "{enabled: on}\n    media: {enabled: on}\n")
-        self.assertFalse(st.plugin_enabled("welcome", S(G2)))
-        self.assertTrue(st.plugin_enabled("media", S(G2)))
-        self.assertTrue(self.st.plugin_enabled("welcome", S()))
-        self.assertFalse(self.st.plugin_enabled("welcome", S(G2)))
+        plugins = fake_plugins(safe=False)
+        d = tmpdir("cfg_")
+        cfg = write(os.path.join(d, "config.yaml"), NEW_BASE + f"""everywhere:
+  plugins:
+    example: {{enabled: on}}
+  media: {{enabled: on}}
+servers:
+  "{G1}":
+    plugins:
+      example: {{enabled: on}}
+""")
+        st = MS.load(cfg, plugins)
+        self.assertTrue(st.plugin_enabled("example", S(G1)))
+        self.assertFalse(st.plugin_enabled("example", S(G2)))
+        self.assertTrue(st.get("media.enabled", S(G2)))
 
 # ---------------------------------------------------------------------------
 class Overlay(unittest.TestCase):
@@ -384,17 +417,12 @@ presence:
   status_text: "on duty"
   status_kind: custom
 plugins:
-  welcome:
-    enabled: true
-    channel:
-      per_guild: {{"Muse Lounge": "{CH2}"}}
-    per_guild:
-      "Muse Lounge": {{max_age_hours: 2}}
   media_generation:
     enabled: true
     allowed_user_ids: ["{U1}"]
     per_guild:
       "{G2}": {{allowed_user_ids: ["{U2}"]}}
+      "Muse Lounge": {{daily_cap: 2}}
 testing:
   treat_as_human: ["{U2}"]
 """,
@@ -419,16 +447,14 @@ class OldLayout(unittest.TestCase):
         self.assertEqual(st.token_sources(), [("file", "/srv/muse/token")])
         self.assertEqual(st.guild_ids(), [G1, G2])
         self.assertEqual(st.engine["coalesce_seconds"], 3)
-        self.assertTrue(st.plugin_enabled("welcome", S(G1)))
-        self.assertFalse(st.plugin_enabled("welcome", S(G2, "Other")))
-        self.assertEqual(st.get("plugins.welcome.channel", S(G1)), CH)
-        self.assertEqual(st.get("plugins.welcome.channel", S(G2)), "intro")
-        self.assertEqual(st.get("plugins.welcome.daily_cap", S(G1)), 5)
-        self.assertIsNone(st.get("plugins.welcome.daily_cap", S(G2)))
-        self.assertEqual(st.get("plugins.welcome.prompt", S(G1)),
-                         "Hi {user}, read the rules.")
-        self.assertEqual(st.get("plugins.media.who", MS.Scope.dm()),
-                         "owners")
+        # The removed welcome plugin's block is ignored, never an error.
+        self.assertIsNone(st.spec("plugins.welcome.enabled"))
+        # media_generation (allowed_user_ids: [] = the owners, daily_cap)
+        # is media.* now, counted where it was.
+        self.assertTrue(st.get("media.enabled", S(G2)))
+        self.assertEqual(st.get("media.who", MS.Scope.dm()), "owners")
+        self.assertEqual(st.cap_layers("media.per_day", S()),
+                         [("everywhere", 4)])
         self.assertEqual(st.cap_layers("limits.per_person_per_day", S()),
                          [("everywhere", 20)])
         st, _ = load_text(OLD_FIXTURES["locked"])
@@ -446,11 +472,9 @@ class OldLayout(unittest.TestCase):
         self.assertEqual(st.get("privacy.suspicious", S()), "answer")
         self.assertEqual(st.presence_kind, "custom")
         # per_guild keyed by a server NAME matches by name at runtime.
-        self.assertEqual(st.get("plugins.welcome.channel",
-                                S(G1, "Muse Lounge")), CH2)
-        self.assertEqual(st.get("plugins.welcome.max_age_hours",
-                                S(G1, "Muse Lounge")), 2)
-        self.assertEqual(st.get("plugins.media.who", S(G2)), [U2])
+        self.assertEqual(st.get("media.per_day", S(G1, "Muse Lounge")), 2)
+        self.assertEqual(st.get("media.who", S(G1)), [U1])
+        self.assertEqual(st.get("media.who", S(G2)), [U2])
 
     def _migrate(self, name, known=None):
         d = tmpdir("mig_")
@@ -838,7 +862,7 @@ class Who(MonitorBase):
             inbox = queue.Queue()
             inbox.put(msg)
             with quiet():
-                return m.drain_gateway(self.st, inbox, m.CHANNELS)[2]
+                return m.drain_gateway(self.st, inbox, m.CHANNELS)[1]
         stranger = dmsg(U1, "hi bot")
         self.assertEqual(drain(stranger), [])
         self.assertNotIn(stranger["channel_id"], self.st["history"])
@@ -1066,8 +1090,19 @@ class FollowUps(MonitorBase):
         self.assertEqual([i["message_id"] for i in q], [mention["id"]])
 
 
-class Plugins(MonitorBase):
-    cfg = NEW_BASE + f"""everywhere:
+class Media(MonitorBase):
+    # The same settings in the media plugin's old spelling (an existing
+    # install's config.yaml): plugins.media.* must behave identically.
+    SPELLINGS = {"media": NEW_BASE + f"""everywhere:
+  media:
+    enabled: on
+    who: ["role:{ROLE}"]
+    per_day: 1
+servers:
+  "{G1}":
+    media:
+      who: everyone
+""", "plugins.media": NEW_BASE + f"""everywhere:
   plugins:
     media:
       enabled: on
@@ -1076,32 +1111,20 @@ class Plugins(MonitorBase):
 servers:
   "{G1}":
     plugins:
-      welcome:
-        enabled: on
-        channel: "{CH2}"
-        notes: "Point them to #rules."
       media:
         who: everyone
-"""
+"""}
 
-    def test_welcome_and_media_per_scope(self):
+    def test_media_per_scope_both_spellings(self):
+        for name, text in self.SPELLINGS.items():
+            with self.subTest(name):
+                self.m = load_monitor(text)
+                self.st = state(self.m)
+                self._per_scope()
+
+    def _per_scope(self):
         m = self.m
-        with quiet():
-            m.load_plugins()
-        join = {"id": sf(), "type": 7, "channel_id": CH,
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
-                                           time.gmtime()),
-                "author": author("777000000000000001", name="newbie")}
-        self.assertTrue(m.join_enabled(G1, CH))
-        self.assertFalse(m.join_enabled(G2, CH_G2))
-        with quiet():
-            items = [i for i in m.call_hook(
-                "member_join", {"state": self.st, "channels": m.CHANNELS,
-                                "guilds": m.GUILDS}, join, G1,
-                scope=m.scope_for(G1, CH)) if i]
-        self.assertEqual(items[0]["channel_id"], CH2)
-        self.assertIn("Point them to #rules.", items[0]["welcome_prompt"])
-        # media: everyone in G1; a role elsewhere; the per_day total.
+        # everyone in G1; only the role elsewhere; the per_day total.
         ok, item = self.enqueue(gmsg(U1, "draw", mention=True))
         self.assertTrue(item["may_generate"])
         ok, item = self.enqueue(gmsg(U1, "draw", mention=True, roles=[],
@@ -1110,12 +1133,123 @@ servers:
         ok, item = self.enqueue(gmsg(U2, "draw", mention=True, roles=[ROLE],
                                      channel=CH_G2, guild=G2), guild=G2)
         self.assertTrue(item["may_generate"])
-        with quiet():
-            m.call_hook("generation_sent", {"state": self.st}, {},
-                        scope=m.scope_for(G2, CH_G2), only_where_on=False)
+        m.note_media_sent(self.st, m.scope_for(G2, CH_G2))
         ok, item = self.enqueue(gmsg(U2, "again", mention=True, roles=[ROLE],
                                      channel=CH_G2, guild=G2), guild=G2)
         self.assertFalse(item["may_generate"])  # everywhere per_day: 1
+
+    def test_old_plugin_count_carries_over(self):
+        """A cap the media_generation plugin counted today stays reached
+        after the update (its state moves to the core's)."""
+        self.m = load_monitor(self.SPELLINGS["media"])
+        self.st = state(self.m)
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        self.st["plugins"] = {"media_generation": {
+            "day": today, "sent_today": 1, "counts": {}}}
+        ok, item = self.enqueue(gmsg(U1, "draw", mention=True))
+        self.assertFalse(item["may_generate"])
+
+
+class Plugins(MonitorBase):
+    def test_minimal_plugin_loads_and_its_hook_runs_where_on(self):
+        """No plugin ships, but the mechanism works: a plugin in plugins/
+        loads once a scope turns it on, its hook runs only there, its
+        result reaches the queue item, and it can never grant
+        generation."""
+        m = self.m
+        self.rewrite(MON + f"""  "{G2}":
+    plugins:
+      example: {{enabled: on, note: from-g2}}
+""")
+        m.PLUGINS_DIR = fake_plugins()
+        with quiet():
+            m.load_plugins()
+        ok, item = self.enqueue(gmsg(U1, "hi", mention=True))  # G1: off
+        self.assertNotIn("example_note", item)
+        msg = gmsg(U1, "hi", mention=True, channel=CH_G2, guild=G2)
+        ok, item = self.enqueue(msg, guild=G2)
+        self.assertEqual(item["example_note"], "from-g2")
+        self.assertFalse(item["may_generate"])
+        self.assertEqual(self.st["example_saw"], [msg["id"]])
+
+
+class MovedSettings(unittest.TestCase):
+    """An install from before media was core: config.yaml under
+    plugins.media / plugins.welcome, config.discord.yaml (values and
+    history) written by the old code under plugins.media.*."""
+    CFG = NEW_BASE + f"""everywhere:
+  plugins:
+    media: {{enabled: on, per_day: 5}}
+    welcome: {{enabled: on, channel: system, notes: hi}}
+servers:
+  "{G1}":
+    channels:
+      "{CH}":
+        plugins:
+          welcome: {{enabled: on}}
+"""
+    OVERLAY = f"""version: 1
+values:
+  servers."{G1}".plugins.media.who:
+    value: everyone
+    base: null
+    by: '{OWNER}'
+    at: '2026-10-01T00:00:00Z'
+  everywhere.plugins.media.per_day:
+    value: 3
+    base: 5
+    by: '{OWNER}'
+    at: '2026-10-01T00:00:00Z'
+  servers."{G1}".channels."{CH}".plugins.media.enabled:
+    value: 'off'
+    base: null
+    by: '{OWNER}'
+    at: '2026-10-01T00:00:00Z'
+  servers."{G1}".plugins.welcome.channel:
+    value: '{CH2}'
+    base: null
+    by: '{OWNER}'
+    at: '2026-10-01T00:00:00Z'
+history:
+- {{key: 'servers."{G1}".plugins.media.who', from: inherit, to: everyone,
+   by: '{OWNER}', at: '2026-10-01T00:00:00Z'}}
+- {{key: everywhere.plugins.media.per_day, from: 5, to: 3, by: '{OWNER}',
+   at: '2026-10-01T00:00:00Z'}}
+- {{key: 'servers."{G1}".channels."{CH}".plugins.media.enabled',
+   from: inherit, to: 'off', by: '{OWNER}', at: '2026-10-01T00:00:00Z'}}
+- {{key: 'servers."{G1}".plugins.welcome.channel', from: inherit,
+   to: '{CH2}', by: '{OWNER}', at: '2026-10-01T00:00:00Z'}}
+"""
+
+    def test_old_keys_load_and_undo(self):
+        st, cfg = load_text(self.CFG, self.OVERLAY)
+        self.assertEqual(st.retire, [])  # no owner notices either
+        self.assertEqual(st.get("media.per_day", MS.Scope.everywhere()), 3)
+        self.assertEqual(st.get("media.who", S(G2)), "owners")
+        self.assertEqual(st.get("media.who", S()), "everyone")
+        self.assertTrue(st.get("media.enabled", S(ch=CH2)))
+        self.assertFalse(st.get("media.enabled", S(ch=CH)))
+        # Undo still finds the old history lines, then a new change
+        # replaces the old entry instead of sitting beside it.
+        MS.undo_changes(cfg, f'servers."{G1}"', OWNER, PLUGINS)
+        st = MS.load(cfg, PLUGINS)
+        self.assertEqual(st.get("media.who", S()), "owners")
+        MS.set_value(cfg, "everywhere.media.per_day", 7, OWNER, PLUGINS)
+        doc = MS._read_overlay_doc(st.overlay_path)
+        self.assertEqual([k for k in doc["values"] if "per_day" in k],
+                         ["everywhere.media.per_day"])
+        self.assertEqual(MS.load(cfg, PLUGINS).get(
+            "media.per_day", MS.Scope.everywhere()), 7)
+        MS.undo_changes(cfg, "everywhere", OWNER, PLUGINS)
+        self.assertEqual(MS.load(cfg, PLUGINS).get(
+            "media.per_day", MS.Scope.everywhere()), 3)
+        # Folding writes media.* and drops the old spelling there.
+        MS.fold(cfg, PLUGINS)
+        st = MS.load(cfg, PLUGINS)
+        self.assertEqual(st.get("media.per_day", MS.Scope.everywhere()), 3)
+        self.assertFalse(st.get("media.enabled", S(ch=CH)))
+        self.assertNotIn("per_day", str(st.raw["everywhere"]["plugins"]))
+
 
 # ---------------------------------------------------------------------------
 class HookPayload(unittest.TestCase):

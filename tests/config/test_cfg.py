@@ -1,6 +1,5 @@
 """Config resolution, offline: resolved constants for missing keys,
-explicit nulls and zeros, out-of-range and garbage values, and
-plugin.yaml defaults with user overrides and per_guild merges. Each case
+explicit nulls and zeros, and out-of-range and garbage values. Each case
 runs in a fresh subprocess (monitor resolves its config at import).
 MUT_DIR = the package tree under test (default: this checkout)."""
 import json
@@ -26,35 +25,18 @@ out = {k: getattr(monitor, k) for k in (
     "BACKOFF_MAX_SECS", "CHANNEL_REFRESH_CYCLES", "DAILY_REPLY_CAP",
     "PER_USER_DAILY_CAP")}
 out["HAS_MAX_BOT_TURNS"] = hasattr(monitor, "MAX_BOT_TURNS")
-if %(plugins)r:
-    monitor.PLUGINS_DIR = %(repo)r + "/plugins"
-    captured = {}
-    orig = monitor.PluginAPI.__init__
-    def init(self, name, params):
-        orig(self, name, params)
-        captured[name] = self
-    monitor.PluginAPI.__init__ = init
-    monitor.load_plugins()
-    res = {}
-    for name, api in captured.items():
-        res[name] = {"params": api.params}
-        for key in ("channel", "prompt", "daily_cap", "max_age_hours",
-                    "allowed_user_ids"):
-            res[name][key] = api.param(key, "111", "Guild One")
-            res[name][key + "@222"] = api.param(key, "222", "Guild Two")
-    out["plugins"] = res
 print("JSON" + json.dumps(out))
 """
 
 
-def run(name, yaml_text, plugins=False):
+def run(name, yaml_text):
     d = scratch("muse-cfg-")
     path = os.path.join(d, f"cfg_{name}.yaml")
     with open(path, "w") as f:
         f.write(textwrap.dedent(yaml_text))
     env = dict(os.environ, MUSE_DISCORD_CONFIG=path)
     p = subprocess.run([sys.executable, "-c",
-                        PROBE % {"repo": MUT_DIR, "plugins": plugins}],
+                        PROBE % {"repo": MUT_DIR}],
                        capture_output=True, text=True, env=env, cwd=d,
                        timeout=60)
     if p.returncode != 0:
@@ -120,54 +102,6 @@ class Config(unittest.TestCase):
         self.check("COALESCE_SECS", d["COALESCE_SECS"], 0.0)
         self.check("POLL_INTERVAL", d["POLL_INTERVAL"], 45)
         self.check("SWEEP_EVERY_CYCLES", d["SWEEP_EVERY_CYCLES"], 6)
-
-    def test_plugin_params(self):
-        """plugin.yaml defaults; user overrides win (null turns a cap
-        off, a plain value replaces a shaped one); per_guild merges;
-        a disabled plugin is not loaded."""
-        d, w, _ = run("plugins_off", "{}\n", plugins=True)
-        self.check("no plugins loaded", d["plugins"], {})
-        d, w, _ = run("plugins_bare", """
-        plugins:
-          welcome: {enabled: true}
-          media_generation: {enabled: true}
-        """, plugins=True)
-        wp = d["plugins"]["welcome"]
-        self.check("welcome daily_cap", wp["daily_cap"], 10)
-        self.check("welcome max_age_hours", wp["max_age_hours"], 24)
-        self.check("welcome channel", wp["channel"], "system")
-        mp = d["plugins"]["media_generation"]
-        self.check("media allowed_user_ids", mp["allowed_user_ids"], [])
-        d, w, _ = run("plugins_over", """
-        plugins:
-          welcome:
-            enabled: true
-            daily_cap: null
-            channel:
-              per_guild: {"222": "intro"}
-            per_guild:
-              "222": {max_age_hours: 2}
-          media_generation:
-            enabled: true
-            daily_cap: 3
-            allowed_user_ids: ["42"]
-        """, plugins=True)
-        wp = d["plugins"]["welcome"]
-        self.check("welcome daily_cap (null wins)", wp["daily_cap"], None)
-        self.check("welcome channel @111", wp["channel"], "system")
-        self.check("welcome channel @222", wp["channel@222"], "intro")
-        self.check("welcome max_age_hours @111", wp["max_age_hours"], 24)
-        self.check("welcome max_age_hours @222", wp["max_age_hours@222"], 2)
-        mp = d["plugins"]["media_generation"]
-        self.check("media daily_cap", mp["daily_cap"], 3)
-        self.check("media allowed_user_ids", mp["allowed_user_ids"], ["42"])
-        d, w, _ = run("plugins_plain", """
-        plugins:
-          welcome: {enabled: true, channel: "general", daily_cap: 0}
-        """, plugins=True)
-        wp = d["plugins"]["welcome"]
-        self.check("welcome channel plain", wp["channel"], "general")
-        self.check("welcome daily_cap 0", wp["daily_cap"], 0)
 
 
 if __name__ == "__main__":

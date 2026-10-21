@@ -6,6 +6,29 @@ entries below the releases are pre-release history. **Action
 needed** lists what an existing install must do after updating;
 UPDATING.md walks a Muse through it.
 
+## 2026-10-21: Image and video built in, welcomes gone
+
+Changed:
+
+- Image and video generation is a built-in setting now, `media.*`
+  (`media.enabled`, `media.who`, `media.per_day`), instead of the
+  `media_generation` plugin. It works exactly as before: off by
+  default, the same scopes and caps, and the same "Image and video"
+  switch in `/settings`.
+- Welcoming new members is gone, and with it the welcome plugin, its
+  `/settings` controls and the "welcome" queue items. The bot no
+  longer looks at Discord's "X joined the server" messages at all.
+- No plugins ship with the bot now. The plugin mechanism stays:
+  `plugins/README.md` shows how to make one.
+
+Old configs keep working, nothing to do: `plugins.media.*` and the
+older `plugins.media_generation.*` settings (`allowed_user_ids`,
+`daily_cap`) are read as `media.*`, including changes made from
+Discord and their Undo, and today's generation count carries over.
+`plugins.welcome.*` settings are ignored (one line in monitor.log
+says so). Installed worker prompts keep working too; the template no
+longer mentions welcomes and names the settings `media.*`.
+
 ## 2026-10-20: Your DMs are answered only by the run that got them
 
 Security fix: a worker woken by someone else's message (and maybe

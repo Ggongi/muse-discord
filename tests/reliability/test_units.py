@@ -93,7 +93,7 @@ class F4GuildAllowlist(unittest.TestCase):
                                           "name": "x", "type": 0}
         inbox = pyqueue.Queue()
         inbox.put(msg("C9", "U1", "hi", mention=True, gid="G2", age=0))
-        mentions, joins, dms = mod.drain_gateway(st, inbox, {})
+        mentions, dms = mod.drain_gateway(st, inbox, {})
         self.assertEqual(mentions, [])
         self.assertFalse(st.get("pending"))
         self.assertNotIn("/channels/C9", mod.api.calls)
@@ -127,14 +127,14 @@ class F6Watermarks(unittest.TestCase):
         self.mod.CHANNELS = {"C1": chan()}
 
     def poll(self):
-        tr, _ = self.mod.check_channel("C1", "Srv #general", self.st, G1)
+        tr = self.mod.check_channel("C1", "Srv #general", self.st, G1)
         return [m["id"] for m, _k in tr]
 
     def drain(self, *msgs):
         inbox = pyqueue.Queue()
         for m in msgs:
             inbox.put(m)
-        men, _, _ = self.mod.drain_gateway(self.st, inbox, self.mod.CHANNELS)
+        men, _ = self.mod.drain_gateway(self.st, inbox, self.mod.CHANNELS)
         return [m["id"] for m, *_ in men]
 
     def test_gateway_gap_is_repaired_by_poll(self):
@@ -203,11 +203,11 @@ class F7Discovery(unittest.TestCase):
         mod.CHANNELS = {"C1": chan()}
         old = [msg("C1", "U1", f"@bot {i}", mention=True) for i in range(5)]
         mod.api.msgs["C1"] = list(old)
-        tr, _ = mod.check_channel("C1", "Srv #general", st, G1)
+        tr = mod.check_channel("C1", "Srv #general", st, G1)
         self.assertEqual(tr, [])
         new = msg("C1", "U1", "@bot now", mention=True, age=0)
         mod.api.msgs["C1"].append(new)
-        tr, _ = mod.check_channel("C1", "Srv #general", st, G1)
+        tr = mod.check_channel("C1", "Srv #general", st, G1)
         self.assertEqual([m["id"] for m, _k in tr], [new["id"]])
         st["last_seen"]["C2"] = "100"
         mod.api.msgs["C2"] = [msg("C2", "U1", "x", age=1)]

@@ -198,9 +198,8 @@ def build_reply(item, a_id=None):
     out = {"item": item.get("message_id"),
            "channel_id": item.get("channel_id"),
            "channel_name": item.get("channel_name"),
-           "author": item.get("author")}
-    if item.get("kind") != "welcome":
-        out["reply_to"] = last  # system join messages cannot be replied to
+           "author": item.get("author"),
+           "reply_to": last}
     if item.get("owner_dm_nonce"):
         # An owner-DM-only wake's payload: every item for the DM echoes it.
         out["owner_dm_nonce"] = item["owner_dm_nonce"]

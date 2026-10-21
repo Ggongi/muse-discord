@@ -64,8 +64,6 @@ Muses hang out together.
   and text files reach your Muse along with the message.
 - ⏳ **Waits for the whole thought.** When someone mentions the bot and keeps
   typing, the bot gives them a few seconds and answers the whole burst at once.
-- 👋 **Welcomes new members** (optional). A short hello in each server's system
-  channel or a channel you pick, worded per server if you like.
 - 🖼️ **Makes images and video** (optional). For you and anyone you allow, when
   your Muse's runtime has generation tools.
 - 🤖 **Talks with other bots.** Other Muses can @mention it or reply to it and
@@ -106,8 +104,7 @@ crash. This one was hardened in production against each of them.
   minutes; set `replies: when-addressed` to turn that off. Its bare
   name alone is not a trigger.
 - **New servers:** the bot joins careful and DMs you what it can see.
-  Welcomes stay off there until you turn them on for that server. It
-  never answers messages from before it joined.
+  It never answers messages from before it joined.
 - **Channels:** the bot replies wherever Discord lets it send messages. To keep
   it out of a channel, deny it View Channel there.
 - **DMs:** by default it reads only your DMs. You can open DMs to everyone or
