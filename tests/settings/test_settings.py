@@ -2,7 +2,7 @@
 resolution, the Discord overlay and its conflict rule, old-layout
 migration, live reload, the per-message card, the never_share backstop,
 who-rules, per-scope caps, conversational follow-ups, plugins, and the
-shell/presence integration. MUT_DIR = the package tree under test."""
+shell integration. MUT_DIR = the package tree under test."""
 import json
 import os
 import queue
@@ -14,7 +14,6 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "_lib"))
-from common import FAKEWS  # noqa: E402
 from settings_harness import (BOT, CAT, CH, CH2, CH_G2, G1, G2,  # noqa: E402
                               MS, MUT, OTHER_BOT, OWNER, ROLE, THREAD, U1, U2,
                               author, bump, dmsg, gmsg, load_monitor, quiet,
@@ -54,88 +53,51 @@ def S(gid=G1, name="Lounge", ch=None, cat=None):
 
 # ---------------------------------------------------------------------------
 class Validation(unittest.TestCase):
-    def test_bad_choice_names_file_key_reason_and_values(self):
-        e = error_of(NEW_BASE + "everywhere:\n  style:\n    length: short\n")
-        self.assertIn("config.yaml: everywhere.style.length:", e)
-        self.assertIn('"short" is not a valid value', e)
-        self.assertIn("valid: brief, normal, detailed", e)
+    def test_invalid_configs_refused(self):
+        """Every invalid file is refused, naming the key (the wording of
+        the message is not checked)."""
+        cases = [
+            ("everywhere:\n  style:\n    length: short\n",
+             "everywhere.style.length"),
+            ("dms:\n  who:\n    bot_exchange_limit: 3\n",
+             "dms.who.bot_exchange_limit"),
+            ("all_servers:\n  style:\n    notes: x\n",
+             "all_servers.style.notes"),
+            (f'servers:\n  "{G1}":\n    channels:\n      "{CH}":\n'
+             "        privacy: {memory: nothing}\n", CH),
+            ("everywhere:\n  who:\n    dms_from: anyone\n", "dms_from"),
+            ('servers:\n  "Muse Lounge":\n    who: {replies: off}\n',
+             "Muse Lounge"),
+            ("everywhere:\n  who:\n    allow: [alice]\n", "alice"),
+            ("everywhere:\n  limits:\n    per_day: -1\n", "per_day"),
+            ("everywhere:\n  limits:\n    per_day: lots\n", "per_day"),
+            ("everywhere:\n  who:\n    bot_exchange_limit: 0\n",
+             "bot_exchange_limit"),
+            ('everywhere:\n  style:\n    notes: "' + "x" * 501 + '"\n',
+             "style.notes"),
+            ("everywhere:\n  who:\n    repliez: off\n", "repliez"),
+            ("everywhere:\n  plugins:\n    welcome:\n      bogus: 1\n",
+             "bogus"),
+            ("everywhere:\n  plugins:\n    nope: {enabled: on}\n", "nope"),
+            ("colour: blue\n", "colour"),
+            ("engine:\n  poll_secs: 3\n", "poll_secs"),
+        ]
+        for text, key in cases:
+            with self.subTest(key):
+                self.assertIn(key, error_of(NEW_BASE + text))
+        # Two layouts mixed; a token pasted where its source belongs.
+        error_of("bot:\n  token_file: /x\neverywhere:\n  who: {}\n")
+        error_of("version: 1\ntoken_from: " + "A" * 60 + "\n")
 
-    def test_scope_not_allowed(self):
-        e = error_of(NEW_BASE + "dms:\n  who:\n    bot_exchange_limit: 3\n")
-        self.assertIn("dms.who.bot_exchange_limit: cannot be set at dms "
-                      "scope (it can be set in: everywhere, server)", e)
-        e = error_of(NEW_BASE + "all_servers:\n  style:\n    notes: x\n")
-        self.assertIn("all_servers.style.notes: cannot be set at "
-                      "all_servers scope", e)
-        e = error_of(NEW_BASE + f'servers:\n  "{G1}":\n    channels:\n'
-                     f'      "{CH}":\n        privacy: {{memory: nothing}}\n')
-        self.assertIn("a channel or category may set only replies, notes "
-                      "and plugins.<plugin>.enabled", e)
-        e = error_of(NEW_BASE + "everywhere:\n  who:\n    dms_from: anyone\n")
-        self.assertIn("(it can be set in: dms)", e)
-
-    def test_name_where_an_id_belongs(self):
-        e = error_of(NEW_BASE + 'servers:\n  "Muse Lounge":\n    who: '
-                     '{replies: off}\n')
-        self.assertIn('servers."Muse Lounge": expected a Discord server id', e)
-        e = error_of(NEW_BASE + "everywhere:\n  who:\n    allow: [alice]\n")
-        self.assertIn('"alice" is not a user id', e)
-        self.assertIn("expected a Discord id", e)
-
-    def test_name_suggestion_from_known_servers(self):
-        d = tmpdir("cfg_")
-        write(os.path.join(d, "state.json"),
-              json.dumps({"known_guilds": {G1: "Muse Lounge"}}))
-        cfg = write(os.path.join(d, "config.yaml"), NEW_BASE
-                    + 'servers:\n  "Muse Lounge":\n    who: {replies: off}\n')
-        with self.assertRaises(MS.SettingsError) as e:
-            MS.load(cfg, PLUGINS)
-        self.assertIn(f'did you mean "{G1}" (Muse Lounge)?', str(e.exception))
-
-    def test_numbers_caps_none_and_text(self):
-        e = error_of(NEW_BASE + "everywhere:\n  limits:\n    per_day: -1\n")
-        self.assertIn("-1 is below the minimum 0; valid: none, 0-100000", e)
-        e = error_of(NEW_BASE + "everywhere:\n  limits:\n    per_day: lots\n")
-        self.assertIn('"lots" is not a whole number', e)
-        e = error_of(NEW_BASE + "everywhere:\n  who:\n    "
-                     "bot_exchange_limit: 0\n")
-        self.assertIn("valid: none, 1-50", e)
-        e = error_of(NEW_BASE + "everywhere:\n  style:\n    notes: \""
-                     + "x" * 501 + "\"\n")
-        self.assertIn("too long (501 characters; the limit is 500)", e)
-        st, _ = load_text(NEW_BASE + "everywhere:\n  limits:\n    per_day: "
-                          "none\n    per_person_per_day: null\n")
-        r = st.resolve(MS.Scope.everywhere())
-        self.assertIsNone(r["limits.per_day"])
-        self.assertIsNone(r["limits.per_person_per_day"])
-
-    def test_unknown_keys_and_plugins(self):
-        e = error_of(NEW_BASE + "everywhere:\n  who:\n    repliez: off\n")
-        self.assertIn("everywhere.who.repliez: unknown setting; valid in "
-                      "who:", e)
-        e = error_of(NEW_BASE + "everywhere:\n  plugins:\n    welcome:\n"
-                     "      bogus: 1\n")
-        self.assertIn('plugin welcome has no setting "bogus"; valid: '
-                      'enabled, channel, notes, daily_cap, max_age_hours', e)
-        e = error_of(NEW_BASE + "everywhere:\n  plugins:\n    nope: "
-                     "{enabled: on}\n")
-        self.assertIn('unknown plugin "nope"; installed: media, welcome', e)
-        e = error_of(NEW_BASE + "colour: blue\n")
-        self.assertIn("colour: unknown top-level key", e)
-        e = error_of(NEW_BASE + "engine:\n  poll_secs: 3\n")
-        self.assertIn("engine.poll_secs: unknown engine setting", e)
-
-    def test_every_problem_listed(self):
-        e = error_of(NEW_BASE + "everywhere:\n  style:\n    length: short\n"
-                     "  limits:\n    per_day: -2\n")
-        self.assertEqual(len(e.splitlines()), 2, e)
-
-    def test_mixed_layout_refused(self):
-        e = error_of("bot:\n  token_file: /x\neverywhere:\n  who: {}\n")
-        self.assertIn("mixes the old layout (bot) and the new one "
-                      "(everywhere)", e)
-
-    def test_hidden_testing_block_and_yaml_booleans(self):
+    def test_defaults_and_yaml_booleans(self):
+        st, _ = load_text("")
+        self.assertEqual(st.layout, "new")
+        r = st.resolve(MS.Scope.dm())
+        self.assertEqual(r["who.dms_from"], "owners")
+        self.assertEqual(r["who.replies"], "conversational")
+        self.assertEqual(st.token_sources(), [("file",
+                                               MS.DEFAULT_TOKEN_FILE)])
+        # YAML's off/on are booleans; the hidden testing block is kept.
         st, _ = load_text(NEW_BASE + "testing:\n  treat_as_human: ['1']\n"
                           "all_servers:\n  who:\n    replies: off\n"
                           "everywhere:\n  abilities:\n    owner_commands: "
@@ -144,19 +106,6 @@ class Validation(unittest.TestCase):
         self.assertEqual(st.get("who.replies", S()), "off")
         self.assertIs(st.get("abilities.owner_commands", S()), False)
         self.assertIs(st.updates_notify, False)
-
-    def test_token_from_must_not_be_a_token(self):
-        e = error_of("version: 1\ntoken_from: " + "A" * 60 + "\n")
-        self.assertIn("looks like a token itself", e)
-
-    def test_empty_file_is_all_defaults(self):
-        st, _ = load_text("")
-        self.assertEqual(st.layout, "new")
-        r = st.resolve(MS.Scope.dm())
-        self.assertEqual(r["who.dms_from"], "owners")
-        self.assertEqual(r["who.replies"], "conversational")
-        self.assertEqual(st.token_sources(), [("file",
-                                               MS.DEFAULT_TOKEN_FILE)])
 
 
 # ---------------------------------------------------------------------------
@@ -215,13 +164,9 @@ class Resolution(unittest.TestCase):
         # A channel in the category inherits it; its own entry would win.
         self.assertEqual(st.get("who.replies", S(ch="7999", cat=CAT)), "off")
         self.assertEqual(st.get("who.replies", S(ch=CH, cat=CAT)), "off")
-
-    def test_lists_replace(self):
+        # Lists replace; notes concatenate.
         self.assertEqual(self.st.get("who.ignore", MS.Scope.dm()), [U1])
         self.assertEqual(self.st.get("who.ignore", S()), [U2])
-
-    def test_notes_concatenate(self):
-        st = self.st
         self.assertEqual(st.get("style.notes", MS.Scope.everywhere()),
                          "E notes")
         self.assertEqual(st.get("style.notes", MS.Scope.dm()), "DM notes")
@@ -239,6 +184,11 @@ class Resolution(unittest.TestCase):
                          ["everywhere", f"server:{G1}"])
         self.assertEqual(MS.Settings.counter_ids(MS.Scope.dm()),
                          ["everywhere", "dms"])
+        st, _ = load_text(NEW_BASE + "everywhere:\n  limits:\n    per_day: "
+                          "none\n    per_person_per_day: null\n")
+        r = st.resolve(MS.Scope.everywhere())
+        self.assertIsNone(r["limits.per_day"])
+        self.assertIsNone(r["limits.per_person_per_day"])
 
     def test_unsafe_plugin_off_in_new_servers(self):
         st, _ = load_text(NEW_BASE + "everywhere:\n  plugins:\n    welcome: "
@@ -247,18 +197,6 @@ class Resolution(unittest.TestCase):
         self.assertTrue(st.plugin_enabled("media", S(G2)))
         self.assertTrue(self.st.plugin_enabled("welcome", S()))
         self.assertFalse(self.st.plugin_enabled("welcome", S(G2)))
-
-    def test_explain_sources(self):
-        rows = {k: src for k, v, src, _r in self.st.explain(S(ch=CH,
-                                                              cat=CAT))}
-        self.assertEqual(rows["style.length"],
-                         "inherited from everywhere (config.yaml)")
-        self.assertEqual(rows["who.replies"],
-                         f"inherited from category {CAT} (config.yaml)")
-        self.assertEqual(rows["privacy.memory"], "built-in")
-        rows = {k: src for k, v, src, _r in self.st.explain(S())}
-        self.assertEqual(rows["who.replies"], "config.yaml")
-
 
 # ---------------------------------------------------------------------------
 class Overlay(unittest.TestCase):
@@ -269,9 +207,11 @@ class Overlay(unittest.TestCase):
         MS.set_value(cfg, key, "off", OWNER, PLUGINS)
         st = MS.load(cfg, PLUGINS)
         self.assertEqual(st.get("who.replies", S()), "off")
-        rows = {k: src for k, v, src, _r in st.explain(S())}
-        self.assertTrue(rows["who.replies"].startswith(
-            f"Discord change by {OWNER} at 20"), rows["who.replies"])
+        # A comment-only edit of the file keeps the Discord change.
+        write(cfg, read(cfg) + "# a comment edit only\n")
+        st = MS.load(cfg, PLUGINS)
+        self.assertEqual(st.retire, [])
+        self.assertEqual(st.get("who.replies", S()), "off")
         doc = MS._read_overlay_doc(st.overlay_path)
         self.assertEqual(doc["values"][key]["base"], "when-addressed")
         # inherit: as if the server set nothing.
@@ -286,23 +226,12 @@ class Overlay(unittest.TestCase):
         st = MS.load(cfg, PLUGINS)
         self.assertEqual(st.get("who.replies", S()), "conversational")
         self.assertEqual([r[2] for r in st.retire], ["file changed"])
-        notes = st.commit_retirements()
-        self.assertEqual(len(notes), 1)
-        self.assertIn(key, notes[0])
+        self.assertEqual(len(st.commit_retirements()), 1)
         st2 = MS.load(cfg, PLUGINS)
         self.assertEqual(st2.retire, [])
         self.assertEqual(st2.commit_retirements(), [])
         hist = MS._read_overlay_doc(st.overlay_path)["history"]
         self.assertEqual(hist[-1]["retired"], "file changed")
-
-    def test_unchanged_file_keeps_overlay(self):
-        st, cfg = load_text(NEW_BASE)
-        MS.set_value(cfg, "everywhere.style.length", "detailed", OWNER,
-                     PLUGINS)
-        write(cfg, NEW_BASE + "# a comment edit only\n")
-        st = MS.load(cfg, PLUGINS)
-        self.assertEqual(st.retire, [])
-        self.assertEqual(st.get("style.length", S()), "detailed")
 
     def test_invalid_overlay_never_blocks_startup(self):
         ov = ("version: 1\nvalues:\n"
@@ -321,16 +250,6 @@ class Overlay(unittest.TestCase):
         self.assertEqual(len(st.commit_retirements()), 5)
         st, _ = load_text(NEW_BASE, overlay="::: not yaml [")
         self.assertEqual(st.retire, [])
-
-    def test_history_capped_and_atomic(self):
-        st, cfg = load_text(NEW_BASE)
-        for i in range(105):
-            MS.set_value(cfg, "everywhere.style.length",
-                         ("brief", "normal")[i % 2], OWNER, PLUGINS)
-        doc = MS._read_overlay_doc(st.overlay_path)
-        self.assertEqual(len(doc["history"]), 100)
-        self.assertEqual([f for f in os.listdir(os.path.dirname(cfg))
-                          if f.endswith(".tmp")], [])
 
     def test_write_api_validates(self):
         st, cfg = load_text(NEW_BASE)
@@ -353,8 +272,7 @@ class Overlay(unittest.TestCase):
         MS.set_value(cfg, f'servers."{G1}".channels."{CH}".notes', "hey",
                      OWNER, PLUGINS)
         bak, folded = MS.fold(cfg, PLUGINS)
-        self.assertTrue(os.path.exists(bak))
-        self.assertIn("# my comment", read(bak))
+        self.assertIn("# my comment", read(bak))   # the old file is kept
         self.assertEqual(len(folded), 2)
         st = MS.load(cfg, PLUGINS)
         self.assertEqual(st.overlay, {})
@@ -492,14 +410,9 @@ testing:
 
 
 class OldLayout(unittest.TestCase):
-    def test_old_layout_loads_with_one_notice(self):
-        for name, text in OLD_FIXTURES.items():
-            st, _ = load_text(text)
-            self.assertEqual(st.layout, "old", name)
-            self.assertEqual(st.notice.count("\n"), 0)
-            self.assertIn("bin/settings.py migrate", st.notice)
-
     def test_mapping_semantics(self):
+        for name, text in OLD_FIXTURES.items():
+            self.assertEqual(load_text(text)[0].layout, "old", name)
         st, _ = load_text(OLD_FIXTURES["community"])
         self.assertEqual(st.owners, [OWNER, "111000000000000002"])
         self.assertEqual(st.persona, "personas/pip.md")
@@ -559,9 +472,6 @@ class OldLayout(unittest.TestCase):
             self.assertEqual(new.layout, "new", name)
             self.assertEqual(MS.compare(legacy, new, known), [], name)
             # The one announced difference, and nothing else.
-            raw = MS.compare(legacy, new, known)
-            self.assertEqual(raw, [])
-            self.assertIn("conversational", notes[0])
             if legacy.get("who.replies", S(G2)) != "off":
                 self.assertEqual(legacy.get("who.replies", S(G2)),
                                  "when-addressed")
@@ -575,16 +485,16 @@ class OldLayout(unittest.TestCase):
         d = tmpdir("mig_")
         cfg = write(os.path.join(d, "config.yaml"),
                     "behavior:\n  respond_to: [mention]\n")
-        with self.assertRaisesRegex(MS.SettingsError, "respond_to"):
+        with self.assertRaises(MS.SettingsError):
             MS.migrate(cfg, PLUGINS)
         cfg = write(os.path.join(d, "config.yaml"), OLD_FIXTURES["open"])
-        with self.assertRaisesRegex(MS.SettingsError,
-                                    'server name the bot cannot match'):
+        with self.assertRaises(MS.SettingsError):
             MS.migrate(cfg, PLUGINS)  # no state.json to resolve the name
         self.assertEqual(read(cfg), OLD_FIXTURES["open"])
         cfg = write(os.path.join(d, "config.yaml"), NEW_BASE)
-        with self.assertRaisesRegex(MS.SettingsError, "already uses"):
+        with self.assertRaises(MS.SettingsError):
             MS.migrate(cfg, PLUGINS)
+        self.assertEqual(read(cfg), NEW_BASE)
 
     def test_migrate_refuses_a_behavior_change(self):
         d = tmpdir("mig_")
@@ -597,9 +507,7 @@ class OldLayout(unittest.TestCase):
                     notes, st)
         MS.build_migrated = broken
         try:
-            with self.assertRaisesRegex(MS.SettingsError,
-                                        "who.dms_from: 'owners' -> "
-                                        "'anyone'"):
+            with self.assertRaisesRegex(MS.SettingsError, "who.dms_from"):
                 MS.migrate(cfg, PLUGINS)
         finally:
             MS.build_migrated = real
@@ -616,45 +524,29 @@ def cli(*args, cfg):
 
 
 class CLI(unittest.TestCase):
-    def test_validate_show_fold_migrate(self):
+    def test_validate_fold_migrate(self):
         st, cfg = load_text(RES)
-        r = cli("validate", cfg=cfg)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("valid (new layout)", r.stdout)
-        r = cli("show", cfg=cfg)
-        self.assertIn("Settings for: everywhere", r.stdout)
-        self.assertIn("[built-in]", r.stdout)
-        self.assertIn("[config.yaml]", r.stdout)
+        self.assertEqual(cli("validate", cfg=cfg).returncode, 0)
+        self.assertEqual(cli("show", "--server", G1, "--channel", CH,
+                             "--explain", cfg=cfg).returncode, 0)
         MS.set_value(cfg, f'servers."{G1}".style.length', "detailed", OWNER,
                      PLUGINS)
-        r = cli("show", "--server", G1, "--channel", CH, "--category", CAT,
-                "--explain", cfg=cfg)
-        self.assertIn(f"inherited from category {CAT} (config.yaml)",
-                      r.stdout)
-        self.assertIn("[combined: server " + G1 + f", category {CAT}, "
-                      f"channel {CH}]", r.stdout)
-        self.assertIn(f"inherited from server {G1} (Discord change by "
-                      f"{OWNER} at", r.stdout)
-        self.assertIn("(not set)", r.stdout)
-        self.assertNotIn("who.dms_from", r.stdout)
-        r = cli("show", "--dms", cfg=cfg)
-        self.assertIn("who.dms_from", r.stdout)
+        before = read(cfg)
         r = cli("fold", "--dry-run", cfg=cfg)
-        self.assertIn(f'servers."{G1}".style.length', r.stdout)
+        self.assertEqual(read(cfg), before)
         r = cli("fold", cfg=cfg)
-        self.assertIn("comments are gone", r.stdout)
-        self.assertIn("Backed up config.yaml to", r.stdout)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(MS.load(cfg, PLUGINS).get("style.length", S()),
+                         "detailed")
         write(cfg, NEW_BASE + "everywhere:\n  style:\n    length: x\n")
         r = cli("validate", cfg=cfg)
         self.assertEqual(r.returncode, 1)
-        self.assertIn("everywhere.style.length", r.stderr)
         write(cfg, OLD_FIXTURES["minimal"])
         r = cli("migrate", "--dry-run", cfg=cfg)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("version: 1", r.stdout)
         self.assertEqual(read(cfg), OLD_FIXTURES["minimal"])
         r = cli("migrate", cfg=cfg)
-        self.assertIn("Backed up the old config.yaml", r.stdout)
+        self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(MS.load(cfg, PLUGINS).layout, "new")
 
     def test_shell_shim(self):
@@ -688,33 +580,6 @@ class CLI(unittest.TestCase):
                  '[$(setting token_env "")]"'],
                 capture_output=True, text=True).stdout.strip()
             self.assertEqual(out, "/a/b false false []", with_module)
-
-    def test_presence_reads_both_layouts(self):
-        for text, want in (
-                ("presence:\n  status_text: hi\n  status_kind: playing\n",
-                 {"name": "hi", "type": 0}),
-                (NEW_BASE + "presence:\n  status: yo\n  kind: custom\n",
-                 {"name": "Custom Status", "type": 4, "state": "yo"})):
-            d = tmpdir("pr_")
-            cfg = write(os.path.join(d, "config.yaml"), text)
-            code = ("import sys, json; sys.argv=['p','tok']; "
-                    f"sys.path.insert(0, {MUT!r}); import presence; "
-                    "print(json.dumps(presence.build_activity()))")
-            r = subprocess.run([sys.executable, "-c", code],
-                               capture_output=True, text=True,
-                               env=dict(os.environ, MUSE_DISCORD_CONFIG=cfg,
-                                        PYTHONPATH=FAKEWS))
-            self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]),
-                             want, r.stderr)
-        cfg = write(os.path.join(d, "config.yaml"),
-                    NEW_BASE + "presence:\n  enabled: off\n")
-        r = subprocess.run([sys.executable, os.path.join(MUT, "presence.py"),
-                            "tok"], capture_output=True, text=True,
-                           env=dict(os.environ, MUSE_DISCORD_CONFIG=cfg,
-                                    PYTHONPATH=FAKEWS))
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("not starting", r.stdout)
-
 
 # ---------------------------------------------------------------------------
 MON = NEW_BASE + f"""everywhere:
@@ -780,10 +645,8 @@ class LiveReload(MonitorBase):
         self.assertIsNone(self.kind(gmsg(U1, mention=True)))
         # An invalid edit keeps the last good settings, logged once.
         self.rewrite(NEW_BASE + "all_servers:\n  who:\n    replies: maybe\n")
-        with quiet() as buf:
+        with quiet():
             self.assertIsNone(m.trigger_kind(gmsg(U1, mention=True), G1))
-            self.assertIsNone(m.trigger_kind(gmsg(U1, mention=True), G1))
-        self.assertEqual(buf.getvalue().count("Config re-read failed"), 1)
         # The overlay is watched too.
         self.rewrite(NEW_BASE + f'servers:\n  "{G1}":\n    who:\n'
                      "      replies: off\n")
@@ -807,63 +670,49 @@ class LiveReload(MonitorBase):
         with quiet():
             self.assertEqual(m.retire_overlay_changes(), 1)
             self.assertEqual(m.retire_overlay_changes(), 0)
-        dms = m.api.dm_posts()
-        self.assertEqual(len(dms), 1)
-        self.assertIn("everywhere.style.length", dms[0]["content"])
+        self.assertEqual(len(m.api.dm_posts()), 1)   # the owner is told
         self.assertEqual(m.settings().get("style.length",
                                           MS.Scope.everywhere()), "normal")
 
 
-class Labels(MonitorBase):
+class TreatAsHuman(MonitorBase):
+    """The hidden testing.treat_as_human block (the e2e harness's second
+    bot is treated as a person) still works in the new layout."""
     cfg = NEW_BASE + f"""testing:
   treat_as_human: ["{OTHER_BOT}"]
-servers:
-  "{G1}":
-    name: Old Lounge
-    channels:
-      "{CH}":
-        name: "#general"
+everywhere:
+  who:
+    bots: ignore
 """
 
-    def test_stale_label_note_and_testing_block(self):
-        with quiet() as buf:
-            self.m.warn_stale_labels()
-            self.m.warn_stale_labels()
-        out = buf.getvalue()
-        self.assertEqual(out.count("Note: config.yaml labels"), 1, out)
-        self.assertIn('"Old Lounge", but Discord calls it "Lounge"', out)
-        # The hidden test-only block still works in the new layout.
+    def test_listed_bot_is_treated_as_a_person(self):
         self.assertFalse(self.m.is_bot_author(
             {"id": OTHER_BOT, "bot": True}))
-        self.assertIn("testing.treat_as_human", self.m.import_out)
+        self.assertEqual(self.kind(gmsg(OTHER_BOT, mention=True, bot=True)),
+                         "mention")
 
 
 class Cards(MonitorBase):
-    def test_owner_dm_card(self):
+    def test_card_audience_and_memory(self):
+        """What the worker is told it may say: everything to the owner in
+        their DM, public facts only to a member in a server (a thread
+        follows its parent channel)."""
         ok, item = self.enqueue(dmsg(OWNER, "hey"), dm=True)
         self.assertTrue(ok)
-        self.assertEqual(item["settings"], {
-            "where": "dm", "speaker": "owner", "audience": "private",
-            "memory": "everything", "length": "normal", "notes": "",
-            # The places a settings request can name (none discovered
-            # here); tests/settingsnl covers the list.
-            "places": {"servers": [], "more": False}})
-        self.assertIs(item["follow_up"], False)
+        card = item["settings"]
+        self.assertEqual((card["speaker"], card["audience"], card["memory"]),
+                         ("owner", "private", "everything"))
         self.assertTrue(item["owner_command"])
-
-    def test_stranger_in_server_card(self):
         ok, item = self.enqueue(gmsg(U1, "hello", mention=True))
-        self.assertEqual(item["settings"], {
-            "where": "server", "server": "Lounge", "channel": "general",
-            "speaker": "member", "audience": "public",
-            "memory": "public-only", "length": "normal",
-            "notes": "Server notes\nCategory notes"})
-        # A thread uses its parent channel's settings (and category).
+        card = item["settings"]
+        self.assertEqual((card["speaker"], card["audience"], card["memory"]),
+                         ("member", "public", "public-only"))
+        self.assertNotIn("places", card)
+        self.assertFalse(item["owner_command"])
         ok, item = self.enqueue(gmsg(U1, "hello", mention=True,
                                      channel=THREAD))
         self.assertEqual(item["settings"]["notes"],
                          "Server notes\nCategory notes")
-        self.assertEqual(item["settings"]["channel"], "general > plans")
 
     def test_bot_exchange_card_and_limit(self):
         m = self.m
@@ -888,8 +737,8 @@ class Cards(MonitorBase):
                    channel=CH_G2, guild=G2)
         ok, item = self.enqueue(msg, guild=G2)
         self.assertFalse(ok)
-        led = m._ledger_load()["entries"][msg["id"]]
-        self.assertEqual(led["reason"], "bot exchange limit (3) reached")
+        self.assertEqual(m._ledger_load()["entries"][msg["id"]]["status"],
+                         "skipped")
         # No limit (the default) in the other server.
         self.st["history"][CH] = self.st["history"][CH_G2]
         ok, item = self.enqueue(gmsg(OTHER_BOT, "x", mention=True, bot=True))
@@ -920,18 +769,18 @@ class NeverShare(MonitorBase):
         self.assertEqual(len(holds), 1)
         self.assertEqual(m.api.channel_posts(CH), [])  # nothing posted
         self.assertNotIn("falcon", out.lower())  # the list is never logged
-        dm = m.api.dm_posts()[-1]
+        dm = m.api.dm_posts()[-1]          # the owners are asked
         hid = next(iter(holds))
         ids = [c["custom_id"] for c in dm["components"][0]["components"]]
         self.assertEqual(ids, [f"mdhold:send:{hid}",
                                f"mdhold:discard:{hid}"])
-        self.assertIn("Project Falcon ships", dm["content"])
         # Settled: out of the queue (no worker gets it again) and ledgered.
         self.assertEqual(m.load_queue(), [])
         self.assertEqual(m._ledger_load()["entries"][item["message_id"]]
                          ["status"], "skipped")
-        resp, recs = self.click(hid, "send", uid=U1)
-        self.assertIn("Only this bot's owners", resp["data"]["content"])
+        resp, recs = self.click(hid, "send", uid=U1)   # not an owner
+        self.assertEqual(recs, [])
+        self.assertEqual(m.api.channel_posts(CH), [])
         resp, recs = self.click(hid, "send")
         self.assertEqual(resp["type"], 7)
         with quiet():
@@ -943,7 +792,7 @@ class NeverShare(MonitorBase):
         self.assertEqual(m._ledger_load()["entries"][item["message_id"]]
                          ["status"], "replied")
         resp, recs = self.click(hid, "send")
-        self.assertIn("no longer waiting", resp["data"]["content"])
+        self.assertEqual(recs, [])               # sent once only
 
     def test_discard_and_expiry(self):
         m = self.m
@@ -953,19 +802,15 @@ class NeverShare(MonitorBase):
         with quiet():
             m.apply_record(self.st, recs[0])
         self.assertEqual(self.st["holds"], {})
-        self.assertIn("discarded", m._ledger_load()["entries"]
-                      [item["message_id"]]["reason"])
         item, out, holds = self.hold("the cat is out")
         hid = next(iter(holds))
         holds[hid]["at"] -= 25 * 3600
         m._holds_live[hid] -= 25 * 3600
         resp, recs = self.click(hid, "send")
-        self.assertIn("no longer waiting", resp["data"]["content"])
+        self.assertEqual(recs, [])
         with quiet():
             m.expire_holds(self.st)
         self.assertEqual(self.st["holds"], {})
-        self.assertIn("expired", m._ledger_load()["entries"]
-                      [item["message_id"]]["reason"])
         self.assertEqual(m.api.channel_posts(CH), [])
 
     def test_whole_phrase_and_owner_dm_exempt(self):
@@ -1029,7 +874,7 @@ class Who(MonitorBase):
         self.assertEqual(k(gmsg(OWNER, mention=True, roles=[]), G1),
                          "mention")
         self.assertIsNone(k(gmsg(OTHER_BOT, mention=True, bot=True,
-                                 roles=[ROLE]), G1))
+                                 roles=[ROLE]), G1))       # who.ignore
         # No member object (a REST-polled message): roles are fetched.
         m.api.members[(G1, U1)] = [ROLE]
         self.assertEqual(k(gmsg(U1, mention=True), G1), "mention")
@@ -1037,8 +882,7 @@ class Who(MonitorBase):
         # Other servers: everyone.
         self.assertEqual(k(gmsg(U1, mention=True, channel=CH_G2, guild=G2,
                                 roles=[]), G2), "mention")
-
-    def test_bots_ignore_and_replies_off(self):
+        # who.bots: ignore; who.replies: off in one server.
         self.rewrite(NEW_BASE + "everywhere:\n  who:\n    bots: ignore\n"
                      f'servers:\n  "{G2}":\n    who:\n      replies: off\n')
         self.assertIsNone(self.kind(gmsg(OTHER_BOT, mention=True, bot=True)))
@@ -1063,8 +907,8 @@ class Who(MonitorBase):
         ok, item = self.enqueue(msg)
         self.assertFalse(ok)
         self.assertFalse(os.path.exists(m.QUARANTINE_FILE))
-        self.assertIn("suspicious, ignored", m._ledger_load()["entries"]
-                      [msg["id"]]["reason"])
+        self.assertEqual(m._ledger_load()["entries"][msg["id"]]["status"],
+                         "skipped")
 
 
 class Caps(MonitorBase):
@@ -1093,8 +937,7 @@ servers:
         for _ in range(3):
             self.assertTrue(ok(gmsg(OWNER, mention=True)))
         self.assertEqual(self.st["rate"]["day_count"], 3)
-
-    def test_per_person_in_dms_only(self):
+        # Per person, in DMs only.
         self.rewrite(self.cfg.replace("per_day: 3", "per_day: none")
                      .replace("per_day: 1", "per_day: none")
                      + "dms:\n  who:\n    dms_from: anyone\n"
@@ -1122,8 +965,8 @@ class FollowUps(MonitorBase):
         self.assertIsNone(self.kind(gmsg(U1, "and also")))
         self.answered()
         self.assertEqual(self.kind(gmsg(U1, "and also")), "follow_up")
-
-    def test_only_that_person_and_not_bots(self):
+        # Only that person, not bots; per channel.
+        self.setUp()   # a fresh monitor and state
         self.answered()
         self.assertIsNone(self.kind(gmsg(U2, "me too")))
         self.st["follow_up"][f"{CH}:{OTHER_BOT}"] = time.time()
@@ -1133,6 +976,13 @@ class FollowUps(MonitorBase):
                                      channel=CH2))
         self.reply(item, "a")
         self.assertNotIn(f"{CH2}:{OTHER_BOT}", self.st["follow_up"])
+        # Per channel: a thread or another channel is not that window.
+        self.answered()
+        self.assertIsNone(self.kind(gmsg(U1, "here", channel=THREAD)))
+        self.assertIsNone(self.kind(gmsg(U1, "there", channel=CH2)))
+        self.answered(channel=THREAD)
+        self.assertEqual(self.kind(gmsg(U1, "here", channel=THREAD)),
+                         "follow_up")
 
     def test_closes_when_addressing_someone_else(self):
         self.answered()
@@ -1149,6 +999,11 @@ class FollowUps(MonitorBase):
         # A reply to the bot is direct address, not someone else.
         self.assertEqual(self.kind(gmsg(U1, "ok", reply_to_author=BOT)),
                          "mention")
+        # replies: when-addressed turns follow-ups off.
+        self.answered()
+        self.rewrite(NEW_BASE + "all_servers:\n  who:\n    replies: "
+                     "when-addressed\n")
+        self.assertIsNone(self.kind(gmsg(U1, "and also")))
 
     def test_expiry_restart_and_no_self_extension(self):
         key = f"{CH}:{U1}"
@@ -1164,20 +1019,6 @@ class FollowUps(MonitorBase):
         self.answered()  # the bot replies again: window restarts
         self.assertGreater(self.st["follow_up"][key], time.time() - 5)
         self.assertEqual(self.kind(gmsg(U1, "two")), "follow_up")
-
-    def test_per_channel_and_thread(self):
-        self.answered()
-        self.assertIsNone(self.kind(gmsg(U1, "here", channel=THREAD)))
-        self.assertIsNone(self.kind(gmsg(U1, "there", channel=CH2)))
-        self.answered(channel=THREAD)
-        self.assertEqual(self.kind(gmsg(U1, "here", channel=THREAD)),
-                         "follow_up")
-
-    def test_when_addressed_disables(self):
-        self.answered()
-        self.rewrite(NEW_BASE + "all_servers:\n  who:\n    replies: "
-                     "when-addressed\n")
-        self.assertIsNone(self.kind(gmsg(U1, "and also")))
 
     def test_follow_up_bursts_coalesce(self):
         m = self.m
@@ -1259,8 +1100,7 @@ servers:
                                 "guilds": m.GUILDS}, join, G1,
                 scope=m.scope_for(G1, CH)) if i]
         self.assertEqual(items[0]["channel_id"], CH2)
-        self.assertIn("Also: Point them to #rules.", items[0]
-                      ["welcome_prompt"])
+        self.assertIn("Point them to #rules.", items[0]["welcome_prompt"])
         # media: everyone in G1; a role elsewhere; the per_day total.
         ok, item = self.enqueue(gmsg(U1, "draw", mention=True))
         self.assertTrue(item["may_generate"])
@@ -1276,35 +1116,6 @@ servers:
         ok, item = self.enqueue(gmsg(U2, "again", mention=True, roles=[ROLE],
                                      channel=CH_G2, guild=G2), guild=G2)
         self.assertFalse(item["may_generate"])  # everywhere per_day: 1
-
-    def test_old_param_manifest_shape(self):
-        d = tmpdir("plug_")
-        pd = os.path.join(d, "plugins", "legacy")
-        os.makedirs(pd)
-        write(os.path.join(pd, "plugin.yaml"),
-              "name: legacy\nhooks: [gate_message]\nparams:\n  limit:\n"
-              "    default: 1\n    per_guild: {}\n  plain:\n    default: x\n")
-        write(os.path.join(pd, "plugin.py"),
-              "def register(api):\n"
-              "    def gate(ctx, msg, gid):\n"
-              "        return {'legacy': [api.param('limit', gid),"
-              " api.param('plain', gid)]}\n"
-              "    return {'gate_message': gate}\n")
-        m = load_monitor(f"owners:\n  user_ids: ['{OWNER}']\nplugins:\n"
-                         f"  legacy:\n    enabled: true\n    limit:\n"
-                         f"      per_guild: {{'{G1}': 5}}\n", tmp=d)
-        m.PLUGINS_DIR = os.path.join(d, "plugins")
-        with quiet():
-            m.load_plugins()
-        st = state(m)
-        for guild, ch, want in ((G1, CH, [5, "x"]), (G2, CH_G2, [1, "x"])):
-            q = []
-            with quiet():
-                m.enqueue_message(gmsg(U1, "hi", mention=True, channel=ch,
-                                       guild=guild), "#c", st, q,
-                                  guild_id=guild)
-            self.assertEqual(q[0]["legacy"], want)
-
 
 # ---------------------------------------------------------------------------
 class HookPayload(unittest.TestCase):

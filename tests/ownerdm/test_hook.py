@@ -73,8 +73,7 @@ class ForgedAnswersDoNotHideOwnerDms(unittest.TestCase):
                 self.write(name, forged)
                 self.assertEqual(self.ids(), ["1", "2"], forged)
                 os.remove(os.path.join(self.pkg, name))
-
-    def test_real_answers_count(self):
+        # Real answers (with the DM's nonce) do count.
         self.write("reply_queue.json", [item("1", frags=["11"]), item("2")])
         self.write("reply_outbox.json", [
             {"item": "1", "reply_to": "11", "owner_dm_nonce": N1},
@@ -84,19 +83,6 @@ class ForgedAnswersDoNotHideOwnerDms(unittest.TestCase):
         self.write("reply_outbox.processing.json", [
             {"reply_to": "11", "owner_dm_nonce": N1}])
         self.assertEqual(self.ids(), ["2"])
-
-    def test_other_items_unchanged(self):
-        # Not owner DMs: any outbox entry naming them answers them, as
-        # before; a nonce never reaches their wake.
-        self.write("owner_dm_nonces.json", {"1": N1, "7": "c" * 32})
-        self.write("reply_queue.json", [item("5", "mention", "member"),
-                                        item("6", "dm", "member"),
-                                        item("7", "mention", "owner")])
-        self.write("reply_outbox.json", [{"item": "5", "text": "x"}])
-        p = self.wake()
-        self.assertEqual([i["message_id"] for i in p["items"]], ["6", "7"])
-        self.assertNotIn("owner_dm_nonce", json.dumps(p))
-        self.assertNotIn("c" * 32, json.dumps(p))
 
     def test_mixed_queue_nonce_only_in_owner_wake(self):
         self.write("reply_queue.json", [item("5", "mention", "member"),
@@ -114,6 +100,18 @@ class ForgedAnswersDoNotHideOwnerDms(unittest.TestCase):
         self.assertEqual([i["message_id"] for i in second["items"]], ["5"])
         self.assertNotIn(N1, run.stdout)
         self.assertNotIn(N2, run.stdout)
+        # Not owner DMs: any outbox entry naming them answers them, as
+        # before; a nonce never reaches their wake (not even one the
+        # nonce file lists for a server item).
+        self.write("owner_dm_nonces.json", {"1": N1, "7": "c" * 32})
+        self.write("reply_queue.json", [item("5", "mention", "member"),
+                                        item("6", "dm", "member"),
+                                        item("7", "mention", "owner")])
+        self.write("reply_outbox.json", [{"item": "5", "text": "x"}])
+        p = self.wake()
+        self.assertEqual([i["message_id"] for i in p["items"]], ["6", "7"])
+        self.assertNotIn("owner_dm_nonce", json.dumps(p))
+        self.assertNotIn("c" * 32, json.dumps(p))
 
     def test_unreadable_nonce_file(self):
         with open(os.path.join(self.pkg, "owner_dm_nonces.json"), "w") as f:

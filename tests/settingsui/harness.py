@@ -11,7 +11,6 @@ import copy
 import json
 import os
 import sys
-import time
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
@@ -180,7 +179,7 @@ OUTCOMES = [
 
 
 def install_determinism():
-    """Fixed timestamps and group ids, so snapshots do not drift."""
+    """Fixed timestamps and group ids, so runs are repeatable."""
     counter = {"n": 0}
 
     def gid(prefix="g"):
@@ -468,22 +467,3 @@ def find(resp, prefix=None, label=None):
             continue
         return c
     return None
-
-
-def by_label(resp, label):
-    for c in controls(resp):
-        if c.get("label") == label:
-            return c
-    return None
-
-
-def option(comp, label=None, value=None):
-    for o in comp.get("options") or []:
-        if (label is None or o["label"] == label) and \
-                (value is None or o["value"] == value):
-            return o
-    return None
-
-
-def ts():
-    return time.time()

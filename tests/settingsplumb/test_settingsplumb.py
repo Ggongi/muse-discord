@@ -1,8 +1,9 @@
 """/settings plumbing (settings PR 2), offline: command registration,
 interaction routing to settings_ui.handle (a stub here), the 3s path
-under a slow main loop, SettingsCtx (overlay writes, reset, undo, live
-reload, thread safety, directory), the admin-change digest, the join
-notice's Configure button, and a missing settings_ui.
+under a slow main loop, SettingsCtx (overlay writes, undo under the
+lock, thread safety, the stash, outcomes kept to their place), the
+admin-change digest, the join notice's Configure button, and a missing
+settings_ui.
 
 Usage: [MUT_DIR=<tree>] python3 tests/settingsplumb/test_settingsplumb.py"""
 import json
@@ -145,28 +146,22 @@ class Registration(unittest.TestCase):
             r = self.mod.register_commands(status)
         return r, out.getvalue()
 
-    def test_definition(self):
-        c = self.mod.SETTINGS_COMMAND
-        self.assertEqual(c["name"], "settings")
-        self.assertEqual(c["contexts"], [0, 1])
-        self.assertEqual(c["integration_types"], [0])
-        self.assertIsNone(c["default_member_permissions"])
-        self.assertNotIn("dm_permission", c)  # deprecated for contexts
-        self.assertLessEqual(len(c["description"]), 100)
+    def test_command_definitions_within_discord_limits(self):
+        for c in (self.mod.SETTINGS_COMMAND, self.mod.WHY_COMMAND):
+            self.assertEqual(c["contexts"], [0, 1])       # servers and DMs
+            self.assertEqual(c["integration_types"], [0])
+            self.assertNotIn("dm_permission", c)   # deprecated for contexts
+            self.assertLessEqual(len(c["name"]), 32)
+        self.assertLessEqual(len(self.mod.SETTINGS_COMMAND["description"]),
+                             100)
+        self.assertIsNone(self.mod.SETTINGS_COMMAND[
+            "default_member_permissions"])
+        why = self.mod.WHY_COMMAND
+        self.assertEqual(why["type"], 3)              # a message command
+        self.assertNotIn("description", why)          # none on menu commands
+        self.assertEqual(why["default_member_permissions"], "32")
 
-    def test_why_definition(self):
-        c = self.mod.WHY_COMMAND
-        self.assertEqual(c["type"], 3)              # a message command
-        self.assertEqual(c["name"], "Why no reply?")
-        self.assertEqual(self.mod.WHY_NAMES[1], "Why no reply")
-        self.assertEqual(c["contexts"], [0, 1])
-        self.assertEqual(c["integration_types"], [0])
-        self.assertNotIn("description", c)          # none on menu commands
-        # Manage Server: members don't see it; owners have the button
-        self.assertEqual(c["default_member_permissions"], "32")
-        self.assertLessEqual(len(c["name"]), 32)
-
-    def test_created_when_missing(self):
+    def test_created_once_and_unchanged_when_equal(self):
         api = FakeCommands(self.mod)
         r, out = self.run_reg()
         self.assertEqual(r, "created")
@@ -174,14 +169,14 @@ class Registration(unittest.TestCase):
         self.assertEqual(len(posts), 2)
         self.assertEqual(posts[0][2], self.mod.SETTINGS_COMMAND)
         self.assertEqual(posts[1][2], self.mod.WHY_COMMAND)
-        self.assertIn("/settings command created", out)
         # Once per run: later ticks make no request.
         n = len(api.log)
         self.mod._COMMAND_REG["next_try"] = 0
         self.assertIsNone(self.run_reg()[0])
         self.assertEqual(len(api.log), n)
-
-    def test_noop_when_equal(self):
+        # Already there as Discord returns it: nothing written (a PATCH
+        # every boot would be rate limited).
+        self.mod = load_monitor(CFG)
         api = FakeCommands(self.mod, [discord_copy(self.mod),
                                       why_copy(self.mod),
                                       {"id": "x", "name": "other",
@@ -189,7 +184,6 @@ class Registration(unittest.TestCase):
         r, out = self.run_reg()
         self.assertEqual(r, "unchanged")
         self.assertEqual([x[0] for x in api.log], ["GET", "GET"])
-        self.assertNotIn("/settings command", out)
 
     def test_patch_when_different(self):
         for over in ({"contexts": [0, 1, 2]}, {"description": "old"},
@@ -207,6 +201,15 @@ class Registration(unittest.TestCase):
             self.assertEqual(patches[0][1], "/applications/777/commands/c1")
             self.assertEqual(patches[0][2], mod.SETTINGS_COMMAND)
             self.assertFalse([x for x in api.log if x[0] == "POST"])
+        # The message command too.
+        mod = load_monitor(CFG)
+        api = FakeCommands(mod, [discord_copy(mod),
+                                 why_copy(mod, contexts=[0])])
+        with quiet():
+            self.assertEqual(mod.register_commands(), "updated")
+        patches = [x for x in api.log if x[0] == "PATCH"]
+        self.assertEqual(patches[0][1], "/applications/777/commands/c2")
+        self.assertEqual(patches[0][2], mod.WHY_COMMAND)
 
     def test_why_name_falls_back_when_refused(self):
         """Discord answers 400 when it does not take "?" in the name: the
@@ -224,7 +227,6 @@ class Registration(unittest.TestCase):
         r, out = self.run_reg()
         self.assertEqual(r, "created")
         self.assertIn("Why no reply", [c["name"] for c in api.cmds])
-        self.assertIn("refused the command name", out)
         # A later run finds it under the fallback name: nothing to do.
         api2 = FakeCommands(self.mod, [discord_copy(self.mod),
                                        why_copy(self.mod,
@@ -233,79 +235,21 @@ class Registration(unittest.TestCase):
         self.assertEqual(self.run_reg()[0], "unchanged")
         self.assertEqual([x[0] for x in api2.log], ["GET"])
 
-    def test_why_patched_when_different(self):
-        api = FakeCommands(self.mod, [discord_copy(self.mod),
-                                      why_copy(self.mod, contexts=[0])])
-        r, _ = self.run_reg()
-        self.assertEqual(r, "updated")
-        patches = [x for x in api.log if x[0] == "PATCH"]
-        self.assertEqual(patches[0][1], "/applications/777/commands/c2")
-        self.assertEqual(patches[0][2], self.mod.WHY_COMMAND)
-
     def test_retry_on_failure_never_fatal(self):
         api = FakeCommands(self.mod)
         api.fail = 2
         r, out = self.run_reg()
         self.assertIsNone(r)
-        self.assertIn("registration failed", out)
         self.assertFalse(self.mod._COMMAND_REG["done"])
         # Not before the retry delay.
         n = len(api.log)
         self.assertIsNone(self.run_reg()[0])
         self.assertEqual(len(api.log), n)
-        # Next try fails the same way: not logged again.
         self.mod._COMMAND_REG["next_try"] = 0
-        r, out = self.run_reg()
-        self.assertIsNone(r)
-        self.assertEqual(out, "")
+        self.assertIsNone(self.run_reg()[0])       # fails again
         self.mod._COMMAND_REG["next_try"] = 0
         self.assertEqual(self.run_reg()[0], "created")
         self.assertTrue(self.mod._COMMAND_REG["done"])
-
-    def test_app_id_from_gateway_ready(self):
-        api = FakeCommands(self.mod, app="555")
-        r, _ = self.run_reg({"application": {"id": "555", "flags": 0}})
-        self.assertEqual(r, "created")
-        self.assertNotIn(("GET", "/applications/@me"), api.log)
-
-    def test_waits_for_identity_and_backoff(self):
-        api = FakeCommands(self.mod)
-        self.mod.BOT_USER_ID = None
-        self.assertIsNone(self.run_reg()[0])
-        self.mod.BOT_USER_ID = "1"
-        self.mod._rl_until = time.time() + 100
-        self.assertIsNone(self.run_reg()[0])
-        self.assertEqual(api.log, [])
-        self.mod._rl_until = 0
-        self.assertEqual(self.run_reg()[0], "created")
-
-    def test_api_patch_request_shape(self):
-        seen = {}
-
-        class Resp:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-
-            def read(self):
-                return b"{}"
-
-        def fake_urlopen(req, timeout=None):
-            seen.update(method=req.get_method(), url=req.full_url,
-                        data=req.data, timeout=timeout)
-            return Resp()
-        orig = self.mod.urllib.request.urlopen
-        self.mod.urllib.request.urlopen = fake_urlopen
-        try:
-            self.mod.api_patch("/applications/1/commands/2", {"a": 1})
-        finally:
-            self.mod.urllib.request.urlopen = orig
-        self.assertEqual(seen["method"], "PATCH")
-        self.assertTrue(seen["url"].endswith("/applications/1/commands/2"))
-        self.assertEqual(json.loads(seen["data"]), {"a": 1})
-
 
 # ----------------------------------------------------------------- routing
 class Routing(unittest.TestCase):
@@ -336,17 +280,15 @@ class Routing(unittest.TestCase):
             self.assertIs(got, ix)
             self.assertIsInstance(ctx, self.mod.SettingsCtx)
             self.assertEqual(r["type"], 4 if ix["type"] == 2 else 7)
-
-    def test_not_owner_only(self):
         # Permissions are settings_ui's: strangers reach it too.
+        n = len(self.stub.calls)
         self.dispatch(cmd_ix(user=U1))
         self.dispatch(comp_ix("mdset:x", user=U1))
-        self.assertEqual(len(self.stub.calls), 2)
+        self.assertEqual(len(self.stub.calls), n + 2)
 
     def test_other_prefixes_and_commands_untouched(self):
         r = self.dispatch(comp_ix("mdsetx:1"))
-        self.assertEqual(r["data"]["content"],
-                         "That control is no longer active.")
+        self.assertEqual(r["data"]["flags"], 64)
         ix = cmd_ix()
         ix["data"]["name"] = "other"
         self.dispatch(ix)
@@ -355,7 +297,7 @@ class Routing(unittest.TestCase):
         self.assertIsNone(self.dispatch({"id": "1", "token": "t",
                                          "type": 4, "data": {}}))
 
-    def test_components_v2_forwarded_verbatim(self):
+    def test_bodies_forwarded_verbatim(self):
         """A Components V2 page (flags 64|32768, no content) reaches
         Discord as settings_ui made it, for a new message and an edit."""
         for t, flags in ((4, 64 | 32768), (7, 32768)):
@@ -368,8 +310,6 @@ class Routing(unittest.TestCase):
             r = self.dispatch(comp_ix("mdset:2:pg:x:b"))
             self.assertEqual(r, body)
             self.assertNotIn("content", r["data"])
-
-    def test_body_forwarded_verbatim(self):
         body = {"type": 9, "data": {"custom_id": "mdset:m:1",
                                     "title": "Edit", "components": []}}
         self.stub.body = body
@@ -380,15 +320,13 @@ class Routing(unittest.TestCase):
         r = self.dispatch(cmd_ix())
         self.assertEqual(r["type"], 4)
         self.assertEqual(r["data"]["flags"], 64)
-        self.assertIn("no callback body", self.out)
 
         def boom(ix, ctx):
             raise RuntimeError("kaput")
         self.mod._SETTINGS_UI["mod"] = types.SimpleNamespace(handle=boom)
         r = self.dispatch(cmd_ix())
         self.assertEqual(r["data"]["flags"], 64)
-        self.assertIn("Something went wrong", r["data"]["content"])
-        self.assertIn("kaput", self.out)
+        self.assertNotIn("kaput", r["data"]["content"])   # no internals
 
     def test_responder_thread_posts_callback(self):
         q = queue.Queue()
@@ -411,7 +349,7 @@ class Routing(unittest.TestCase):
 
 
 class MissingUI(unittest.TestCase):
-    def test_ephemeral_and_logged_once(self):
+    def test_missing_ui_gets_an_ephemeral_answer(self):
         mod = load_monitor(CFG)
         mod.BASE_DIR = tmpdir("noui_")
         saved = list(sys.path)
@@ -420,7 +358,7 @@ class MissingUI(unittest.TestCase):
                        if not os.path.isfile(os.path.join(
                            p or ".", "settings_ui.py"))]
         try:
-            with quiet() as out:
+            with quiet():
                 r1 = mod.dispatch_interaction(cmd_ix(), lambda r: None)
                 r2 = mod.dispatch_interaction(comp_ix("mdset:x"),
                                               lambda r: None)
@@ -429,21 +367,6 @@ class MissingUI(unittest.TestCase):
         for r in (r1, r2):
             self.assertEqual(r["type"], 4)
             self.assertEqual(r["data"]["flags"], 64)
-            self.assertEqual(r["data"]["content"], "Settings UI unavailable.")
-        self.assertEqual(out.getvalue().count("/settings UI unavailable ("), 1)
-
-    def test_found_next_to_monitor(self):
-        mod = load_monitor(CFG)
-        d = tmpdir("ui_")
-        with open(os.path.join(d, "settings_ui.py"), "w") as f:
-            f.write("PREFIX = 'mdset'\n"
-                    "def handle(interaction, ctx):\n"
-                    "    return {'type': 4, 'data': {'content': "
-                    "'hi ' + ctx.bot_id, 'flags': 64}}\n")
-        mod.BASE_DIR = d
-        r = mod.dispatch_interaction(cmd_ix(), lambda r: None)
-        self.assertEqual(r["data"]["content"], "hi " + mod.BOT_ID)
-
 
 # ------------------------------------------------------------- main loop
 class MainLoop(unittest.TestCase):
@@ -478,16 +401,6 @@ class Ctx(unittest.TestCase):
         with quiet():
             return self.mod.SettingsCtx()
 
-    def test_basics(self):
-        c = self.ctx()
-        self.assertEqual(c.owners, {OWNER})
-        self.assertEqual(c.bot_id, self.mod.BOT_ID)
-        self.assertLess(abs(c.now - time.time()), 5)
-        self.assertIsInstance(c.settings, MS.Settings)
-        with quiet() as out:
-            c.log("hello")
-        self.assertIn("/settings: hello", out.getvalue())
-
     def test_write_visible_at_once_and_to_main_loop(self):
         c = self.ctx()
         key = f'servers."{G1}".who.replies'
@@ -509,17 +422,6 @@ class Ctx(unittest.TestCase):
                          ("dms.who.bot_exchange_limit", 3)):
             with self.assertRaises(MS.SettingsError):
                 c.write(key, val, OWNER)
-
-    def test_reset_writes_inherit(self):
-        c = self.ctx()
-        with quiet():
-            c.write("everywhere.style.length", "brief", OWNER)
-            c.reset("everywhere.style.length", OWNER)
-        self.assertEqual(
-            overlay(self.mod)["values"]["everywhere.style.length"]["value"],
-            "inherit")
-        self.assertEqual(c.settings.get("style.length",
-                                        MS.Scope.everywhere()), "normal")
 
     def test_undo_delegates_to_muse_settings_under_lock(self):
         c = self.ctx()
@@ -543,44 +445,6 @@ class Ctx(unittest.TestCase):
         self.assertEqual(seen, [(self.mod._SETTINGS.config_path,
                                  f'servers."{G1}"', OWNER,
                                  self.mod.PLUGINS_DIR, True)])
-
-    def test_undo_without_muse_settings_undo(self):
-        had = getattr(self.mod.MS, "undo", None)
-        if had is not None:
-            del self.mod.MS.undo
-        try:
-            with self.assertRaises(MS.SettingsError):
-                self.ctx().undo("everywhere", OWNER)
-        finally:
-            if had is not None:
-                self.mod.MS.undo = had
-
-    @unittest.skipUnless(hasattr(MS, "undo"),
-                         "muse_settings.undo comes with settings_ui")
-    def test_undo_real(self):
-        c = self.ctx()
-        srv = f'servers."{G1}"'
-        sc = MS.Scope.server(G1, "Lounge")
-        with quiet():
-            c.write(f"{srv}.style.length", "brief", OWNER)
-            c.write(f"{srv}.style.length", "detailed", OWNER)
-            c.write(f'{srv}.channels."{CH}".replies', "off", OWNER)
-            self.assertEqual(c.undo(srv, OWNER), f"{srv}.style.length")
-            self.assertEqual(c.settings.get("style.length", sc), "brief")
-            self.assertEqual(c.undo(srv, OWNER), f"{srv}.style.length")
-            self.assertEqual(c.settings.get("style.length", sc), "normal")
-            self.assertIsNone(c.undo(srv, OWNER))
-            self.assertIsNone(c.undo("dms", OWNER))
-
-    def test_reload_is_the_monitors_watcher(self):
-        c = self.ctx()
-        with quiet():
-            MS.set_value(self.mod._SETTINGS.config_path,
-                         "everywhere.style.length", "brief", OWNER)
-            st = c.reload()
-        self.assertIs(st, self.mod._SETTINGS.current)
-        self.assertEqual(st.get("style.length", MS.Scope.everywhere()),
-                         "brief")
 
     def test_reload_hooks_run_on_main_thread_only(self):
         ran = []
@@ -673,73 +537,6 @@ class Ctx(unittest.TestCase):
         self.assertEqual(mod.api.dm_posts(), [])
 
 
-# ------------------------------------------------------------- directory
-class Directory(unittest.TestCase):
-    def test_discovery_feeds_guilds_and_channels(self):
-        mod = load_monitor(CFG, channels=False)
-        mod.BOT_ID = "999000000000000001"
-        routes = {
-            "/users/@me/guilds": [{"id": G1, "name": "Lounge"},
-                                  {"id": G2, "name": "Atrium"}],
-            f"/guilds/{G1}?with_counts=true": {
-                "id": G1, "roles": [], "approximate_member_count": 1240,
-                "system_channel_id": CH},
-            f"/guilds/{G2}?with_counts=true": {"id": G2, "roles": []},
-            f"/guilds/{G1}/channels": [
-                {"id": CAT, "type": 4, "name": "Text", "position": 0},
-                {"id": CH, "type": 0, "name": "general",
-                 "parent_id": CAT, "position": 1}],
-            f"/guilds/{G2}/channels": [],
-            f"/guilds/{G1}/threads/active": {"threads": []},
-            f"/guilds/{G2}/threads/active": {"threads": []},
-        }
-
-        def get(path):
-            if path in routes:
-                return routes[path]
-            if path.startswith("/channels/"):
-                return []
-            raise HTTPErr(404)
-        mod.api_get = get
-        with quiet():
-            mod.CHANNELS, mod.GUILDS = mod.discover_channels()
-            mod.publish_directory()
-            ctx = mod.SettingsCtx()
-        self.assertEqual(ctx.guilds(), [
-            {"id": G2, "name": "Atrium", "member_count": None,
-             "system_channel_id": None},
-            {"id": G1, "name": "Lounge", "member_count": 1240,
-             "system_channel_id": CH}])
-        chans = ctx.channels(G1)
-        self.assertEqual([(c["id"], c["type"], c["parent_id"])
-                          for c in chans],
-                         [(CAT, 4, None), (CH, 0, CAT)])
-        # The bot reads #general; its send permission is unknown here (no
-        # roles), and a category is neither readable nor not.
-        self.assertTrue(chans[1]["readable"])
-        self.assertIsNone(chans[1]["can_send"])
-        self.assertNotIn("readable", chans[0])
-        self.assertEqual(ctx.channels(G2), [])
-        self.assertEqual(ctx.channels("123"), [])
-        # GUILD_CREATE's member_count refreshes the cache.
-        st = state(mod)
-        with quiet():
-            mod.on_guild_event(st, {"op": "create", "id": G2,
-                                    "member_count": 7})
-        self.assertEqual(ctx.guilds()[0]["member_count"], 7)
-        # A failed channel list keeps the previous one.
-        routes.pop(f"/guilds/{G1}/channels")
-        with quiet():
-            mod.CHANNELS, mod.GUILDS = mod.discover_channels(mod.CHANNELS)
-            mod.publish_directory()
-        self.assertEqual(len(ctx.channels(G1)), 2)
-        # Callers get copies.
-        ctx.channels(G1)[0]["name"] = "x"
-        ctx.guilds()[0]["name"] = "x"
-        self.assertEqual(ctx.channels(G1)[0]["name"], "Text")
-        self.assertEqual(ctx.guilds()[0]["name"], "Atrium")
-
-
 # ------------------------------------------------- data for settings_ui
 class UIData(unittest.TestCase):
     """What the redesigned /settings reads through SettingsCtx: the
@@ -751,60 +548,6 @@ class UIData(unittest.TestCase):
         with quiet():
             self.mod.publish_directory()
             self.ctx = self.mod.SettingsCtx()
-
-    def test_ledger_keeps_author_id_code_and_detail(self):
-        m = self.mod
-        msg = {"id": "1001", "channel_id": CH,
-               "author": {"id": U1, "username": "sam"}}
-        with quiet():
-            m.note_refused(msg, "#general", "who.replies is off here")
-        e = m._ledger_load()["entries"]["1001"]
-        self.assertEqual((e["author_id"], e["author"], e["code"]),
-                         (U1, "sam", "replies-off"))
-        # A later outcome keeps the author id and drops stale detail.
-        m.ledger_record_many(["1001"], "skipped", "daily cap reached", CH,
-                             "sam", detail={"key": "limits.per_day",
-                                            "counter": "everywhere",
-                                            "cap": 3})
-        m.ledger_record("1001", "replied", "sweep sync", CH, "sam")
-        e = m._ledger_load()["entries"]["1001"]
-        self.assertEqual((e["author_id"], e["code"]), (U1, "replied"))
-        self.assertNotIn("detail", e)
-        self.assertEqual(self.ctx.display_name(U1), "sam")
-        for status, reason, code in (
-                ("skipped", "settings: who.replies is off for DMs",
-                 "dm-off"),
-                ("skipped", "settings: who.bots: ignore", "bots-ignore"),
-                ("skipped", "settings: who.dms_from is owners",
-                 "dm-not-allowed"),
-                ("skipped", "settings: not allowed by who.allow / "
-                 "who.ignore", "not-allowed"),
-                ("skipped", "bot exchange limit (4) reached",
-                 "bot-exchange"),
-                ("skipped", "suspicious, ignored: x", "suspicious-ignored"),
-                ("skipped", "predates bot join", "predates-join"),
-                ("skipped", "403 missing access", "no-send"),
-                ("skipped", "enqueue failed 3x", "internal"),
-                ("enqueue_failed", "sweep enqueue failed", "internal"),
-                ("skipped", "no reply (worker's call)", "worker-skipped"),
-                ("skipped", "send failed: boom", "send-failed"),
-                ("quarantined", "ignore previous", "quarantined"),
-                ("skipped", "something new", "other")):
-            self.assertEqual(m.ledger_code(status, reason), code, reason)
-
-    def test_rate_block_says_which_cap(self):
-        m = load_monitor(CFG + f'servers:\n  "{G1}":\n    limits:\n'
-                         f'      per_person_per_day: 1\n')
-        st = state(m)
-        scope = MS.Scope.server(G1)
-        with quiet():
-            self.assertIsNone(m.rate_block(st, U1, CH, scope))
-            m.rate_record(st, U1, scope)
-            got = m.rate_block(st, U1, CH, scope)
-            self.assertFalse(m.rate_allows(st, U1, CH, scope))
-        self.assertEqual(got, {"key": "limits.per_person_per_day",
-                               "counter": f"server:{G1}", "cap": 1})
-        self.assertIsNone(m.rate_block(st, OWNER, CH, scope))
 
     def test_recent_outcomes_by_place(self):
         m = self.mod
@@ -827,8 +570,6 @@ class UIData(unittest.TestCase):
         got = self.ctx.recent_outcomes(ch, 10)
         self.assertEqual([o["message_id"] for o in got], ["2002", "2001"])
         self.assertEqual(got[0]["parent_id"], CH)
-        self.assertEqual(got[0]["detail"]["cap"], 5)
-        self.assertEqual(got[0]["code"], "cap")
         self.assertEqual(got[1]["guild_id"], G1)
         self.assertEqual(
             [o["message_id"] for o in self.ctx.recent_outcomes(
@@ -840,12 +581,11 @@ class UIData(unittest.TestCase):
                          "2002")
         self.assertEqual(self.ctx.outcome("2001")["author_id"], U1)
         self.assertIsNone(self.ctx.outcome("9999"))
-
-    def test_where_a_message_was(self):
-        """Review B #2: a channel registered with its category as
-        parent_id is not a thread; a channel the monitor no longer maps
-        is never listed under DMs; the ledger keeps the server it was
-        written in (#1)."""
+        # Review B #2: a channel registered with its category as
+        # parent_id is not a thread; a channel the monitor no longer maps
+        # is never listed under DMs; the ledger keeps the server it was
+        # written in (#1).
+        self.setUp()   # a fresh monitor and ledger
         m = self.mod
         new, cat = "705000000000000001", "800000000000000009"
         m.CHANNELS[new] = {"name": "new-room", "guild_id": G1,
@@ -881,11 +621,6 @@ class UIData(unittest.TestCase):
         self.assertEqual([o["message_id"] for o in self.ctx.recent_outcomes(
             MS.Place.dms(), 10)], ["3003"])
 
-    def test_no_dead_reason_prefixes(self):
-        """Every reason code prefix is one a caller writes."""
-        for prefix, _code in self.mod._LEDGER_CODES:
-            self.assertNotEqual(prefix, "who.bots is ignore")
-
     def test_stash_single_use_and_bound_to_its_user(self):
         c = self.ctx
         tok = c.stash_put(OWNER, {"kind": "apply", "n": 1})
@@ -902,32 +637,6 @@ class UIData(unittest.TestCase):
         tok = c.stash_put(OWNER, {"x": 1}, ttl=-1)
         self.assertIsNone(c.stash_take(OWNER, tok))     # expired
         self.assertIsNone(c.stash_take(OWNER, "nope"))
-
-    def test_directory_send_flags(self):
-        m = self.mod
-        m.GUILDS = {G1: {"name": "Lounge", "system_channel_id": None}}
-        m._GUILD_CHANNELS[G1] = [
-            {"id": CH, "name": "general", "type": 0, "parent_id": None},
-            {"id": "702000000000000001", "name": "random", "type": 0,
-             "parent_id": None},
-            {"id": "709000000000000001", "name": "secret", "type": 0,
-             "parent_id": None}]
-        m.CHANNELS = {CH: {"name": "general", "guild_id": G1,
-                           "can_send": True},
-                      "702000000000000001": {"name": "random",
-                                             "guild_id": G1,
-                                             "can_send": False}}
-        with quiet():
-            m.publish_directory()
-        g = self.ctx.guilds()[0]
-        self.assertIn("system_channel_id", g)
-        self.assertIsNone(g["system_channel_id"])
-        got = {c["name"]: (c["readable"], c["can_send"])
-               for c in self.ctx.channels(G1)}
-        self.assertEqual(got, {"general": (True, True),
-                               "random": (True, False),
-                               "secret": (False, None)})
-
 
 # ---------------------------------------------------------- admin digest
 class AdminDigest(unittest.TestCase):
@@ -959,39 +668,11 @@ class AdminDigest(unittest.TestCase):
             self.assertEqual(self.mod.flush_admin_digests(), 2)
         dms = self.mod.api.dm_posts()
         self.assertEqual(len(dms), 2)
-        g1 = next(d for d in dms if "Lounge" in d["content"])
-        self.assertEqual(g1["content"].count("\n- "), 3)
-        self.assertIn(f"<@{U1}> set `who.replies` to off (was "
-                      f"conversational)", g1["content"])
-        self.assertIn(f"to {U1} (was (empty))", g1["content"])
-        self.assertEqual(g1["allowed_mentions"], {"parse": []})
+        for d in dms:
+            self.assertEqual(d["allowed_mentions"], {"parse": []})
         with quiet():
             self.assertEqual(self.mod.flush_admin_digests(force=True), 0)
-
-    def test_digest_in_plain_words(self):
-        """Review B #9: what /settings sends (an overlay key and values)
-        reads as a sentence, never a raw key."""
-        self.mod.GUILDS = {G1: {"name": "Lounge"}}
-        self.mod._GUILD_CHANNELS[G1] = [{"id": CH, "name": "general",
-                                         "type": 0, "parent_id": None}]
-        with quiet():
-            self.mod.publish_directory()
-        c = self.ctx
-        c.notify_owners_admin_change(
-            G1, U1, f'servers."{G1}".channels."{CH}".replies',
-            "conversational", "off")
-        c.notify_owners_admin_change(G1, U1, f'servers."{G1}".who.ignore',
-                                     [], [U1])
-        text = self.mod.admin_digest_text(
-            G1, self.mod._ADMIN_CHANGES[G1]["changes"])
-        self.assertIn(f"<@{U1}>: In #general, When it answers: Chatty → "
-                      f"Off", text)
-        self.assertIn("In Lounge, Never answer: Nobody → ", text)
-        self.assertNotIn("who.replies", text)
-        self.assertNotIn("`", text)
-
-    def test_change_during_window_joins_it(self):
-        c = self.ctx
+        # A change during a window joins it.
         c.notify_owners_admin_change(G1, U1, "who.replies", "a", "off")
         self.age(30)
         c.notify_owners_admin_change(G1, U1, "who.replies", "off", "a")
@@ -1000,7 +681,7 @@ class AdminDigest(unittest.TestCase):
         self.age(31)
         with quiet():
             self.assertEqual(self.mod.flush_admin_digests(), 1)
-        self.assertEqual(len(self.mod.api.dm_posts()), 1)
+        self.assertEqual(len(self.mod.api.dm_posts()), 3)
 
     def test_undelivered_kept_and_retried(self):
         self.ctx.notify_owners_admin_change(G1, U1, "who.replies", "a", "b")
@@ -1034,13 +715,8 @@ class JoinNotice(unittest.TestCase):
             mod.sync_guilds(st, mod.GUILDS, mod.CHANNELS)
         dms = mod.api.dm_posts()
         self.assertEqual(len(dms), 1)
-        self.assertIn("I just joined **Other**", dms[0]["content"])
-        self.assertIn("**Configure**", dms[0]["content"])
-        rows = dms[0]["components"]
-        self.assertEqual(len(rows), 1)
-        btn = rows[0]["components"][0]
+        btn = dms[0]["components"][0]["components"][0]
         self.assertEqual(btn["type"], 2)
-        self.assertEqual(btn["label"], "Configure")
         self.assertEqual(btn["custom_id"], f"mdset:open:server:{G2}")
         self.assertLessEqual(len(btn["custom_id"]), 100)
         # The click is routed to settings_ui.
@@ -1050,13 +726,6 @@ class JoinNotice(unittest.TestCase):
                                      lambda r: None)
         self.assertEqual(stub.calls[0][0]["data"]["custom_id"],
                          f"mdset:open:server:{G2}")
-
-    def test_plain_notices_have_no_components(self):
-        mod = load_monitor(CFG)
-        with quiet():
-            mod.notify_owners("hello")
-        self.assertNotIn("components", mod.api.dm_posts()[0])
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

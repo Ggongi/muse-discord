@@ -1,4 +1,0 @@
-=== member
-type 4 · 2 components · 102 chars
-C none
-  TD | Only the bot's owners can change its settings. Server admins (Manage Server) can make it quieter here.

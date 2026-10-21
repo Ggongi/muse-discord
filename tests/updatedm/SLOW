@@ -1,1 +1,1 @@
-~1.5 min: watchdog runs in scratch git repos and user namespaces.
+~15 s: watchdog runs in scratch git repos and user namespaces.

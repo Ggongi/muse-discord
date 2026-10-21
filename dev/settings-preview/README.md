@@ -38,8 +38,8 @@ Open the address it prints, then press **/settings** (or type
 - **The inspector.** For the selected message: components out of 40,
   text out of the 3,600-character budget `settings_ui.py` keeps, the
   answer time, and every problem the offline suites' checker
-  (`tests/settingsui/crawl.py`: Discord's limits and the copy rules)
-  finds, plus the page's own checks (custom_id over 100 characters,
+  (`tests/settingsui/crawl.py`: Discord's limits, names that ping or
+  link) finds, plus the page's own checks (custom_id over 100 characters,
   more than 5 in a row, a select sharing its row, over 25 options,
   label, placeholder and description lengths, duplicate ids, modal
   title and size). Controls that break a limit get a red dashed

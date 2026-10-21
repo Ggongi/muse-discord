@@ -1,4 +1,4 @@
-"""Run monitor.main() with a process_outbox that blocks 6s per tick;
+"""Run monitor.main() with a process_outbox that blocks 4s per tick;
 inject a /settings command, a mdset: button click and a mdset: modal
 submit mid-block, and time each callback. Prints one JSON line.
 Usage: [MUT_DIR=<tree>] python3 main_scenario.py"""
@@ -29,7 +29,7 @@ with open(mod.STATE_FILE, "w") as f:
 
 
 def slow_outbox(state):
-    time.sleep(6)
+    time.sleep(4)
 
 
 mod.process_outbox = slow_outbox
@@ -57,7 +57,7 @@ res["put_at"] = {}
 
 
 def fake_gw(token, inbox, status):
-    time.sleep(1.5)  # the main loop is inside slow_outbox by now
+    time.sleep(1.0)  # the main loop is inside slow_outbox by now
     for n, (t, data) in enumerate([
             (2, {"name": "settings", "type": 1}),
             (3, {"custom_id": "mdset:p:e", "component_type": 2}),
@@ -82,7 +82,7 @@ def on_alarm(*_):
 
 
 signal.signal(signal.SIGALRM, on_alarm)
-signal.setitimer(signal.ITIMER_REAL, 9)
+signal.setitimer(signal.ITIMER_REAL, 5)
 out = io.StringIO()
 with contextlib.redirect_stdout(out):
     try:

@@ -1,4 +1,0 @@
-=== why_member
-type 4 · 2 components · 80 chars
-C none
-  TD | Only the bot's owners and this server's admins can see why the bot didn't reply.

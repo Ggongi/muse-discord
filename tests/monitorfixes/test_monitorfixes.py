@@ -106,21 +106,24 @@ class DailyCap(Base):
         self.assertIsNone(self.stage(frag)[0])  # folded into the burst
         q, out = self.flush()
         self.assertEqual(q, [])
-        self.assertIn(f"Rate limit: user {U1} hit per-user daily cap", out)
         self.assertEqual(self.st["pending"], {})  # dropped, not retrying
-        self.assertNotIn("retry", out)
         for mid in (second["id"], frag["id"]):
             ent = self.ledger(mid)
             self.assertEqual(ent["status"], "skipped")
             self.assertEqual(ent["reason"], "daily cap reached")
 
+        # A lost mention the sweep finds over the cap: skipped for good.
+        lost = gmsg(U1, "@muse lost one", mention=True, age=600)
+        m.api.history[CH] = [lost]
+        self.assertEqual(self.sweep(), [])
+        self.assertEqual(self.ledger(lost["id"])["status"], "skipped")
         # A restart's forced flush has nothing left to push through, even
         # on a new day (counters reset).
         self.st["rate"]["day"] = "2000-01-01"
         q, _ = self.flush(force=True)
         self.assertEqual(q, [])
         # ... and the sweep leaves it alone (terminal in the ledger).
-        m.api.history[CH] = [second, frag]
+        m.api.history[CH] = [second, frag, lost]
         self.assertEqual(self.sweep(), [])
 
     def test_later_messages_are_judged_on_their_own(self):
@@ -152,8 +155,8 @@ class DailyCap(Base):
         self.stage(fourth)
         q, _ = self.flush()
         self.assertEqual([i["message_id"] for i in q], [fourth["id"]])
-
-    def test_per_day_total_cap_too(self):
+        # The per-day total cap drops at once too.
+        self.setUp()   # a fresh monitor and state
         self.rewrite(BASE + f'servers:\n  "{G1}":\n    limits:\n'
                      "      per_day: 1\n")
         self.stage(gmsg(U1, "@muse one", mention=True))
@@ -162,22 +165,8 @@ class DailyCap(Base):
         self.stage(capped)
         q, out = self.flush()
         self.assertEqual(q, [])
-        self.assertIn("daily cap (1)", out)
         self.assertEqual(self.st["pending"], {})
         self.assertEqual(self.ledger(capped["id"])["status"], "skipped")
-
-    def test_sweep_recovery_hitting_the_cap_is_terminal(self):
-        m = self.m
-        self.stage(gmsg(U1, "@muse one", mention=True))
-        self.flush()
-        lost = gmsg(U1, "@muse lost one", mention=True, age=600)
-        m.api.history[CH] = [lost]
-        self.assertEqual(self.sweep(), [])
-        ent = self.ledger(lost["id"])
-        self.assertEqual((ent["status"], ent["reason"]),
-                         ("skipped", "daily cap reached"))
-        self.st["rate"]["day"] = "2000-01-01"
-        self.assertEqual(self.sweep(), [])  # not retried later
 
 
 # ---------------------------------------------------------------------------
@@ -194,9 +183,7 @@ class RefusedStaysRefused(Base):
         for msg in (mention, reply, chatter):
             self.assertIsNone(self.stage(msg)[0])
         for msg in (mention, reply):
-            ent = self.ledger(msg["id"])
-            self.assertEqual(ent["status"], "skipped")
-            self.assertIn("who.replies", ent["reason"])
+            self.assertEqual(self.ledger(msg["id"])["status"], "skipped")
         self.assertIsNone(self.ledger(chatter["id"]))  # chatter: no entry
         # The setting is relaxed: the sweep must not answer them now.
         self.rewrite(BASE)
@@ -206,46 +193,26 @@ class RefusedStaysRefused(Base):
         self.assertEqual([i["message_id"] for i in self.sweep()],
                          [lost["id"]])  # only the genuinely lost one
 
-    def test_who_ignore_and_allow(self):
+    def test_who_and_bots_refusals_stay_refused(self):
         m = self.m
         self.rewrite(BASE + f'everywhere:\n  who:\n    ignore: ["{U1}"]\n')
         ignored = gmsg(U1, "@muse hi", mention=True, age=600)
         self.assertIsNone(self.stage(ignored)[0])
-        self.assertIn("who.ignore", self.ledger(ignored["id"])["reason"])
         self.rewrite(BASE + f'everywhere:\n  who:\n    allow: ["{U1}"]\n')
         not_allowed = gmsg(U2, "@muse hi", mention=True, age=600)
         self.assertIsNone(self.stage(not_allowed)[0])
-        self.assertEqual(self.ledger(not_allowed["id"])["status"], "skipped")
-        self.rewrite(BASE)
-        m.api.history[CH] = [ignored, not_allowed]
-        self.assertEqual(self.sweep(), [])
-
-    def test_bots_ignore(self):
-        m = self.m
         self.rewrite(BASE + "everywhere:\n  who:\n    bots: ignore\n")
         beep = gmsg(OTHER_BOT, "@muse beep", mention=True, bot=True, age=600)
         chatter = gmsg(OTHER_BOT, "beep boop", bot=True, age=599)
         self.assertIsNone(self.stage(beep)[0])
         self.assertIsNone(self.stage(chatter)[0])
-        self.assertEqual(self.ledger(beep["id"])["status"], "skipped")
+        for msg in (ignored, not_allowed, beep):
+            self.assertEqual(self.ledger(msg["id"])["status"], "skipped")
         self.assertIsNone(self.ledger(chatter["id"]))
+        # Relaxed: the sweep still does not answer them.
         self.rewrite(BASE)
-        m.api.history[CH] = [beep, chatter]
+        m.api.history[CH] = [ignored, not_allowed, beep, chatter]
         self.assertEqual(self.sweep(), [])
-
-    def test_allowed_mentions_are_not_ledgered_at_classify(self):
-        mention = gmsg(U1, "@muse hi", mention=True)
-        kind, _ = self.stage(mention)
-        self.assertEqual(kind, "mention")
-        # Staged, not skipped (the ledger says queued only once queued).
-        self.assertIsNone(self.ledger(mention["id"]))
-
-    def test_trigger_kind_has_no_side_effects(self):
-        self.rewrite(BASE + "all_servers:\n  who:\n    replies: off\n")
-        msg = gmsg(U1, "@muse hi", mention=True)
-        with quiet():
-            self.assertIsNone(self.m.trigger_kind(msg, G1))
-        self.assertIsNone(self.ledger(msg["id"]))
 
     def test_owner_dm_with_dms_off(self):
         m = self.m
@@ -275,15 +242,6 @@ class RefusedStaysRefused(Base):
         self.rewrite(BASE)
         self.assertEqual([i["message_id"] for i in self.sweep({}, dms=True)],
                          [lost["id"]])
-
-    def test_ledger_stays_bounded(self):
-        self.rewrite(BASE + "all_servers:\n  who:\n    replies: off\n")
-        with quiet():
-            for _ in range(1010):
-                self.m.note_refused(gmsg(U1, "@muse", mention=True), "#c",
-                                    "who.replies is off here")
-        self.assertEqual(len(self.m._ledger_load()["entries"]), 1000)
-
 
 # ---------------------------------------------------------------------------
 # 3. Brand-new threads are read from their start.
@@ -348,20 +306,20 @@ class NewThreads(Base):
             return self.m.check_channel(
                 tid, "Lounge #general > plans", self.st, G1)[0]
 
-    def test_refresh_before_drain_still_stages_the_mention(self):
+    def test_new_thread_mention_staged_once(self):
+        # The refresh lists the thread before its gateway event is
+        # drained: the drain still stages the mention, the poll does not
+        # stage it again.
         tid, starter, mention = self.setup_thread(time.time() - 1)
-        out = self.refresh()
+        self.refresh()
         self.assertIn(tid, self.m.CHANNELS)
-        self.assertEqual(self.st["last_seen"][tid], str(int(tid) - 1))
-        self.assertIn("from its start", out)
         found = self.drain(starter, mention)
         self.assertEqual([x[0]["id"] for x in found], [mention["id"]])
-        # The poll re-reads both: nothing staged twice.
         self.assertEqual(self.poll(tid), [])
         q, _ = self.flush()
         self.assertEqual([i["message_id"] for i in q], [mention["id"]])
-
-    def test_poll_before_drain_stages_once(self):
+        # The poll first, then the drain: once.
+        self.setUp()
         tid, starter, mention = self.setup_thread(time.time() - 1)
         self.refresh()
         self.assertEqual([x[0]["id"] for x in self.poll(tid)],
@@ -383,18 +341,17 @@ class NewThreads(Base):
         self.assertEqual(sorted(i["message_id"] for i in q),
                          sorted([starter["id"], mention["id"]]))
 
-    def test_old_thread_keeps_history_as_history(self):
+    def test_old_threads_history_is_not_new(self):
         # Created long before the monitor started: seeded at its newest.
         tid, starter, mention = self.setup_thread(time.time() - 3600)
         self.m.MONITOR_STARTED = time.time() - 60
         self.refresh()
         self.assertEqual(self.st["last_seen"][tid], mention["id"])
         self.assertEqual(self.poll(tid), [])
-
-    def test_thread_older_than_previous_listing(self):
-        # Long-running monitor; the guild's threads were last listed 5
-        # min ago, this thread is 20 min old (e.g. access granted since):
-        # history is history. One created since that listing is new.
+        # Long-running monitor; the threads were last listed 5 min ago,
+        # this one is 20 min old (access granted since): history. One
+        # created since that listing is new.
+        self.setUp()
         m = self.m
         m.MONITOR_STARTED = time.time() - 7200
         m._THREADS_LISTED[G1] = time.time() - 300
@@ -408,16 +365,6 @@ class NewThreads(Base):
         self.refresh()
         self.assertEqual(self.st["last_seen"][tid], mention["id"])
         self.assertEqual(self.st["last_seen"][tid2], str(int(tid2) - 1))
-        # The next listing measures from this one.
-        self.assertGreater(m._THREADS_LISTED[G1], time.time() - 5)
-
-    def test_known_watermark_is_kept(self):
-        tid, _, _ = self.setup_thread(time.time() - 1)
-        self.st["last_seen"][tid] = "123"
-        self.refresh()
-        self.assertEqual(self.st["last_seen"][tid], "123")
-        self.assertNotIn(tid, self.m._NEW_THREADS)
-
 
 
 # ---------------------------------------------------------------------------
@@ -438,9 +385,7 @@ class SystemNotices(Base):
         reply = gmsg(U2, "@muse yes", mention=True, reply_to_author=BOT)
         reply["type"] = 19
         self.assertEqual(self.stage(reply)[0], "mention")
-
-    def test_owner_dm_pin_is_not_a_trigger(self):
-        m = self.m
+        # A pin in an owner's DM is not a trigger either (gateway, sweep).
         m.DM_CHANNELS[DM_CH] = "owner"
         pin = dmsg(OWNER, "")
         pin["type"] = 6

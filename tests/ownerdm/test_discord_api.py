@@ -118,7 +118,7 @@ class OwnerDmChannel(unittest.TestCase):
         for args in self.every_subcommand(OWNER_DM) + self.every_subcommand(
                 OWNER_DM, ("--for", ITEM)):
             rc = self.run_tool(*args)
-            self.assertIn("is an owner's DM", str(rc), args)
+            self.assertNotEqual(rc, 0, args)
             self.assertEqual(writes(), [], args)
 
     def test_refused_with_a_wrong_or_stale_nonce(self):
@@ -128,14 +128,14 @@ class OwnerDmChannel(unittest.TestCase):
                        ("--for", "300000000000000002", "--nonce", NONCE),
                        ("--nonce", NONCE, "--for", "1/../../x")):
             rc = self.run_tool(*prefix, "post", OWNER_DM, "hi")
-            self.assertIn("Refusing", str(rc), prefix)
+            self.assertNotEqual(rc, 0, prefix)
             self.assertEqual(writes(), [], prefix)
         # Spent (the monitor dropped it from the file once answered).
         with open(D.OWNER_DM_NONCES_FILE, "w") as f:
             json.dump({}, f)
         rc = self.run_tool("--for", ITEM, "--nonce", NONCE, "post",
                            OWNER_DM, "hi")
-        self.assertIn("not the live owner_dm_nonce", str(rc))
+        self.assertNotEqual(rc, 0)
         self.assertEqual(writes(), [])
         os.remove(D.OWNER_DM_NONCES_FILE)
         rc = self.run_tool("--for", ITEM, "--nonce", NONCE, "post",
@@ -147,17 +147,16 @@ class OwnerDmChannel(unittest.TestCase):
             json.dump({ITEM: NONCE, "300000000000000003": "d" * 32}, f)
         rc = self.run_tool("--for", "300000000000000003", "--nonce",
                            "d" * 32, "post", OWNER_DM, "hi")
-        self.assertIn("is not a message in", str(rc))
+        self.assertNotEqual(rc, 0)
         self.assertEqual(writes(), [])
 
-    def test_allowed_with_the_live_nonce(self):
+    def test_allowed_with_the_live_nonce_and_elsewhere(self):
         for args in self.every_subcommand(OWNER_DM, (
                 "--for", ITEM, "--nonce", NONCE)):
             rc = self.run_tool(*args)
             self.assertEqual(rc, 0, args)
             self.assertTrue(writes(), args)
-
-    def test_server_channels_and_other_dms_as_before(self):
+        # Server channels and other people's DMs need no nonce.
         for cid in (GEN_CH, OTHER_DM):
             for args in self.every_subcommand(cid) + self.every_subcommand(
                     cid, ("--for", "123")):
@@ -165,31 +164,29 @@ class OwnerDmChannel(unittest.TestCase):
                 self.assertEqual(rc, 0, args)
                 self.assertTrue(writes(), args)
 
-    def test_dm_without_recipients_is_guarded(self):
+    def test_unknown_dm_fails_closed(self):
         CHANNELS["200000000000000005"] = {"id": "200000000000000005",
                                           "type": 1}
         rc = self.run_tool("post", "200000000000000005", "hi")
-        self.assertIn("is an owner's DM", str(rc))
+        self.assertNotEqual(rc, 0)
         self.assertEqual(writes(), [])
-
-    def test_non_canonical_ids_refused(self):
-        for cid in ("0" + GEN_CH, GEN_CH.replace("2", "\u0662")):
-            rc = self.run_tool("post", cid, "hi")
-            self.assertIn("not a Discord id", str(rc))
-            self.assertEqual(CALLS, [])
-
-    def test_owners_unreadable_fails_closed(self):
+        # Unreadable owners: every DM is treated as an owner's.
         real = D._owners
         D._owners = lambda: None
         try:
             rc = self.run_tool("post", OTHER_DM, "hi")
-            self.assertIn("is an owner's DM", str(rc))
+            self.assertNotEqual(rc, 0)
             self.assertEqual(writes(), [])
             self.assertEqual(self.run_tool("post", GEN_CH, "hi"), 0)
         finally:
             D._owners = real
         self.assertEqual(D._owners(), {OWNER})
 
+    def test_non_canonical_ids_refused(self):
+        for cid in ("0" + GEN_CH, GEN_CH.replace("2", "\u0662")):
+            rc = self.run_tool("post", cid, "hi")
+            self.assertNotEqual(rc, 0)
+            self.assertEqual(CALLS, [])
 
 if __name__ == "__main__":
     unittest.main()

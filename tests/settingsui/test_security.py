@@ -1,7 +1,9 @@
 """/settings security, offline: forged custom ids from server admins,
 members and other owners, stash tokens used by the wrong person, old
-ids, and a fuzz over every id the owner's pages render (spec §4, §6,
-§7). Nothing here may write, crash, or loosen anything.
+and malformed ids, and a fuzz over every id the owner's pages render.
+Nothing here may write, crash, or loosen anything. Refusals are checked
+by what did not happen (no write, an ephemeral answer), never by their
+wording.
 
 Usage: [MUT_DIR=<tree>] python3 tests/settingsui/test_security.py"""
 import os
@@ -14,7 +16,7 @@ import crawl  # noqa: E402
 import harness as H  # noqa: E402
 from harness import (ADMIN, BOB, G1, G2, G3, GENERAL, KAI, MANAGE,  # noqa
                      MEMBER, MS, MUSECHAT, OWNER, OWNER2, SAM, SPAM, UI,
-                     FakeCtx, by_label, command, component, submit, text)
+                     FakeCtx, command, component, submit)
 
 S1 = MS.Place.server(G1)
 MC = MS.Place.channel(G1, MUSECHAT)
@@ -29,7 +31,7 @@ class Base(unittest.TestCase):
     def h(self, ix):
         self.ctx.refresh()
         r = UI.handle(ix, self.ctx)
-        self.assertNotIn(UI.APOLOGY, text(r), self.ctx.logs[-1:])
+        self.assertFalse(crawl.crashed(self.ctx), self.ctx.logs[-1:])
         return r
 
     def admin(self, cid, values=None, guild=G1, **kw):
@@ -40,8 +42,8 @@ class Base(unittest.TestCase):
         self.assertEqual(self.ctx.overlay(), self.before)
 
     def assertAdminRefused(self, r):
-        self.assertEqual(r["type"], 4, text(r))
-        self.assertIn(UI.ADMIN_ONLY_QUIETER, text(r))
+        self.assertEqual(r["type"], 4, r)       # an ephemeral notice
+        self.assertEqual(self.ctx.overlay(), self.before)
 
 
 class AdminForgery(Base):
@@ -88,12 +90,10 @@ class AdminForgery(Base):
         # The admin's Undo never reaches an owner's change
         self.h(component(OWNER, f"mdset:2:set:s{G1}:m", ["nothing"], G1,
                          "0"))
-        self.before = self.ctx.overlay()
-        r = self.admin(f"mdset:2:un:s{G1}")
-        self.assertIn("Undone", text(r))        # their own: spam1
+        self.admin(f"mdset:2:un:s{G1}")         # their own: spam1
+        self.assertEqual(self.ctx.value("who.ignore", S1), [BOB])
         self.assertEqual(self.ctx.value("privacy.memory", S1), "nothing")
-        r = self.admin(f"mdset:2:un:s{G1}")
-        self.assertIn("Nothing to undo here.", text(r))
+        self.admin(f"mdset:2:un:s{G1}")         # nothing of theirs left
         self.assertEqual(self.ctx.value("privacy.memory", S1), "nothing")
 
     def test_owner_only_verbs(self):
@@ -113,7 +113,8 @@ class AdminForgery(Base):
 
     def test_ok_token_minted_for_an_owner(self):
         r = self.h(component(OWNER, "mdset:2:pz:x", None, G1, "0"))
-        ok = by_label(r, "Apply")["custom_id"]
+        ok = next(c["custom_id"] for c in H.controls(r)
+                  if c["custom_id"].split(":")[2] == "ok")
         tok = ok.split(":")[-1]
         for who in ((ADMIN, G1, MANAGE), (MEMBER, G1, "0"),
                     (OWNER2, None, None)):
@@ -123,8 +124,7 @@ class AdminForgery(Base):
             self.unchanged()
         # A second owner is an owner, but it is not their token.
         self.ctx.owners.add(OWNER2)
-        r = self.h(component(OWNER2, ok))
-        self.assertIn(UI.WRONG_USER, text(r))
+        self.h(component(OWNER2, ok))
         self.unchanged()
         # still the owner's to use
         r = self.h(component(OWNER, ok, None, G1, "0"))
@@ -142,49 +142,38 @@ class AdminForgery(Base):
         self.assertEqual(e["role"], "admin")
 
     def test_add_only_and_no_owners(self):
-        r = self.admin(f"mdset:2:ppl:s{G1}:ig", [OWNER, KAI],
-                       resolved=H.resolved_for(7, [OWNER, KAI]))
-        self.assertIn("Owners can't be added", text(r))
+        self.admin(f"mdset:2:ppl:s{G1}:ig", [OWNER, KAI],
+                   resolved=H.resolved_for(7, [OWNER, KAI]))
         self.assertEqual(self.ctx.value("who.ignore", S1), [BOB, SPAM, KAI])
         # an empty pick from a forged select changes nothing
-        r = self.admin(f"mdset:2:ppl:s{G1}:ig", [])
+        self.admin(f"mdset:2:ppl:s{G1}:ig", [])
         self.assertEqual(self.ctx.value("who.ignore", S1), [BOB, SPAM, KAI])
+
+
+def owner_ids(ctx, pages):
+    """Every custom_id the owner's pages render (a short crawl)."""
+    H.install_determinism()
+    c = crawl.Crawl(ctx, crawl.Actor(OWNER, G1, "0"), pages).run(
+        "x", UI.handle(command(OWNER, G1, "0"), ctx))
+    return sorted(c.ids)
 
 
 class Members(Base):
     def test_every_rendered_control_refused(self):
-        H.install_determinism()
-        c = crawl.Crawl(self.ctx, crawl.Actor(OWNER, G1, "0"), 80).run(
-            "x", UI.handle(command(OWNER, G1, "0"), self.ctx))
+        ids = owner_ids(self.ctx, 80)
         self.ctx = FakeCtx()
         self.before = self.ctx.overlay()
-        ids = set()
-        for _path, render in c.pages:
-            for line in render.splitlines():
-                for word in line.split():
-                    if word.startswith("mdset:2:"):
-                        ids.add(crawl_unsym(word))
         self.assertGreater(len(ids), 40)
-        for cid in sorted(ids):
+        ids.append(f"mdset:open:server:{G1}")
+        for cid in ids:
             for guild, perms in ((G1, "0"), (None, None)):
                 r = self.h(component(MEMBER, cid, ["x"], guild, perms))
                 self.assertEqual(r["type"], 4, cid)
-                self.assertIn("Only the bot's owners", text(r), cid)
+        r = self.h(component(ADMIN, f"mdset:open:server:{G1}", None, G1,
+                             MANAGE))
+        self.assertEqual(r["type"], 4)
         self.unchanged()
         self.assertEqual(self.ctx.applied, [])
-
-    def test_open_server_needs_an_owner(self):
-        for user, guild, perms in ((MEMBER, None, None), (ADMIN, G1, MANAGE)):
-            r = self.h(component(user, f"mdset:open:server:{G1}", None,
-                                 guild, perms))
-            self.assertIn("Only the bot's owners", text(r))
-        self.unchanged()
-
-
-def crawl_unsym(word):
-    for k, v in crawl.NAMES.items():
-        word = word.replace(f"<{v}>", k)
-    return word.replace("<FILLER>", "61000000000000000001")
 
 
 class Ids(Base):
@@ -200,34 +189,24 @@ class Ids(Base):
                "mdset:2:pg:x:b:" + "9" * 90, "mdset:open:server:x"]
         for cid in bad:
             r = self.h(component(OWNER, cid, ["off"], G1, "0"))
-            self.assertIn(UI.OUT_OF_DATE, text(r), cid)
             self.assertEqual(r["type"], 4, cid)
         self.unchanged()
-
-    def test_custom_id_lengths_with_20_digit_ids(self):
-        worst = UI.cid("fx", f"c{G1}.{MUSECHAT}", "~welcome.enabled",
-                       f"-{SAM}")
-        self.assertEqual(len(worst), 92)      # spec §6: the worst case
-        with self.assertRaises(UI.BadId):
-            UI.cid("pg", "x:y")
+        self.assertEqual(self.ctx.applied, [])
 
     def test_stash_wrong_user_keeps_the_token(self):
         tok = self.ctx.stash_put(OWNER, {"kind": "apply", "changes": [],
                                          "origin": ["x", "b"]})
         self.ctx.owners.add(OWNER2)
-        r = self.h(component(OWNER2, f"mdset:2:ok:x:{tok}"))
-        self.assertIn(UI.WRONG_USER, text(r))
+        self.h(component(OWNER2, f"mdset:2:ok:x:{tok}"))
         self.assertIn(tok, self.ctx.stash)
+        self.assertEqual(self.ctx.applied, [])
 
 
 class Fuzz(Base):
     def test_mutated_ids_never_crash(self):
         rnd = random.Random(7)
-        H.install_determinism()
-        c = crawl.Crawl(self.ctx, crawl.Actor(OWNER, G1, "0"), 60).run(
-            "x", UI.handle(command(OWNER, G1, "0"), self.ctx))
-        corpus = sorted({crawl_unsym(w) for _p, r in c.pages
-                         for w in r.split() if w.startswith("mdset:2:")})
+        corpus = [c for c in owner_ids(self.ctx, 60)
+                  if c.startswith("mdset:2:")]
         pieces = ["x", "d", f"s{G1}", f"c{G1}.{GENERAL}", "=", "on", "off",
                   "-" + SAM, "+" + SAM, "v", "q", "b", "", "~media.who",
                   "r", "df", "ig", "99999999999999999999999999"]

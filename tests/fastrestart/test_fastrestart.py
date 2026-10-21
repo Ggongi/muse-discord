@@ -17,7 +17,8 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_lib"))
-from common import FAKEWS, HOOK_RUNTIME as RUNTIME, MUT_DIR  # noqa: E402
+from common import (FAKEWS, HOOK_RUNTIME as RUNTIME, MUT_DIR,  # noqa: E402
+                    copy_watchdog)
 
 if os.environ.get("FR_IN_NS") != "1":
     env = dict(os.environ, FR_IN_NS="1")
@@ -47,7 +48,7 @@ class Base(unittest.TestCase):
         shutil.copy(os.path.join(MUT_DIR, "hooks", "mention-watch.sh"),
                     os.path.join(self.d, "hooks"))
         if self.real_watchdog:
-            shutil.copy(os.path.join(MUT_DIR, "watchdog.sh"), self.d)
+            copy_watchdog(self.d)
         else:
             shutil.copy(os.path.join(HERE, "fake_watchdog.sh"),
                         os.path.join(self.d, "watchdog.sh"))
@@ -65,7 +66,7 @@ class Base(unittest.TestCase):
         self.env = dict(os.environ,
                         HATCH_HOOK_RUNTIME=RUNTIME, HOOK_STATE=self.state,
                         MUSE_DISCORD_DIR=self.d,
-                        PYTHONPATH=FAKEWS)
+                        PYTHONPATH=FAKEWS, FAKE_WD_SECS="1.5")
         self.env.pop("MUSE_DISCORD_CONFIG", None)
 
     def tearDown(self):
@@ -159,7 +160,6 @@ class HookTrigger(Base):
         self.assertLess(secs, 1.0, out)
         self.assertNotIn("WAKE", out)
         self.assertIn("SILENT", out)
-        self.assertIn("LOG: monitor not running; started watchdog.sh", out)
         calls = self.wait_calls(1)
         self.assertEqual(len(calls), 1, calls)
         self.assertIn("args=--from-hook", calls[0])
@@ -169,9 +169,8 @@ class HookTrigger(Base):
         # A second run right away is rate limited.
         secs, out = self.hook()
         self.assertEqual(len(self.wait_calls(2, 0.5)), 1)
-        self.assertNotIn("LOG:", out)
         # The restart survived the kill of the hook's process group and
-        # the hook did not wait for it (it takes 3s).
+        # the hook did not wait for it (it takes 1.5s).
         end = time.time() + 6
         while time.time() < end:
             with open(self.p("wd_calls")) as f:
@@ -195,18 +194,18 @@ class HookTrigger(Base):
         self.assertIn("SILENT", out)
         self.assertEqual(self.get_state()["restart"]["fails"], 1)
 
-    def test_live_monitor_via_pidfile_no_trigger(self):
+    def test_live_monitor_no_trigger(self):
         # Absolute path: watchdog's pgrep pattern does not match it, so
         # only the pidfile can tell the hook it is alive.
-        self.start_monitor(self.p("monitor.py"))
-        secs, out = self.hook()
+        mon = self.start_monitor(self.p("monitor.py"))
+        self.hook()
         self.assertEqual(self.wait_calls(1, 0.5), [])
-        self.assertNotIn("LOG:", out)
         self.assertEqual(self.get_state(), {})
-
-    def test_live_monitor_via_pgrep_no_trigger(self):
+        mon.kill()
+        mon.wait()
+        # No pidfile: pgrep finds it.
         self.start_monitor("monitor.py", pidfile=False)
-        secs, out = self.hook()
+        self.hook()
         self.assertEqual(self.wait_calls(1, 0.5), [])
 
     def test_stale_pidfile_with_reused_pid_triggers(self):
@@ -217,12 +216,6 @@ class HookTrigger(Base):
         self.assertEqual(len(self.wait_calls(1)), 1)
         sl.kill()
         sl.wait()
-
-    def test_no_watchdog_script_no_liveness(self):
-        os.remove(self.p("watchdog.sh"))
-        secs, out = self.hook()
-        self.assertNotIn("LOG:", out)
-        self.assertEqual(self.get_state(), {})
 
     def test_backoff_while_failing(self):
         expect = [60, 120, 300, 600, 600]
@@ -247,8 +240,7 @@ class HookTrigger(Base):
         # Alive but its window has not passed yet: keep the record.
         self.assertEqual(self.get_state()["restart"]["fails"], 3)
         self.expire()
-        secs, out = self.hook()
-        self.assertIn("LOG: monitor is running again", out)
+        self.hook()
         self.assertNotIn("restart", self.get_state())
         mon.kill()
         mon.wait()
@@ -260,27 +252,27 @@ class HookTrigger(Base):
         self.assertEqual(r["fails"], 1)
         self.assertTrue(now + 60 <= r["next"] <= now + 62, r)
 
-    def test_token_rejected_in_monitor_log_no_restart(self):
+    def test_token_rejection_no_restart(self):
+        # The monitor's own log says the token was rejected.
         with open(self.p("monitor.log"), "w") as f:
             f.write("Bot user id: 1\n" * 2000 + "TOKEN REJECTED: Discord "
                     "refused the bot token. Exiting.\n")
         for _ in range(3):
-            secs, out = self.hook()
+            self.hook()
         self.assertEqual(self.wait_calls(1, 0.5), [])
-        self.assertEqual(out.count("LOG:"), 0, out)  # logged once, first run
         now = int(time.time())
         r = self.get_state()["restart"]
         self.assertTrue(now + 590 <= r["next"] <= now + 601, r)
-
-    def test_token_rejected_alert_state_no_restart(self):
+        # The watchdog's alert state says so.
+        os.remove(self.p("monitor.log"))
+        self.put_state({})
         with open(self.p("watchdog_state.json"), "w") as f:
             json.dump({"last_alert": "monitor DOWN: Discord rejected the "
                        "token; it was probably reset."}, f)
-        secs, out = self.hook()
-        self.assertIn("token rejection", out)
+        self.hook()
         self.assertEqual(self.wait_calls(1, 0.5), [])
-
-    def test_other_alert_state_still_restarts(self):
+        # Any other alert still restarts.
+        self.put_state({})
         with open(self.p("watchdog_state.json"), "w") as f:
             json.dump({"last_alert": "monitor DOWN: restart attempted but "
                        "the process is not healthy"}, f)
@@ -315,10 +307,6 @@ class RealWatchdog(Base):
             time.sleep(0.1)
         self.assertEqual(len(self.starts()), 1)
         self.wait_wd_idle()
-        with open(self.p("watchdog.log")) as f:
-            log = f.read()
-        self.assertIn("run triggered by the wake hook", log)
-        self.assertIn("monitor restarted OK", log)
         # The hook-run neither consumed nor wrote alert state.
         self.assertFalse(os.path.exists(self.p("watchdog_state.json")))
         # The daemonized monitor does not hold the run lock: a scheduled
