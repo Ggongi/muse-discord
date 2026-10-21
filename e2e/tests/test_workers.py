@@ -50,7 +50,7 @@ def make_pkg(prefix):
     os.makedirs(os.path.join(pkg, "bin"))
     shutil.copy(os.path.join(REPO, "bin", "outbox-append.py"),
                 os.path.join(pkg, "bin"))
-    for f in ("muse_settings.py", "settings_nl.py",
+    for f in ("muse_settings.py", "settings_nl.py", "muse_watches.py",
               "worker-prompt.template.md"):
         shutil.copy(os.path.join(REPO, f), pkg)
     shutil.copytree(os.path.join(REPO, "plugins"),
@@ -101,6 +101,9 @@ class FakeWorker(unittest.TestCase):
             queue_item("110", "[[say:the Blue Pelican]] hi"),
             queue_item("111", "[[settings:set who.replies=off @here]]"),
             queue_item("112", "plain", owner_dm_nonce=NONCE),
+            queue_item("113", "[[remind:90 the oven]] remind me"),
+            dict(queue_item("114", ""), kind="reminder",
+                 reminder={"items": [{"id": "rabcde"}]}),
         ]
         n = 200
         for sc in scenario.load_all(scenario.SCENARIOS_DIR, 1):
@@ -145,6 +148,10 @@ class FakeWorker(unittest.TestCase):
             {"op": "set", "place": f"channel:{GID}:{CID}",
              "key": "who.replies", "value": "off"}])
         self.assertEqual(got["112"]["owner_dm_nonce"], NONCE)
+        self.assertEqual(got["113"]["schedule"]["changes"], [
+            {"op": "add", "kind": "remind", "after": 90,
+             "note": "the oven"}])
+        self.assertEqual(got["114"]["text"], "reminder 1")
         self.assertNotIn("owner_dm_nonce", got["101"])
 
     def test_slow_never_twice_and_records(self):
