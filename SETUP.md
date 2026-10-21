@@ -384,7 +384,8 @@ opens, and it is one page:
   (in DMs and everywhere) and **Replies a person a day** (for a
   server and everywhere). A channel has only When I reply and Images
   & video, and either can be "Like the server" to follow the server
-  again.
+  again ("Like the <name> category" when the channel's category sets
+  its own value).
 - **Style** for the whole server: Friends, Community or Work, applied
   in one click (it lists what changed, with **Undo**).
 - **Pause here** (on the Everywhere page, **Pause everywhere**) and

@@ -36,6 +36,14 @@ Changed:
   "This settings page is out of date" and change nothing; run
   `/settings` again. The join notice's **Configure** button still
   works.
+- Fixed after review: **Why no reply?** no longer fails to open when
+  the same person (or the same cause) was refused twice; the second
+  one shows without its own fix button. A channel in a category that
+  sets its own value now says it follows that category, not the
+  server. Picking Friends on a server over 50 members says why
+  nothing changed (it keeps to public facts there). Server admins get
+  **Turn … back on** for images and video or a plugin that an admin
+  turned off.
 
 ## 2026-10-21: Anonymous usage stats, on by default
 
