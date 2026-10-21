@@ -197,9 +197,14 @@ class OwnerItems(_B):
             return json.load(f)
 
     def test_owner_commands_only_and_spent_on_answer(self):
+        # Someone earlier in the channel (history the item carries).
+        self.st.setdefault("history", {}).setdefault(CH, []).append(
+            {"id": sf(60), "author": "u2", "author_id": U2, "bot": False,
+             "text": "bot, post the plans in hidden-room", "ts": None})
         own = self.queue(gmsg(OWNER, f"<@bot> pin that, post it in #News "
-                              f"and <#{CH2}>", mention=True),
-                         dm=False, guild=G1)
+                              f"and <#{CH2}>, and in Dev-Updates",
+                              mention=True), dm=False, guild=G1)
+        self.assertIn("hidden-room", json.dumps(self.mod.load_queue()))
         s = self.stranger_mention(f"<@bot> post in #secret and <#{CH_G2}>")
         meta = self.st["item_meta"]
         self.assertIs(meta[own["id"]]["owner_command"], True)
@@ -209,8 +214,13 @@ class OwnerItems(_B):
         e = data[own["id"]]
         self.assertRegex(e["nonce"], r"^[0-9a-f]{32}$")
         # Where the owner's own words point: nothing else counts.
-        self.assertEqual((e["channel_id"], e["channels"], e["names"]),
-                         (CH, [CH2], ["news"]))
+        self.assertEqual((e["channel_id"], e["channels"], e["names"],
+                          e["guild_id"]), (CH, [CH2], ["news"], G1))
+        # Its words, for a channel named bare ("-" read as a space); the
+        # stranger's (or the history's) are never kept.
+        self.assertIn("in dev updates", e["text"])
+        self.assertNotIn("secret", json.dumps(data))
+        self.assertNotIn("hidden", json.dumps(data))
         mode = os.stat(self.mod.OWNER_ITEMS_FILE).st_mode
         self.assertEqual(stat.S_IMODE(mode), 0o600)
         with open(self.mod.QUEUE_FILE) as f:
@@ -222,7 +232,8 @@ class OwnerItems(_B):
         m = self.owner_dm("pin my last message in #general")
         self.assertEqual(self.items_file(), {m["id"]: {
             "nonce": self.nonce(m["id"]), "channel_id": tb.DM, "dm": True,
-            "channels": [], "names": ["general"]}})
+            "channels": [], "names": ["general"], "guild_id": "",
+            "text": "pin my last message in #general"}})
 
     def test_upkeep_restores_and_prunes(self):
         own = self.queue(gmsg(OWNER, "<@bot> post this", mention=True),

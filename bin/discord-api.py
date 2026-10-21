@@ -196,9 +196,19 @@ def guard_target(cid):
     name = str((ch or {}).get("name") or "").lower()
     if name and name in (e.get("names") or []):
         return
+    # Named bare ("post this in announcements"): a channel or thread of
+    # the command's own server whose whole name is a phrase of the
+    # owner's own words ("-", "_" and " " alike).
+    bare = " ".join(re.sub(r"[-_]", " ", name).split())
+    text = str(e.get("text") or "")
+    if bare and text and e.get("guild_id") \
+            and str((ch or {}).get("guild_id")) == str(e["guild_id"]) \
+            and re.search(r"(?<!\w)" + re.escape(bare) + r"(?!\w)", text):
+        return
     raise SystemExit(f"Refusing: the owner's own message does not name "
-                     f"{cid} (as <#id> or #name), and it is not the "
-                     f"command's own channel.")
+                     f"{cid} (as <#id>, #name, or the channel's name in "
+                     f"this server), and it is not the command's own "
+                     f"channel.")
 
 
 _NONCE_TEXT = re.compile(r"(?<![0-9A-Fa-f])[0-9a-f]{32}(?![0-9A-Fa-f])")

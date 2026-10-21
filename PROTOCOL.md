@@ -362,10 +362,11 @@ and it is bound to the owner's own run, and to the owner's own words:
   random bits; an owner DM's is its `owner_dm_nonce`), kept in
   `state.json` (`owner_items`) and in `owner_items.json` (mode 600,
   the open owner-command items only, each `{nonce, channel_id, dm,
-  channels, names}`), never in `reply_queue.json`. `channels` and
-  `names` are the `<#id>` mentions and `#names` in the owner's own
-  text (the item's `content`), nothing from history, replies or
-  forwards. It is spent when the item settles; a lost or mangled
+  channels, names, guild_id, text}`), never in `reply_queue.json`.
+  `channels` and `names` are the `<#id>` mentions and `#names` in the
+  owner's own text (the item's `content`), and `text` is that text
+  itself (lowercased, `-` and `_` read as spaces), for channels named
+  bare; nothing from history, replies or forwards. It is spent when the item settles; a lost or mangled
   file is written again within 15 seconds.
 - The wake hook hands each owner command out alone, one per run (owner
   DMs first; then the owners' server items holding a capability; then
@@ -381,10 +382,10 @@ and it is bound to the owner's own run, and to the owner's own words:
   handed out without owner powers.
 - What the tool allows:
 
-| subcommand                                                              | without an owner nonce        | with `--for <item> --nonce <its owner_command_nonce>`                                                                                                                                                |
-| ----------------------------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `resolve-channel`, `list-threads`                                       | Refused, before any API call  | Allowed (an open owner DM's `owner_dm_nonce` does too: a settings request names places). A miss lists nothing                                                                                        |
-| `read`, `post`, `thread`, `react`, `pin`, `unpin`, `edit`, `delete-own` | Refused, before any API call  | Only in the command's own channel, or one its owner's own words name (`<#id>`, or `#name` matching the channel's name); never a DM other than its own (an owner's DM: Owner DMs); `edit` and `delete-own` on the bot's own messages only |
+| subcommand                                                              | without an owner nonce       | with `--for <item> --nonce <its owner_command_nonce>`                                                                                                                                                                                                                                                                                                                                      |
+| ----------------------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `resolve-channel`, `list-threads`                                       | Refused, before any API call | Allowed (an open owner DM's `owner_dm_nonce` does too: a settings request names places). A miss lists nothing                                                                                                                                                                                                                                                                              |
+| `read`, `post`, `thread`, `react`, `pin`, `unpin`, `edit`, `delete-own` | Refused, before any API call | Only in the command's own channel, or one its owner's own words name (`<#id>`; `#name` matching the channel's name; or, in the command's own server, a channel or thread whose whole name is a phrase of those words, `-` and space alike: "post this in announcements"); never a DM other than its own (an owner's DM: Owner DMs); `edit` and `delete-own` on the bot's own messages only |
 
 - `--for` must name an item in `owner_items.json` and `--nonce` must
   be its nonce (compared in constant time); it is never printed. A run

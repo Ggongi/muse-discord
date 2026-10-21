@@ -34,6 +34,8 @@ STRANGER_ITEM = "300000000000000008"
 NAMED_ID = "200000000000000006"    # named by <#id> in the owner's command
 ANNOUNCE = "200000000000000007"    # named by #announcements
 OTHER_CH = "200000000000000008"    # named nowhere in it
+BARE_CH = "200000000000000010"     # named bare: "dev updates"
+BARE_ELSEWHERE = "200000000000000011"   # same name, another server
 
 WORK = scratch("muse-odm-api-")
 CFG = os.path.join(WORK, "config.yaml")
@@ -54,7 +56,12 @@ CHANNELS = {
     GEN_CH: {"id": GEN_CH, "type": 0, "guild_id": "5"},
     NAMED_ID: {"id": NAMED_ID, "type": 0, "name": "dev"},
     ANNOUNCE: {"id": ANNOUNCE, "type": 0, "name": "Announcements"},
-    OTHER_CH: {"id": OTHER_CH, "type": 0, "name": "random"},
+    OTHER_CH: {"id": OTHER_CH, "type": 0, "name": "random",
+               "guild_id": "5"},
+    BARE_CH: {"id": BARE_CH, "type": 0, "name": "dev-updates",
+              "guild_id": "5"},
+    BARE_ELSEWHERE: {"id": BARE_ELSEWHERE, "type": 0,
+                     "name": "dev-updates", "guild_id": "6"},
 }
 MESSAGES = {(OWNER_DM, ITEM)}   # (channel, message) that exist
 CALLS = []
@@ -88,15 +95,20 @@ D.OWNER_ITEMS_FILE = os.path.join(WORK, "owner_items.json")
 SERVER = ("--for", SRV_ITEM, "--nonce", SRV_NONCE)
 
 
-def entry(nonce, cid, dm=False, channels=(), names=()):
-    """An owner_items.json record, as the monitor writes it."""
+def entry(nonce, cid, dm=False, channels=(), names=(), guild_id="",
+          text=""):
+    """An owner_items.json record, as the monitor writes it (text: the
+    owner's own words, normalized by monitor.owner_text)."""
     return {"nonce": nonce, "channel_id": cid, "dm": dm,
-            "channels": list(channels), "names": list(names)}
+            "channels": list(channels), "names": list(names),
+            "guild_id": guild_id, "text": text}
 
 
 ITEMS = {ITEM: entry(NONCE, OWNER_DM, dm=True),
          SRV_ITEM: entry(SRV_NONCE, GEN_CH, channels=[NAMED_ID],
-                         names=["announcements"])}
+                         names=["announcements"], guild_id="5",
+                         text="post this in dev updates, then in "
+                              "announcements")}
 
 
 def write_owner_items(data):
@@ -259,6 +271,18 @@ class OwnerCommandsOnly(_Tool):
         os.remove(D.OWNER_ITEMS_FILE)
         self.assertNotEqual(self.run_tool(*SERVER, "read", GEN_CH), 0)
         self.assertEqual(CALLS, [])
+
+    def test_a_channel_named_bare_in_the_owners_own_words(self):
+        """"post this in dev updates": the channel of the command's own
+        server named that ("-" and " " alike) is fine; the same name in
+        another server, and a channel the history names ("random" is
+        in no owner's words here), are not."""
+        for args in self.every_subcommand(BARE_CH, SERVER):
+            self.assertEqual(self.run_tool(*args), 0, args)
+        for cid in (BARE_ELSEWHERE, OTHER_CH):
+            for args in self.every_subcommand(cid, SERVER):
+                self.assertNotEqual(self.run_tool(*args), 0, args)
+                self.assertEqual(writes(), [], args)
 
     def lookups(self, prefix):
         listing = [{"id": GEN_CH, "name": "general", "type": 0},

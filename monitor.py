@@ -3497,10 +3497,21 @@ _OWNER_ITEMS_WRITTEN = {"body": None}
 OWNER_ITEM_GRACE_SECS = 120
 
 
+def owner_text(content):
+    """The owner's own words, for matching a channel or thread named
+    bare ("post this in announcements"): lowercased, "-" and "_" read as
+    spaces, whitespace collapsed (bin/discord-api.py normalizes channel
+    names the same way)."""
+    text = content if isinstance(content, str) else ""
+    return " ".join(re.sub(r"[-_]", " ", text.lower()).split())[:2000]
+
+
 def owner_targets(content):
     """The channels an owner's own words name: <#id> mentions and #names
-    (lowercased). bin/discord-api.py acts only there (and in the item's
-    own channel), never where history or read output points."""
+    (lowercased). bin/discord-api.py acts only there, in a channel or
+    thread of the command's server whose name the words hold bare
+    (owner_text), and in the item's own channel; never where history or
+    read output points."""
     text = content if isinstance(content, str) else ""
     ids = sorted(set(re.findall(r"<#([1-9][0-9]{16,19})>", text)))
     names = sorted({n.lower() for n in re.findall(
@@ -3508,14 +3519,18 @@ def owner_targets(content):
     return ids, names
 
 
-def note_owner_item(state, mid, dm=False, channel_id=None, content=""):
+def note_owner_item(state, mid, dm=False, channel_id=None, content="",
+                    guild_id=None):
     """Queue item mid is an owner's command: mint its nonce (an owner
     DM's is its owner_dm_nonce), note where the owner's own words point
-    (owner_targets), and write owner_items.json."""
+    (owner_targets, owner_text) and the command's server, and write
+    owner_items.json."""
     e = state.setdefault("owner_items", {})
     ids, names = owner_targets(content)
     e[str(mid)] = {"at": time.time(), "channel_id": str(channel_id or ""),
-                   "dm": bool(dm), "channels": ids, "names": names}
+                   "dm": bool(dm), "channels": ids, "names": names,
+                   "guild_id": str(guild_id or ""),
+                   "text": owner_text(content)}
     if not dm:
         e[str(mid)]["nonce"] = secrets.token_hex(16)
     for old in list(e)[:-300]:
@@ -3546,7 +3561,9 @@ def owner_items_write(state, check=False):
             body[mid] = {"nonce": n, "channel_id": e.get("channel_id"),
                          "dm": bool(e.get("dm")),
                          "channels": e.get("channels") or [],
-                         "names": e.get("names") or []}
+                         "names": e.get("names") or [],
+                         "guild_id": e.get("guild_id") or "",
+                         "text": e.get("text") or ""}
     if body == _OWNER_ITEMS_WRITTEN["body"] and not (
             check and not _private_file_ok(OWNER_ITEMS_FILE, body)):
         return
@@ -3573,7 +3590,8 @@ def owner_items_upkeep(state, queue, now):
                 and str(q.get("author_id")) in OWNER_USER_IDS:
             note_owner_item(state, mid, dm=_queued_owner_dm(state, q),
                             channel_id=q.get("channel_id"),
-                            content=q.get("content"))
+                            content=q.get("content"),
+                            guild_id=q.get("guild_id"))
     owner_items_write(state, check=True)
     reply_nonces_upkeep(state, queued, now)
 
@@ -5921,7 +5939,8 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     if owner_command:
         # bin/discord-api.py's capability for this owner's command.
         note_owner_item(state, msg["id"], dm=owner_dm,
-                        channel_id=msg["channel_id"], content=content)
+                        channel_id=msg["channel_id"], content=content,
+                        guild_id=guild_id)
     # The capability to answer it at all, for the wake that holds it.
     reply_nonce_mint(state, msg["id"])
     print(f"Queued {item['kind']}{' (follow-up)' if item['follow_up'] else ''}"

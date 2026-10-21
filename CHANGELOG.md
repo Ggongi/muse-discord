@@ -31,8 +31,9 @@ Fixed (security):
   channel. Now every subcommand needs `--for <your item> --nonce <its
   owner_command_nonce>` (`resolve-channel` and `list-threads` accept an
   owner DM's nonce too), and acts only in the command's own channel or
-  one your message itself names (`<#channel>` or `#name`), never in a
-  DM other than its own. `read` output comes marked as untrusted data,
+  one your message itself names (`<#channel>`, `#name`, or just the
+  name of a channel or thread in that server: "post this in
+  announcements"), never in a DM other than its own. `read` output comes marked as untrusted data,
   and a channel lookup that misses no longer lists the server's
   channels.
 - An owner's command wakes alone, one per run, as owner DMs already
