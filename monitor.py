@@ -6310,11 +6310,12 @@ def watch_card(uid, guild_id, dm, from_bot, here, matches):
         owner = str(uid) in OWNER_USER_IDS
         return W.card(watch_store().read(), uid, guild_id, dm,
                       owner_dm=owner and dm and not from_bot,
-                      can_set=watch_can_set(uid, from_bot, here, matches))
+                      can_set=watch_can_set(uid, from_bot, here, matches),
+                      can_web=watch_can_web(uid, from_bot, here, matches))
     except Exception as e:
         print(f"Reminders and watches: no list for an item ({e})",
               flush=True)
-        return {"can_set": False, "items": []}
+        return {"can_set": False, "can_web": False, "items": []}
 
 
 def watch_where(gid, cid, dm):

@@ -638,11 +638,12 @@ def _entry(i, r, show_for=False):
 
 
 def card(data, uid, guild_id=None, dm=False, owner_dm=False, can_set=True,
-         now=None):
+         now=None, can_web=False):
     """The `watches` field of a queue item: the author's reminders and
     watches that may be shown where they asked (all of them in a DM,
     those set in this server in a server, with a count of the rest),
-    their time zone if they told it, and whether they may set new ones.
+    their time zone if they told it, and whether they may set new ones
+    (can_set; can_web for web watches).
     In an owner's own DM: everyone's, marked with whose."""
     now = time.time() if now is None else now
     uid = str(uid)
@@ -658,7 +659,8 @@ def card(data, uid, guild_id=None, dm=False, owner_dm=False, can_set=True,
               if dm or (not r.get("dm") and r.get("guild_id") == guild_id)]
         shown = [_entry(i, r) for i, r in ok]
         hidden = len(mine) - len(ok)
-    out = {"can_set": bool(can_set), "items": shown[:LIST_MAX]}
+    out = {"can_set": bool(can_set), "can_web": bool(can_set and can_web),
+           "items": shown[:LIST_MAX]}
     if hidden:
         out["elsewhere"] = hidden   # theirs, set in other places
     if len(shown) > LIST_MAX:

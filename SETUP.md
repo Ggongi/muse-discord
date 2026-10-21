@@ -119,7 +119,7 @@ python3 bin/render-worker-prompt.py --media <what you can make>
 ```
 
 It writes `worker-prompt.md` (re-rendered on every update, never edited
-by hand). Then register these three hooks, all at once, with the
+by hand). Then register these four hooks, all at once, with the
 package dir's absolute path for `<pkg>`:
 
 | Script | Every | Deliver to | Wake prompt | Without it |
@@ -127,6 +127,7 @@ package dir's absolute path for `<pkg>`:
 | `hooks/mention-watch.sh` | 5 s | a dedicated worker chat, not the main one | `You are muse-discord's reply worker. Read <pkg>/worker-prompt.md and follow it exactly; the wake payload below is this run's work.` | Nobody gets an answer, and a crashed bot waits up to 10 minutes for a restart. |
 | `hooks/watchdog-hook.sh` | 10 min | the owner's main chat | `muse-discord's watchdog raised an alert (payload). Fix it with <pkg>/TROUBLESHOOTING.md, and tell the owner in a sentence or two only if they must do something.` | A stuck bot is never restarted, alerts reach nobody, and new releases are never noticed. |
 | `hooks/update-watch.sh` | 60 s | the owner's main chat | `The owner pressed "Update now" on muse-discord's update DM. Update <pkg> to the release in the payload by following <pkg>/UPDATING.md with the owner in this chat. When done, or if you stop early, delete <pkg>/update_request.json and report the version running, or what waits on the owner.` | The bot's **Update now** button does nothing. |
+| `hooks/watch-due.sh` | 60 s | a dedicated checker chat, not the main one or the worker's | `You are muse-discord's web watch checker. The wake payload below is your whole task: follow it exactly.` | Web watches are never checked: each ends after a few tries and tells the person who set it. |
 
 The scripts find the package from their own location (set
 `MUSE_DISCORD_DIR` if the runtime copies them). A runtime without hooks

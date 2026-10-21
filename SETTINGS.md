@@ -103,6 +103,8 @@ What the owner says, and the key and values to use:
 | Images and video | `media.enabled`, `media.who`, `media.per_day` | on/off; `owners`, `everyone`, ids; a number, `none` |
 | Status line, update notices (`defaults`) | `presence.status`, `updates.notify` | text up to 128; on/off |
 | Anonymous usage stats (`defaults`; README, Privacy and usage stats) | `telemetry.usage_stats` | on/off |
+| Who can set reminders and watches | `abilities.reminders` | `everyone`, `owners`, or ids / `role:<id>` |
+| Who can set web watches | `abilities.web_watches` | `owners`, `everyone`, or ids / `role:<id>` |
 
 A channel takes only When it answers, Instructions, and on/off for
 images and video (`media.enabled`) and for an installed plugin
@@ -131,3 +133,17 @@ python3 bin/settings.py validate
 A config that fails `validate` keeps the bot from starting.
 `config.example.yaml` shows the file's layout, and PROTOCOL.md
 ("Settings") has the details.
+
+## 6. Reminders and watches
+
+When the owner asks what reminders and watches the bot is holding, or
+to cancel one, for anyone:
+
+```bash
+python3 bin/watches.py list            # every active one: id, what, for whom, where
+python3 bin/watches.py cancel <id> ...  # removes them; nothing fires
+```
+
+The running bot picks a cancel up within seconds. Who may set them is
+the two settings above. As in section 1, only when the owner asks in
+this chat.
