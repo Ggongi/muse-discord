@@ -1,50 +1,63 @@
 #!/usr/bin/env python3
-"""/settings in Discord: every page, as one pure function of an
-interaction and a Ctx (see handle). monitor.py owns the plumbing
-(registering the commands, routing "mdset:" interactions here, building
-the Ctx, answering Discord); this module never touches the network, so
-it answers well inside Discord's 3 seconds, and it never raises.
+"""/settings in Discord, the moderate design: one screen with a few
+direct settings and one level of "Where". As one pure function of an interaction and a Ctx (see handle).
+monitor.py owns the plumbing (registering the commands, routing "mdset:"
+interactions here, building the Ctx, answering Discord); this module
+never touches the network, so it answers well inside Discord's 3
+seconds, and it never raises.
+
+What each person gets:
+
+- An owner gets the place they typed /settings in (a channel, or DMs in
+  the bot's DM; the join DM's Configure button opens a whole server),
+  with a Where select to switch to its server or everywhere: a
+  plain-words line on how the bot behaves there, the few settings most
+  owners change (when it replies, reply length, images & video, who
+  can DM it, replies a person a day: whichever that place has), a
+  style picker for the server (the Friends / Community / Work
+  presets), Pause or Resume, "Why no reply?", Undo for the last
+  change, and a reminder that anything else is one DM away
+  (settings_nl.py: an owner can change any setting by DMing the bot in
+  plain words).
+- A server admin (Manage Server) gets "Quiet the bot" for their server:
+  quieter only (muse_settings' admin rule), and Undo of admins' changes.
+- Anyone else gets a polite refusal.
 
 Pages are Components V2 messages (flags 64|32768: no content, no
-embeds; at most 40 components). A page opens on the place where
-/settings was typed (a channel, or DMs in the bot's DM) and is edited in
-place from then on. Words come from muse_settings (LABELS, describe_
-change); every write goes through muse_settings.apply as one undo group,
-after muse_settings.assess (risky outcomes show a confirm card first).
+embeds; at most 40 components), edited in place after the first. Every
+write goes through muse_settings.apply as one undo group, after
+muse_settings.assess (a risky outcome shows a confirm card first).
 
-custom_id grammar ("mdset:2:" + colon-separated parts, <= 100 chars):
+custom_id grammar ("mdset:3:" + colon-separated parts, <= 100 chars):
 
-    place := x (Defaults) | d (DMs) | s<gid> | c<gid>.<cid>
+    place := x (everywhere) | d (DMs) | s<gid> | c<gid>.<cid>
     k     := a short code (CORE_CODES) | ~<plugin>.<key>
 
-    pg:<place>:<page>        page: b basics, m more, e extras, w bot-wide,
-                             y why, q quiet (server admins), o servers
-    go:<place>               "Go to..." select: a place token, p<n>, o<n>
-    gc:<place>               channel select (or its paged fallback)
-    set:<place>:<k>          choice select: a value or "="
-    val:<place>:<k>:<v>[:<page>]   a button with an absolute value
-    ppl:<place>:<k>          a user / mentionable select
-    rm:<place>:<k>           a "Remove someone..." select
-    mod:<place>:<form>[:<page>]    open a modal (i c bx mpd wn st fc fs
-                                   id.<k>)
-    sub:<place>:<form>[:<page>]    its submit
-    re:<place>:<form>:<tok>  reopen a modal from a stashed draft
-    pre:<place>              preset select: preview
-    ok:<place>:<tok>         apply what a confirm card or preview stashed
-    un:<place>[:<grp>]       undo the newest group there (+ channels)
+    pg:<place>:<page>        page: h home (admins: their panel), y why
+    wh:<place>               Where select: a place token (here, its
+                             server, everywhere)
+    set:<place>:<k>          a setting's select: r ln med df pp (see
+                             PLACE_CONTROLS; "=" follows the server)
+    pre:<place>              style select (a server): apply a preset
+    val:<place>:<k>:<v>      a button with an absolute value ("=": what
+                             the place would follow without its own)
+    ppl:<place>:ig           admins: add to the ignore list
+    rm:<place>:ig            admins: take their additions off it
     pz:<place> | rs:<place>  pause / resume
-    fx:<place>:<k>:<op>      a "Why no reply?" fix: = | v<value> |
-                             -<id> | +<id>
-    wy:<place>[:<id>]        DMs: check one person
+    un:<place>[:<grp>]       undo the newest group there (+ channels)
+    ok:<place>:<tok>         apply what a confirm card stashed
+    fx:<place>:<k>:<op>      a "Why no reply?" fix: = | v<value>
+                             | -<id> | +<id>
+    wy:d[:<id>]              DMs: check one person (mod:d:wy opens the
+                             by-ID form, sub:d:wy is its submit)
 
-The optional <page> says which page to show again afterwards. Nothing in
-a custom_id is trusted: who may do what, and where, is checked again on
-every interaction (server admins through muse_settings' admin rule), and
-a stash token is bound to the user it was made for. Older "mdset:" ids
-answer "out of date", except mdset:open:server:<gid> (the join DM's
-Configure button), which still opens that server's page.
+Nothing in a custom_id is trusted: who may do what, and where, is
+checked again on every interaction (server admins through
+muse_settings' admin rule), and a stash token is bound to the user it
+was made for. Ids from older designs ("mdset:2:..." and before) answer
+"out of date" and change nothing, except mdset:open:server:<gid> (the
+join DM's Configure button), which still opens that server.
 """
-import math
 import re
 import time
 import traceback
@@ -54,7 +67,7 @@ from typing import Protocol
 import muse_settings as ms
 
 PREFIX = "mdset"
-VERSION = "2"
+VERSION = "3"
 COMMAND = "settings"
 # The message context command; Discord may refuse "?" in its name, in
 # which case the monitor registers the second.
@@ -69,19 +82,14 @@ MAX_COMPONENTS = 40
 TEXT_BUDGET = 3600
 STASH_TTL = 900
 BLURPLE, GREY, AMBER, RED = 0x5865F2, 0x80848E, 0xF0B232, 0xED4245
-SERVERS_PER_PAGE = 22
-CHANNELS_PER_PAGE = 23
-FIND_AFTER_PAGES = 3
 WHY_ENTRIES = 5
-ADMIN_CHANGES_SHOWN = 3
 # Whether a user select in the bot's DM searches people the DM does not
 # include (verify on real clients; see e2e/README.md). While False, the
-# DMs page in a DM offers Add by ID and a Remove select instead.
+# DMs Why page in a DM offers Check by ID instead.
 DM_USER_SELECT_SEARCHES = False
 THREAD_TYPES = (10, 11, 12)
 CATEGORY = 4
-GO_CHANNEL_TYPES = [0, 5, 15, 16, 2, 13]
-TEXT_CHANNEL_TYPES = [0, 5]
+MEDIA_ON = "plugins.media.enabled"
 
 # Component types and button styles.
 ROW, BUTTON, STRING_SELECT, TEXT_INPUT = 1, 2, 3, 4
@@ -89,12 +97,12 @@ USER_SELECT, ROLE_SELECT, MENTIONABLE_SELECT, CHANNEL_SELECT = 5, 6, 7, 8
 SECTION, TEXT, SEPARATOR, CONTAINER, LABEL = 9, 10, 14, 17, 18
 PRIMARY, SECONDARY, SUCCESS, DANGER = 1, 2, 3, 4
 
-REFUSAL_SERVER = ("Only the bot's owners can change its settings. Server "
-                  "admins (Manage Server) can make it quieter here.")
-REFUSAL_DM = ("Only the bot's owners can use /settings in DMs. Server "
-              "admins: run it in your server.")
-REFUSAL_WHY = ("Only the bot's owners and this server's admins can see "
-               "why the bot didn't reply.")
+REFUSAL_SERVER = ("Sorry, only the bot's owners can change its settings. "
+                  "Server admins (Manage Server) can make it quieter here.")
+REFUSAL_DM = ("Sorry, only the bot's owners can use /settings in DMs. "
+              "Server admins: run it in your server.")
+REFUSAL_WHY = ("Sorry, only the bot's owners and this server's admins can "
+               "see why the bot didn't reply.")
 OUT_OF_DATE = ("This settings page is out of date. Run /settings for a "
                "fresh one. Nothing was changed.")
 EXPIRED = "This confirmation expired, so nothing was changed."
@@ -107,10 +115,13 @@ ADMIN_ONLY_QUIETER = ("Server admins can make the bot quieter here, never "
 OVERLAY_BROKEN = ("⚠ config.discord.yaml can't be read, so changes from "
                   "Discord are paused. Fix it on the bot's machine.")
 ROLES_ELSEWHERE = ("Roles only count in their own server, so the roles "
-                   "you picked were left out. Run /settings in that server "
-                   "to pick them.")
+                   "you picked were left out.")
 FIXED_NOTE = "-# Fixed. {who} must send again; refused messages stay " \
              "unanswered."
+FOOTER_SERVER = ("-# Anything else? DM me what you'd like changed, e.g. "
+                 "“only reply in #help” or “let Sam make images”.")
+FOOTER_DM = ("-# Anything else? Just tell me here, e.g. “only reply in "
+             "#help” or “let @Sam DM you”.")
 
 
 class Ctx(Protocol):
@@ -140,7 +151,7 @@ class Ctx(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Keys in custom ids
+# Keys and places in custom ids
 # ---------------------------------------------------------------------------
 CORE_CODES = {
     "who.replies": "r", "who.dms_from": "df", "who.allow": "al",
@@ -155,10 +166,8 @@ CODE_KEYS = {v: k for k, v in CORE_CODES.items()}
 _PLUGIN_CODE = re.compile(r"~([A-Za-z0-9_\-]{1,40})\.([A-Za-z0-9_\-]{1,40})")
 _PLACE = re.compile(r"x|d|s(\d{1,25})|c(\d{1,25})\.(\d{1,25})")
 _ID = re.compile(r"\d{1,25}")
-_SNOWFLAKE = re.compile(r"\d{15,25}")
 _PART = re.compile(r"[^:]{1,100}")
-FORMS = ("i", "c", "bx", "mpd", "wn", "st", "fc", "fs")
-PAGES = ("b", "m", "e", "w", "y", "q", "o")
+PAGES = ("h", "y")
 
 
 def kcode(key):
@@ -212,7 +221,7 @@ def clip(text, n):
 
 _MD = re.compile(r"([\\*_~|>#\[\]()`])")
 _UNMD = re.compile(r"\\([\\*_~|>#\[\]()`])")
-ZWSP = "\u200b"
+ZWSP = "​"
 
 
 def esc(text):
@@ -237,8 +246,8 @@ def td(text):
     return {"type": TEXT, "content": clip(text, 3900)}
 
 
-def sep():
-    return {"type": SEPARATOR, "divider": True, "spacing": 1}
+def sep(divider=True):
+    return {"type": SEPARATOR, "divider": divider, "spacing": 1}
 
 
 def btn(label, custom_id, style=SECONDARY, disabled=False):
@@ -280,27 +289,10 @@ def sel(custom_id, options, placeholder, min_values=1, max_values=1):
             "min_values": min_values, "max_values": max_values}
 
 
-def picker(kind, custom_id, placeholder, min_values=0, max_values=25,
-           defaults=None, channel_types=None):
-    s = {"type": kind, "custom_id": custom_id,
-         "placeholder": clip(placeholder, 150),
-         "min_values": min_values, "max_values": max_values}
-    if defaults:
-        s["default_values"] = defaults[:max_values]
-    if channel_types:
-        s["channel_types"] = list(channel_types)
-    return s
-
-
-def people_defaults(value):
-    out = []
-    for p in value if isinstance(value, list) else []:
-        p = str(p)
-        if p.startswith("role:"):
-            out.append({"id": p[5:], "type": "role"})
-        elif _ID.fullmatch(p):
-            out.append({"id": p, "type": "user"})
-    return out
+def picker(kind, custom_id, placeholder, min_values=0, max_values=25):
+    return {"type": kind, "custom_id": custom_id,
+            "placeholder": clip(placeholder, 150),
+            "min_values": min_values, "max_values": max_values}
 
 
 def message(R, comps):
@@ -336,8 +328,8 @@ def text_size(comps):
 
 def finish_text(comps):
     """Labels, options and placeholders as plain text (names unescaped),
-    then the page within TEXT_BUDGET: option labels shortened to 60,
-    then option descriptions dropped, then long texts clipped."""
+    then the page within TEXT_BUDGET: option descriptions dropped, then
+    long texts clipped."""
     for c in _all(comps):
         for k, n in LIMITS.items():
             if isinstance(c.get(k), str):
@@ -348,11 +340,6 @@ def finish_text(comps):
             o["label"] = clip(plain(o["label"]), 100)
             if "description" in o:
                 o["description"] = clip(plain(o["description"]), 100)
-    if text_size(comps) <= TEXT_BUDGET:
-        return comps
-    for c in _all(comps):
-        for o in c.get("options") or []:
-            o["label"] = clip(o["label"], 60)
     for c in sorted((c for c in _all(comps) if c.get("options")),
                     key=lambda c: -len(c["options"])):
         if text_size(comps) <= TEXT_BUDGET:
@@ -492,16 +479,9 @@ class Req:
         self.extra_names, self.extra_users = _harvest_names(ix)
         self._guilds = None
         self._chans = {}
-        self.go_page = 0
-        self.chan_page = 0
-        self.chan_query = None
-        self.server_page = 0
-        self.server_query = None
-        self.pending = None     # a "you and people you pick" with no one
         self.fixed = None       # whose refusal a Why fix just fixed
         self.check = None       # DMs: the person checked
         self.thread_note = False
-        self.resolved_channel = None
 
     @property
     def owner(self):
@@ -568,13 +548,9 @@ class Req:
         return n if isinstance(n, int) and not isinstance(n, bool) else None
 
     def can_see(self, gid, cid_):
-        """False when the bot cannot read the channel (or it is not in
-        the directory at all while the server's channels are known)."""
-        chans = self.channels(gid)
-        ch = chans.get(str(cid_))
-        if ch is None:
-            return not chans and self.resolved_channel is None
-        return ch.get("readable") is not False
+        """False when the bot cannot read the channel."""
+        ch = self.channels(gid).get(str(cid_))
+        return ch is None or ch.get("readable") is not False
 
     def look(self, some_id):
         """A name for a server, channel, role or person (None: unknown),
@@ -632,6 +608,18 @@ class Req:
             return str(ch["parent_id"]), True
         return c, False
 
+    def here(self):
+        """The place the interaction happened: its channel (a thread
+        counting as its parent), else its server, else DMs."""
+        if not self.guild_id:
+            return ms.Place.dms()
+        here, _thread = self.typed()
+        if not here or (self.chan(self.guild_id, here) or {}).get(
+                "type") == CATEGORY:
+            return ms.Place.server(self.guild_id)
+        return ms.Place.channel(self.guild_id, here,
+                                self.category_of(self.guild_id, here))
+
     def in_guild(self, gid):
         return self.guild_id is not None and self.guild_id == str(gid)
 
@@ -652,6 +640,8 @@ class Req:
         return ms.Place.channel(gid, c, self.category_of(gid, c))
 
     def name(self, place):
+        if place.kind == "defaults":
+            return "everywhere"
         return ms.place_name(place, self.look)
 
     def gname(self, gid):
@@ -663,7 +653,7 @@ class Req:
 # ---------------------------------------------------------------------------
 class Val:
     """One setting at one place: path, set here?, value here, source,
-    value in force, value without this layer, config.yaml's value."""
+    value in force, value without this layer."""
 
     def __init__(self, R, place, key):
         st = R.st
@@ -676,8 +666,6 @@ class Val:
         sc = _scope_at(place, key, self.path)
         self.inherited = copy_default(key) if sc is None \
             else st.value_without(sc, key, self.path)
-        self.in_file = (self.path, key) in st.file_values
-        self.file_value = st.file_values.get((self.path, key))
 
 
 def copy_default(key):
@@ -699,23 +687,8 @@ def value(R, place, key):
     return R.st.top(key) if sc is None else R.st.get(key, sc)
 
 
-def offered(R, place, key):
-    try:
-        return key in ms.place_keys(R.st, place, "basics") \
-            or key in ms.place_keys(R.st, place, "more")
-    except Exception:
-        return False
-
-
 def vl(R, key, v):
     """A value in plain words."""
-    if v is None and R.st.spec(key) is not None \
-            and R.st.spec(key).type == "number":
-        return "No cap"
-    if key == "plugins.welcome.channel" and isinstance(v, str) \
-            and _ID.fullmatch(v):
-        n = R.look(v)
-        return f"#{n}" if n else "a channel"
     return ms.value_label(key, v, R.look)
 
 
@@ -769,247 +742,182 @@ def snowflake_time(mid):
 
 
 def who_text(R, by):
-    """"@you", a mention, or a name such as muse.ai."""
+    """"you", a mention, or a name such as muse.ai."""
     by = str(by or "")
     if by and by == R.uid:
-        return "@you"
+        return "you"
     if _ID.fullmatch(by):
         return f"<@{by}>"
     return esc(by) if by else "someone"
 
 
-def tag(R, v):
-    """The source tag on a setting's label line ("" when not set here)."""
-    if not v.set:
-        return ""
-    if v.src and v.src[0] == "file":
-        return " · ● set in config.yaml"
-    by = v.src[1] if v.src and len(v.src) > 1 else None
-    at = v.src[2] if v.src and len(v.src) > 2 else None
-    t = f" · ● changed here by {who_text(R, by)}, {short_date(at)}"
-    if v.in_file and v.file_value != v.here:
-        t += f" (config.yaml says {vl(R, v.key, v.file_value)})"
-    return t
-
-
-def parent_name(R, place, key):
-    """Who a place follows for key: the category (when it sets key), the
-    server, or Defaults."""
-    if place.kind in ("server", "dms"):
-        return "Defaults"
-    if place.kind != "channel":
-        return None
-    cat = place.category_id
-    if cat:
-        path = ("servers", place.guild_id, "channels", cat)
-        if R.st.layer(path, key)[0]:
-            return f"{R.look(cat) or 'its category'} (category)"
-    return R.gname(place.guild_id)
-
-
 # ---------------------------------------------------------------------------
-# Selects for one setting
+# How the bot behaves at a place, in plain words
 # ---------------------------------------------------------------------------
-def option_help(R, place, key, v):
-    where = R.name(place)
-    if key == "who.replies":
-        if v == "off":
-            if place.kind == "server":
-                return "Quiet in this server, except channels set otherwise"
-            if place.kind == "defaults":
-                return ("Quiet in every server, except places set "
-                        "otherwise")
-            return f"Never answers in {where}"
-        return {"conversational": "Answers @mentions and replies, plus "
-                                  "that person's follow-ups for 2 minutes",
-                "when-addressed": "Answers only @mentions and replies to "
-                                  "its messages"}.get(v)
-    if key == "plugins.media.who" and v == "everyone":
-        return (f"Anyone in {where}; generation can cost real money"
-                if place.kind != "defaults" else
-                "Anyone; generation can cost real money")
-    if key == "who.dms_from" and v == "owners" and len(R.ctx.owners) > 1:
-        return "The bot's owners"
-    return OPTION_HELP.get((key, v))
+REPLIES_WORDS = {"conversational": "I chat freely",
+                 "when-addressed": "I reply only when @mentioned",
+                 "off": "I'm off"}
+LENGTH_WORDS = {"brief": "short replies", "detailed": "detailed replies"}
+MEMORY_WORDS = {"everything": "may bring up anything I remember about "
+                               "people",
+                "public-only": "shares only public facts about people",
+                "nothing": "keeps personal things out of it"}
+DM_WORDS = {"owners": "Only you can DM me",
+            "shared-servers": "Anyone in your servers can DM me",
+            "anyone": "Anyone can DM me", "nobody": "Nobody can DM me"}
 
 
-OPTION_HELP = {
-    ("privacy.memory", "everything"): "Your job, location and other saved "
-                                      "memory; risky in big servers",
-    ("privacy.memory", "public-only"): "Name, interests, public projects "
-                                       "and opinions",
-    ("privacy.memory", "nothing"): "Replies as if it had no memory of you",
-    ("who.bots", "when-addressed"): "Answers bots that @mention or reply "
-                                    "to it",
-    ("who.bots", "ignore"): "Never answers bots",
-    ("privacy.suspicious", "hold-for-review"): "Held until an owner looks; "
-                                               "nothing is sent",
-    ("privacy.suspicious", "ignore"): "Dropped silently",
-    ("style.length", "brief"): "Short replies",
-    ("style.length", "normal"): "The usual",
-    ("style.length", "detailed"): "Longer, fuller replies",
-    ("who.dms_from", "owners"): "Only the bot's owners",
-    ("who.dms_from", "list"): "Owners, plus the people below",
-    ("who.dms_from", "shared-servers"): "Anyone who shares a server with "
-                                        "the bot",
-    ("who.dms_from", "anyone"): "Anyone on Discord, strangers included",
-    ("who.dms_from", "nobody"): "No DM gets an answer, not even yours",
-    ("plugins.media.who", "owners"): "Only the bot's owners",
-    ("plugins.media.who", "list"): "Owners plus the people below",
-}
+def paused_at(R, place):
+    """The place whose pause keeps the bot quiet at place (place itself,
+    its server, or "everywhere"), or None."""
+    st = R.st
+    servers_off = st.layer(("all_servers",), "who.replies")[:2] == (
+        True, "off")
+    if place.kind == "dms":
+        if ms.is_paused(st, ms.Place.defaults()):
+            return ms.Place.defaults()
+        return place if ms.is_paused(st, place) else None
+    if place.kind == "defaults":
+        return place if servers_off else None
+    if place.kind == "channel" and ms.is_paused(st, place):
+        return place
+    server = ms.Place.server(place.guild_id)
+    if ms.is_paused(st, server):
+        return server
+    return ms.Place.defaults() if servers_off else None
 
 
-# Option order: the most open first, as people read it.
-ORDER = {"who.replies": ("conversational", "when-addressed", "off"),
-         "privacy.memory": ("everything", "public-only", "nothing"),
-         "who.bots": ("when-addressed", "ignore"),
-         "privacy.suspicious": ("hold-for-review", "ignore")}
-
-
-def value_name(R, key, v):
-    if key == "who.dms_from" and v == "owners" and len(R.ctx.owners) > 1:
-        return "Only you and the other owners"
-    if key == "plugins.media.who" and v == "list":
-        return "You and people you pick"
-    if key == "plugins.media.who" and v == "everyone":
-        return "Everyone here"
-    return ms.VALUE_LABELS.get((key, v)) or vl(R, key, v)
-
-
-def has_same(place, key):
-    return place.kind not in ("defaults",) and not (
-        place.kind == "dms" and key == "who.dms_from")
-
-
-def choice_select(R, place, key, custom_id, values=None, placeholder=None):
-    """A choice select: "Same as <parent>: <value>" first (value "="),
-    then each value; the one in force is selected."""
-    v = Val(R, place, key)
-    spec = v.spec
-    same = has_same(place, key)
-    opts = []
-    if same:
-        parent = parent_name(R, place, key)
-        inh = v.inherited
-        shown = value_name(R, key, "list") if isinstance(inh, list) \
-            and key == "plugins.media.who" else value_name(R, key, inh)
-        opts.append(opt(f"Same as {parent}: {shown}", "=",
-                        f"Follows {parent} and changes when it does",
-                        default=not v.set))
-    cur = v.here if same else v.value
-    if key == "plugins.media.who" and isinstance(cur, list):
-        cur = "list"
-    vals = list(values or ORDER.get(key) or spec.values)
-    for x in vals:
-        d = option_help(R, place, key, x)
-        if place.kind == "defaults" and x == spec.default:
-            d = "Built-in default" + (f" · {d}" if d else "")
-        if v.in_file and v.set and v.src and v.src[0] == "discord" \
-                and x == v.file_value:
-            d = "What config.yaml says"
-        opts.append(opt(value_name(R, key, x), x, d,
-                        default=(v.set or not same) and cur == x))
-    if (v.set or not same) and cur in spec.hidden_values:
-        opts.append(opt("Answer everything (old setting from config.yaml)",
-                        cur, "Pick another to change it", default=True))
-    return sel(custom_id, opts, placeholder or f"{ms.label(key)}…")
-
-
-def channel_select_or_fallback(R, gid, custom_id, origin_tok, placeholder,
-                               types=GO_CHANNEL_TYPES, current=None,
-                               findable=False):
-    """A type 8 channel select when the page's server is the interaction's
-    server; else a paged string select of that server's channels (23 a
-    page, channels with their own settings first)."""
-    if R.in_guild(gid):
-        defaults = [{"id": str(current), "type": "channel"}] \
-            if current and _ID.fullmatch(str(current)) else None
-        return picker(CHANNEL_SELECT, custom_id, placeholder, 1, 1,
-                      defaults, types), 1
-    listed = set(R.st.channels_listed(gid))
-    chans = [c for c in R.channels(gid).values() if c.get("type") in types]
-    if R.chan_query:
-        q = R.chan_query.lower()
-        chans = [c for c in chans if q in str(c.get("name") or "").lower()]
-    chans.sort(key=lambda c: (str(c["id"]) not in listed,
-                              str(c.get("name") or "").lower(),
-                              str(c["id"])))
-    pages = max(1, math.ceil(len(chans) / CHANNELS_PER_PAGE))
-    page = min(max(0, R.chan_page), pages - 1)
-    opts = []
-    if page > 0:
-        opts.append(opt("Previous channels…", f"p{page - 1}",
-                        f"Page {page} of {pages}"))
-    for c in chans[page * CHANNELS_PER_PAGE:(page + 1) * CHANNELS_PER_PAGE]:
-        parent = str(c.get("parent_id") or "")
-        desc = "● has its own settings" if str(c["id"]) in listed else None
-        if parent and R.chan(gid, parent):
-            pn = R.chan(gid, parent).get("name") or "a category"
-            desc = (desc + f" · in {pn}") if desc else f"in {pn}"
-        opts.append(opt("#" + str(c.get("name") or "channel"), str(c["id"]),
-                        desc, default=str(c["id"]) == str(current or "")))
-    if page < pages - 1:
-        opts.append(opt("More channels…", f"p{page + 1}",
-                        f"Page {page + 2} of {pages}"))
-    if findable and pages > FIND_AFTER_PAGES and page == 0 \
-            and not R.chan_query:
-        opts.append(opt("Find a channel by name…", "find",
-                        "Type part of its name"))
-    if not opts:
-        return None, pages
-    if R.chan_query:
-        placeholder = f"Channels matching “{clip(R.chan_query, 40)}”…"
-    elif pages > 1:
-        placeholder = f"{placeholder} (page {page + 1} of {pages})"
-    return sel(custom_id, opts, placeholder), pages
-
-
-def server_options(R, page, head=(), more="p"):
-    """Options for a "Go to..." select: head (Defaults, DMs) on page 1,
-    servers by name (22 a page), then paging options."""
-    guilds = sorted(R.guilds().values(),
-                    key=lambda g: (str(g.get("name") or "").lower(),
-                                   str(g["id"])))
-    if R.server_query:
-        q = R.server_query.lower()
-        guilds = [g for g in guilds if q in str(g.get("name") or "").lower()]
-    pages = max(1, math.ceil(len(guilds) / SERVERS_PER_PAGE))
-    page = min(max(0, page), pages - 1)
-    listed = set(R.st.servers_listed())
-    opts = []
-    if page > 0:
-        opts.append(opt("Previous servers…", f"{more}{page - 1}",
-                        f"Page {page} of {pages}"))
+def pause_words(R, place, at):
+    """"I'm paused here (you, Oct 19)." and the like."""
+    v = Val(R, at, "who.replies") if at.kind != "defaults" else None
+    who = ""
+    if v is not None and v.src and v.src[0] == "discord":
+        who = f" ({who_text(R, v.src[1])}, {short_date(v.src[2])})"
+    if at.kind == "defaults":
+        where = "everywhere"
+    elif at == place:
+        where = "here"
     else:
-        opts += list(head)
-    for g in guilds[page * SERVERS_PER_PAGE:(page + 1) * SERVERS_PER_PAGE]:
-        n = g.get("member_count")
-        desc = f"{n:,} members" if isinstance(n, int) else "Size unknown"
-        if str(g["id"]) in listed:
-            desc += " · has its own settings"
-        opts.append(opt(str(g.get("name") or "A server"), f"s{g['id']}",
-                        desc))
-    if page < pages - 1:
-        opts.append(opt("More servers…", f"{more}{page + 1}",
-                        f"Page {page + 2} of {pages}"))
-    return opts, page, pages, len(guilds)
+        where = f"in all of {R.gname(at.guild_id)}"
+    return f"**I'm paused {where}**{who}. I won't reply to anyone"
 
 
-def go_select(R, origin):
-    head = []
-    if origin.kind != "defaults":
-        head.append(opt("Defaults", "x", "What every server and DM follows"))
-    if origin.kind != "dms":
-        head.append(opt("DMs", "d", "Direct messages with the bot"))
-    opts, _page, _pages, _n = server_options(R, R.go_page, head)
-    return sel(cid("go", ptok(origin)), opts, "Go to…")
+def status_text(R, place):
+    """The page's head: what the bot does at place, in one line."""
+    if place.kind == "dms":
+        access = ms.dm_access(R.st)
+        if access == "list":
+            n = len([p for p in value(R, place, "who.dms_from") or []
+                     if p not in R.ctx.owners])
+            first = (f"You and {n} {'person' if n == 1 else 'people'} you "
+                     f"picked can DM me")
+        else:
+            first = DM_WORDS.get(access, "Only you can DM me")
+    else:
+        rep = value(R, place, "who.replies")
+        first = REPLIES_WORDS.get(rep, "I chat freely")
+        if place.kind == "defaults":
+            first += " in servers"
+    at = paused_at(R, place)
+    if at is not None:
+        return pause_words(R, place, at) + "."
+    parts = [f"**{first}**"]
+    if place.kind == "defaults":
+        dm = DM_WORDS.get(ms.dm_access(R.st)) \
+            or "You and people you picked can DM me"
+        parts.append(dm[0].lower() + dm[1:])
+    ln = LENGTH_WORDS.get(value(R, place, "style.length"))
+    if ln:
+        parts.append(ln)
+    parts.append(MEMORY_WORDS.get(value(R, place, "privacy.memory"),
+                                  MEMORY_WORDS["public-only"]))
+    if R.st.spec(MEDIA_ON) is not None and value(R, place, MEDIA_ON):
+        parts.append(media_words(R, place))
+    cap = value(R, place, "limits.per_person_per_day")
+    if isinstance(cap, int):
+        parts.append(f"up to {cap:,} replies a person a day")
+    return " · ".join(parts)
+
+
+def media_words(R, place):
+    sp = place if place.kind != "channel" \
+        else ms.Place.server(place.guild_id)
+    who = value(R, sp, "plugins.media.who") \
+        if R.st.spec("plugins.media.who") is not None else "owners"
+    if who == "everyone":
+        return "images & video for everyone"
+    if isinstance(who, list) and [p for p in who if p not in R.ctx.owners]:
+        return "images & video for you and people you picked"
+    return "images & video for you"
+
+
+# ---------------------------------------------------------------------------
+# Changes in plain words
+# ---------------------------------------------------------------------------
+UI_LABELS = {
+    "who.replies": "Replies", "who.ignore": "Ignore list",
+    "who.allow": "Only answers", "who.bots": "Other bots",
+    "who.bot_exchange_limit": "Replies in a row to other bots",
+    "who.dms_from": "Who can DM me", "style.length": "Reply length",
+    "style.notes": "Instructions", "privacy.memory": "What I may share",
+    "privacy.suspicious": "Suspicious messages",
+    "limits.per_day": "Replies a day",
+    "limits.per_person_per_day": "Replies a person a day",
+    "plugins.media.enabled": "Images & video",
+    "plugins.media.who": "Who can ask for images & video",
+    "plugins.media.per_day": "Images & video a day",
+}
+UI_VALUES = {("who.replies", "conversational"): "chat freely",
+             ("who.replies", "when-addressed"): "only when @mentioned",
+             ("who.replies", "off"): "off"}
+
+
+def ui_label(key):
+    return UI_LABELS.get(key) or ms.label(key)
+
+
+def ui_value(R, key, v):
+    if isinstance(v, str) and (key, v) in UI_VALUES:
+        return UI_VALUES[(key, v)]
+    return ms.value_label(key, v, R.look)
+
+
+def ui_where(R, place, path=None):
+    if place.kind == "defaults":
+        if path == ("dms",):
+            return "In DMs"
+        if path == ("all_servers",):
+            return "In every server"
+        return "Everywhere"
+    if place.kind == "server":
+        return f"In all of {R.name(place)}"
+    return f"In {R.name(place)}"
+
+
+def say_change(R, place, key, old, new, path=None):
+    """"In #general, Replies: chat freely → off"."""
+    return (f"{ui_where(R, place, path)}, {ui_label(key)}: "
+            f"{ui_value(R, key, old)} → {ui_value(R, key, new)}")
+
+
+def say_undo(R, plan):
+    """What an Undo of plan would make, as "In #general, Replies back to
+    chat freely"."""
+    sim = ms.simulate(R.st, plan)
+    parts = []
+    for ch in plan:
+        sc = _scope_at(ch.place, ch.key, ch.path)
+        new = sim.top(ch.key) if sc is None else sim.get(ch.key, sc)
+        parts.append(f"{ui_where(R, ch.place, ch.path)}, "
+                     f"{ui_label(ch.key)} back to {ui_value(R, ch.key, new)}")
+    return "; ".join(parts)
 
 
 # ---------------------------------------------------------------------------
 # Banner and last-change slot
 # ---------------------------------------------------------------------------
 def banner_done(R, text, undo_place=None, group=None):
-    text = clip(f"**Done:** {text}", 1500)
+    text = clip(f"✓ **Done.** {text}", 1500)
     if undo_place is not None and group:
         try:
             return [section(text, btn("Undo", cid("un", ptok(undo_place),
@@ -1020,17 +928,18 @@ def banner_done(R, text, undo_place=None, group=None):
     return [td(text)]
 
 
-def banner_error(text, retry=None):
-    out = [td(clip(f"**Not saved:** {text}", 1500))]
-    if retry:
-        out.append(row(btn("Try again", retry, PRIMARY)))
-    return out
+def banner_error(text):
+    return [td(clip(f"**Not saved:** {text}", 1500))]
 
 
-def _undo_scope(R, place):
-    """(place an Undo works on, include channels?, admin's server)."""
+def undo_scope(R, place):
+    """(place an Undo works on, include channels?, admin's server): a
+    channel's page undoes its server's newest change (the server's or
+    any channel's), since its style applies to the whole server."""
     if R.admin:
         return ms.Place.server(R.admin_gid), True, R.admin_gid
+    if place.kind == "channel":
+        return ms.Place.server(place.guild_id), True, None
     return place, place.kind == "server", None
 
 
@@ -1043,8 +952,7 @@ def undo_forward(R, plan):
         sc = _scope_at(ch.place, ch.key, ch.path)
         before = sim.top(ch.key) if sc is None else sim.get(ch.key, sc)
         now = R.st.top(ch.key) if sc is None else R.st.get(ch.key, sc)
-        parts.append(ms.describe_change(ch.place, ch.key, before, now,
-                                        R.look, ch.path))
+        parts.append(say_change(R, ch.place, ch.key, before, now, ch.path))
     return "; ".join(parts)
 
 
@@ -1060,11 +968,11 @@ def last_author(R, plan):
     return None, None
 
 
-def last_change_slot(R, place, label=None):
-    """SEC "-# Last change here: ..." [Undo], or []."""
+def last_change_slot(R, place):
+    """SEC "-# Last change: ..." [Undo], or []."""
     if R.banner or R.st.overlay_error or R.role is None:
         return []
-    up, children, admin_gid = _undo_scope(R, place)
+    up, children, admin_gid = undo_scope(R, place)
     try:
         _text, gid = ms.undo_preview(R.st, up, include_children=children,
                                      names=R.look, admin_gid=admin_gid)
@@ -1076,10 +984,8 @@ def last_change_slot(R, place, label=None):
         R.ctx.log(f"settings_ui: last change: {e}")
         return []
     by, at = last_author(R, plan)
-    when = f" ({who_text(R, by).replace('@you', 'you')}, {ago(R, at)})" \
-        if by else ""
-    head = label or ("Last change in " + R.name(up) + " or its channels"
-                     if children else "Last change here")
+    when = f" ({who_text(R, by)}, {ago(R, at)})" if by else ""
+    head = "Last change by admins" if R.admin else "Last change"
     text = clip(f"-# {head}: {forward}{when}", 600)
     try:
         b = btn("Undo", cid("un", ptok(up), gid))
@@ -1088,22 +994,7 @@ def last_change_slot(R, place, label=None):
     return [section(text, b)]
 
 
-def finish(R, place, inner, footer, colour=BLURPLE, slot=True,
-           slot_label=None):
-    """A page: banner, the container (with the last-change slot at its
-    bottom), the rows below it."""
-    inner = list(inner)
-    if slot:
-        inner += last_change_slot(R, place, slot_label)
-    comps = list(R.banner or []) + [container(inner, colour)] + \
-        [r for r in footer if r and r.get("components")]
-    if R.st.overlay_error:
-        comps = read_only(comps)
-    return comps
-
-
-WRITE_VERBS = ("set", "val", "ppl", "rm", "mod", "pre", "un", "pz", "rs",
-               "fx", "re", "ok")
+WRITE_VERBS = ("set", "pre", "val", "ppl", "rm", "un", "pz", "rs", "fx", "ok")
 
 
 def _verb(c):
@@ -1113,7 +1004,7 @@ def _verb(c):
 
 def read_only(comps):
     """The overlay can't be read: write controls removed, a warning on
-    top (navigation stays)."""
+    top (reading stays)."""
     out = [td(OVERLAY_BROKEN)]
     for c in comps:
         out.append(_strip(c))
@@ -1128,686 +1019,312 @@ def _strip(c):
         return c
     if t == ROW:
         kept = [x for x in c["components"] if _verb(x) not in WRITE_VERBS]
-        if kept:
-            return dict(c, components=kept)
-        now = [o["label"] for x in c["components"]
-               for o in x.get("options") or [] if o.get("default")]
-        return td(f"-# Now: {now[0]}") if now and _verb(
-            c["components"][0]) == "set" else None
+        return dict(c, components=kept) if kept else None
     if t == CONTAINER:
         kept = [x for x in (_strip(y) for y in c["components"]) if x]
         return dict(c, components=kept)
     return c
 
 
-# ---------------------------------------------------------------------------
-# Shared pieces of pages
-# ---------------------------------------------------------------------------
-def toggle_button(R, place, key, page):
-    """[Welcome: Off · Turn on] style button with an absolute value."""
-    on = bool(value(R, place, key))
-    name = EXTRA_SHORT.get(key) or ms.label(key)
-    return btn(f"{name}: {'On · Turn off' if on else 'Off · Turn on'}",
-               cid("val", ptok(place), kcode(key), "off" if on else "on",
-                   page), SUCCESS if on else SECONDARY)
-
-
-EXTRA_SHORT = {"plugins.welcome.enabled": "Welcome",
-               "plugins.media.enabled": "Image and video"}
-
-
-def extra_keys(keys):
-    """The Extras' on/off keys, welcome first."""
-    out = [k for k in keys if k.startswith("plugins.")
-           and k.endswith(".enabled")]
-    return sorted(out, key=lambda k: (k != "plugins.welcome.enabled", k))
-
-
-def toggle_section(R, place, key, page):
-    v = Val(R, place, key)
-    on = bool(v.value)
-    if v.set:
-        state = ("On" if on else "Off") + " · ● changed here"
-        if v.src and v.src[0] == "discord":
-            state += f" by {who_text(R, v.src[1])}, {short_date(v.src[2])}"
-        elif v.src:
-            state = ("On" if on else "Off") + " · ● set in config.yaml"
-    else:
-        parent = parent_name(R, place, key) or "Defaults"
-        state = ("On" if on else "Off") + (
-            " · built-in default" if place.kind == "defaults"
-            else f" · same as {parent}")
-    return section(f"**{ms.label(key)}**\n{state}",
-                   btn("Turn off" if on else "Turn on",
-                       cid("val", ptok(place), kcode(key),
-                           "off" if on else "on", page),
-                       SUCCESS if not on else SECONDARY))
-
-
-def notes_text(R, place):
-    """The Instructions section's text."""
-    if place.kind == "channel":
-        srv = ms.Place.server(place.guild_id)
-        base = value(R, srv, "style.notes")
-        own = Val(R, place, "style.notes")
-        gname = R.gname(place.guild_id)
-        head = (f"{gname}'s instructions apply here." if base
-                else f"{gname} has no instructions.")
-        added = f"“{esc(clip(own.here, 120))}”" if own.set and own.here \
-            else "nothing"
-        return (f"**Instructions for the Muse**{tag(R, own)}\n{head} "
-                f"Added for {R.name(place)}: {added}")
-    v = Val(R, place, "style.notes")
-    if v.set:
-        notes = f"“{esc(clip(v.here, 160))}”" if v.here else "None set here"
-    elif place.kind == "defaults":
-        notes = "None yet"
-    else:
-        notes = f"Same as Defaults: “{esc(clip(v.value, 120))}”" if v.value \
-            else "Same as Defaults: nothing"
-    length = value(R, place, "style.length")
-    return (f"**Instructions for the Muse**{tag(R, v)}\n{notes} · Reply "
-            f"length: {value_name(R, 'style.length', length)}")
-
-
-def cap_section(R, place, key, form, page, note=""):
-    v = Val(R, place, key)
-    if v.set:
-        cur = "No cap" if v.here is None else f"{v.here:,} a day"
-    elif place.kind == "defaults":
-        cur = "No cap"
-    else:
-        cur = "No cap here"
-    sc = _scope_at(place, key, v.path)
-    others = [(c, n) for c, n in R.st.cap_layers(key, sc)
-              if not _counter_is(c, place)] if sc is not None else []
-    extra = ""
-    if others:
-        c, n = min(others, key=lambda x: x[1])
-        extra = f"\n-# {_counter_name(R, c)} also caps " + (
-            "everyone" if key == "limits.per_person_per_day"
-            else "replies") + f" at {n:,}."
-    return section(f"**{ms.label(key)}**{tag(R, v)}\n{cur}{note}{extra}",
-                   btn("Change", cid("mod", ptok(place), form, page)))
-
-
-def _counter_is(counter, place):
-    if counter == "everywhere":
-        return place.kind == "defaults"
-    if counter == "dms":
-        return place.kind == "dms"
-    return place.kind == "server" and counter == f"server:{place.guild_id}"
-
-
-def _counter_name(R, counter):
-    if counter == "everywhere":
-        return "Defaults"
-    if counter == "dms":
-        return "DMs"
-    return R.gname(counter.split(":", 1)[1])
-
-
-def counter_place(counter):
-    if counter == "everywhere":
-        return ms.Place.defaults()
-    if counter == "dms":
-        return ms.Place.dms()
-    if str(counter).startswith("server:"):
-        return ms.Place.server(counter.split(":", 1)[1])
-    return None
-
-
-def nav_row(R, place, *extra):
-    """[Defaults] [DMs] [Other servers] (minus the page itself)."""
-    out = list(extra)
-    if place.kind != "defaults":
-        out.append(btn("Defaults", cid("pg", "x", "b")))
-    if place.kind != "dms":
-        out.append(btn("DMs", cid("pg", "d", "b")))
-    out.append(btn("Other servers", cid("pg", ptok(place), "o")))
-    return row(*out[:5])
-
-
-def channel_row(R, place, gid, placeholder):
-    s, pages = channel_select_or_fallback(
-        R, gid, cid("gc", ptok(place)), ptok(place), placeholder,
-        findable=True)
-    return (row(s) if s else None), pages
-
-
-def pause_button(R, place):
-    if ms.is_paused(R.st, place):
-        return btn(f"Resume {R.name(place)}" if place.kind != "defaults"
-                   else "Resume everywhere", cid("rs", ptok(place)), SUCCESS)
-    return btn(ms.pause_label(place, R.look).replace("Pause in ", "Pause "),
-               cid("pz", ptok(place)), DANGER)
-
-
-def paused_line(R, place):
-    """"**Paused:** Off in #x since Oct 19 (you)." when paused there."""
-    if place.kind == "defaults" or not ms.is_paused(R.st, place):
-        return None
-    v = Val(R, place, "who.replies")
-    who, when = "", ""
-    if v.src and v.src[0] == "discord":
-        who = f" ({who_text(R, v.src[1]).replace('@you', 'you')})"
-        when = f" since {short_date(v.src[2])}"
-    elif v.src and v.src[0] == "file":
-        who = " (config.yaml)"
-    return f"**Paused:** Off in {R.name(place)}{when}{who}."
+def finish(R, comps):
+    comps = list(R.banner or []) + list(comps)
+    if R.st.overlay_error:
+        comps = read_only(comps)
+    return comps
 
 
 # ---------------------------------------------------------------------------
-# Pages
+# The owner's page
 # ---------------------------------------------------------------------------
-def members_text(R, gid):
-    n = R.members(gid)
-    return f"{n:,} members" if n is not None else "size unknown"
+PRESET_HELP = {
+    "friends": "Chats freely, no daily caps, may use what it remembers",
+    "community": "Only when @mentioned, public facts only, 20 replies a "
+                 "person a day",
+    "work": "Only when @mentioned, nothing personal, ignores other bots",
+}
 
 
-def page_channel(R, place):
-    """S1: one channel (owner)."""
-    gid, tok = place.guild_id, ptok(place)
-    gname, cname = R.gname(gid), R.name(place)
-    paused = ms.is_paused(R.st, place)
-    lines = [f"## {cname}",
-             f"-# In {gname} · {members_text(R, gid)}. A channel can "
-             f"change when it answers, add instructions and switch "
-             f"extras; everything else follows {gname}."]
-    if R.thread_note:
-        lines.append(f"-# You ran this in a thread; threads follow "
-                     f"{cname}.")
-    p = paused_line(R, place)
-    if p:
-        lines.append(p)
-    if not R.can_see(gid, place.channel_id):
-        lines.append(f"-# The bot can't see {cname}, so it never answers "
-                     f"there.")
-    inner = [td("\n".join(lines)), sep()]
-    keys = ms.place_keys(R.st, place, "basics")
-    if "who.replies" in keys:
-        v = Val(R, place, "who.replies")
-        inner.append(td(f"**When it answers in {cname}**{tag(R, v)}"))
-        inner.append(row(choice_select(R, place, "who.replies",
-                                       cid("set", tok, "r"))))
-    if "style.notes" in keys:
-        inner.append(section(notes_text(R, place),
-                             btn("Edit", cid("mod", tok, "i", "b"),
-                                 PRIMARY)))
-    for k in keys:
-        if k.startswith("plugins.") and k.endswith(".enabled"):
-            inner.append(toggle_section(R, place, k, "b"))
-    chan_row, _pages = channel_row(R, place, gid,
-                                  f"Go to another channel in {gname}…")
-    nav = [btn(gname, cid("pg", f"s{gid}", "b"), PRIMARY)]
-    footer = [row(pause_button(R, place),
-                  btn("Why no reply?", cid("pg", tok, "y"))),
-              chan_row]
-    footer.append(nav_row(R, place, *nav))
-    return finish(R, place, inner, footer, GREY if paused else BLURPLE)
+def style_select(R, gid):
+    server = ms.Place.server(gid)
+    cur = ms.matching_preset(R.st, server)
+    opts = [opt(title, name, PRESET_HELP.get(name), default=cur == title)
+            for name, (title, _v) in ms.PRESETS.items()]
+    return sel(cid("pre", f"s{gid}"), opts, "Pick a style…")
 
 
-def page_server(R, place):
-    """S2: a server's basics (owner)."""
-    gid, tok = place.guild_id, ptok(place)
-    gname = R.gname(gid)
-    preset = ms.matching_preset(R.st, place)
-    sub = f"Matches the **{preset}** preset" if preset else \
-        "Custom settings"
-    lines = [f"## {gname}", f"-# {members_text(R, gid)} · {sub}"]
-    p = paused_line(R, place)
-    if p:
-        lines.append(p)
-    inner = [td("\n".join(lines)),
-             row(sel(cid("pre", tok), [
-                 opt("Friends", "friends", "Chatty, no caps, may use what "
-                     "it remembers about you"),
-                 opt("Community", "community", "Only when @mentioned, "
-                     "public facts only, 20 replies per person a day"),
-                 opt("Work", "work", "Only when @mentioned, nothing "
-                     "personal, ignores other bots")], "Apply a preset…")),
-             sep()]
-    keys = ms.place_keys(R.st, place, "basics")
-    if "who.replies" in keys:
-        v = Val(R, place, "who.replies")
-        inner.append(td(f"**When it answers in {gname}**{tag(R, v)}"))
-        inner.append(row(choice_select(R, place, "who.replies",
-                                       cid("set", tok, "r"))))
-    if "privacy.memory" in keys:
-        v = Val(R, place, "privacy.memory")
-        inner.append(td(f"**What it may say about you**{tag(R, v)}"))
-        inner.append(row(choice_select(R, place, "privacy.memory",
-                                       cid("set", tok, "m"))))
-    if "style.notes" in keys:
-        inner.append(section(notes_text(R, place),
-                             btn("Edit", cid("mod", tok, "i", "b"),
-                                 PRIMARY)))
-    if "limits.per_person_per_day" in keys:
-        inner.append(cap_section(R, place, "limits.per_person_per_day",
-                                 "c", "b"))
-    extras = [toggle_button(R, place, k, "b") for k in extra_keys(keys)]
-    if extras:
-        inner.append(td("**Extras**"))
-        inner.append(row(*(extras[:4] + [btn("Extras settings",
-                                             cid("pg", tok, "e"))])))
-    chan_row, _pages = channel_row(R, place, gid,
-                                  f"Go to a channel in {gname}…")
-    footer = [row(btn("More settings", cid("pg", tok, "m")),
-                  btn("Why no reply?", cid("pg", tok, "y")),
-                  pause_button(R, place)),
-              chan_row]
-    footer.append(nav_row(R, place))
-    paused = ms.is_paused(R.st, place)
-    return finish(R, place, inner, footer, GREY if paused else BLURPLE)
-
-
-def roles_here(R, place):
-    """Roles can be picked for place: it is a server, and the
-    interaction is in that server (a role belongs to one server)."""
-    return place.guild_id is not None and R.in_guild(place.guild_id)
-
-
-def people_select(R, place, key, kind, placeholder, add_only=False,
-                  value_=None):
-    """A mentionable select in the place's own server; elsewhere a user
-    select (roles of another server mean nothing; the roles already on
-    the list are kept, see v_ppl)."""
-    v = value(R, place, key) if value_ is None else value_
-    if kind == MENTIONABLE_SELECT and not roles_here(R, place):
-        kind = USER_SELECT
-        v = [p for p in v if not str(p).startswith("role:")] \
-            if isinstance(v, list) else v
-        placeholder = placeholder.replace("people or roles", "people")
-    s = picker(kind, cid("ppl", ptok(place), kcode(key)), placeholder,
-               1 if add_only else 0, 25,
-               None if add_only else people_defaults(v))
-    return row(s)
-
-
-def page_more(R, place):
-    """S3: Only answer / Never answer / Other bots / caps / injection
-    (a server, Defaults or DMs)."""
-    tok = ptok(place)
-    where = R.name(place)
-    title = f"{where} › More settings"
-    inner = [td(f"## {title}"), sep()]
-    keys = ms.place_keys(R.st, place, "more")
-    hint = ""
-    if place.kind == "server" and not R.in_guild(place.guild_id):
-        hint = (f"\n-# To pick roles, or search everyone there, run "
-                f"/settings in "
-                f"{where}.")
-    if "who.allow" in keys and place.kind != "dms":
-        v = Val(R, place, "who.allow")
-        parent = parent_name(R, place, "who.allow")
-        if v.set:
-            state = f" · {mention_list(v.here)}{tag(R, v)}" \
-                if isinstance(v.here, list) else f" · Everyone{tag(R, v)}"
-        elif place.kind == "defaults":
-            state = " · " + (mention_list(v.value)
-                             if isinstance(v.value, list) else "everyone")
+def pause_buttons(R, place):
+    """Pause / Resume (and Turn on, when it is off here without a
+    pause) for place."""
+    at = paused_at(R, place)
+    if at is not None:
+        if at.kind == "defaults":
+            label = "Resume everywhere"
+        elif at == place:
+            label = "Resume here" if place.kind != "dms" else "Resume DMs"
         else:
-            state = f" · Same as {parent}: " + (
-                mention_list(v.inherited)
-                if isinstance(v.inherited, list) else "everyone")
-        text = (f"**Only answer these people**{state}\n-# Pick people or "
-                f"roles to answer only them in {where}. Owners always get "
-                f"answers.{hint}")
-        if isinstance(v.value, list):
-            inner.append(section(text, btn(
-                "Answer everyone", cid("val", tok, "al", "everyone", "m"))))
-        else:
-            inner.append(td(text))
-        inner.append(people_select(R, place, "who.allow", MENTIONABLE_SELECT,
-                                   "Everyone (pick to limit)…"))
-    if "who.ignore" in keys:
-        v = Val(R, place, "who.ignore")
-        inner.append(td(f"**Never answer**{tag(R, v)}\n-# Wins over "
-                        f"everything else. Owners can't be added."
-                        + ("" if "who.allow" in keys
-                           and place.kind != "dms" else hint)))
-        inner.append(people_select(R, place, "who.ignore",
-                                   MENTIONABLE_SELECT, "Nobody yet…"))
-    if "who.bots" in keys:
-        v = Val(R, place, "who.bots")
-        inner.append(td(f"**Other bots**{tag(R, v)}"))
-        inner.append(row(choice_select(R, place, "who.bots",
-                                       cid("set", tok, "b"))))
-    if "who.bot_exchange_limit" in keys:
-        v = Val(R, place, "who.bot_exchange_limit")
-        cur = "No cap" if v.value is None else f"{v.value:,} in a row"
-        if not v.set and place.kind != "defaults":
-            cur = f"Same as Defaults: {cur}"
-        inner.append(section(
-            f"**Replies in a row to other bots**{tag(R, v)}\n{cur}\n-# A "
-            f"cap stops two bots answering each other forever.",
-            btn("Change", cid("mod", tok, "bx", "m"))))
-    if "limits.per_day" in keys:
-        inner.append(cap_section(R, place, "limits.per_day", "c", "m"))
-    if "privacy.suspicious" in keys:
-        v = Val(R, place, "privacy.suspicious")
-        inner.append(td(f"**Possible prompt injection**{tag(R, v)}"))
-        inner.append(row(choice_select(R, place, "privacy.suspicious",
-                                       cid("set", tok, "su"))))
-    if place.kind == "defaults":
-        n = len(R.st.get("privacy.never_share", ms.Scope.everywhere())
-                or [])
-        line = (f"-# Never share these phrases: {n} set in config.yaml. "
-                f"Edit the file to change them.")
-        if not R.st.get("abilities.owner_commands", ms.Scope.everywhere()):
-            line += ("\n-# Owner requests (pin, post, react, threads) are "
-                     "off in config.yaml.")
-        inner.append(td(line))
-    back = btn(f"Back to {where}", cid("pg", tok, "b"))
-    footer = [back]
-    if place.kind in ("server", "defaults"):
-        footer.append(btn("Extras settings", cid("pg", tok, "e")))
-    if place.kind != "defaults":
-        footer.append(btn("Why no reply?", cid("pg", tok, "y")))
-    return finish(R, place, inner, [row(*footer)])
+            label = "Resume server"
+        return [btn(label, cid("rs", ptok(at)), SUCCESS)]
+    if place.kind in ("channel", "server") \
+            and value(R, place, "who.replies") == "off":
+        server = ms.Place.server(place.guild_id)
+        to = value(R, server, "who.replies") if place.kind == "channel" \
+            else "off"
+        return [btn("Turn on here", cid(
+            "val", ptok(place), "r",
+            to if to != "off" else "when-addressed"), SUCCESS)]
+    label = {"dms": "Pause DMs", "channel": "Pause here",
+             "server": "Pause server",
+             "defaults": "Pause everywhere"}[place.kind]
+    return [btn(label, cid("pz", ptok(place)), DANGER)]
 
 
-def welcome_where(R, place):
-    """The "Where welcomes go" text."""
-    v = value(R, place, "plugins.welcome.channel")
-    if place.kind == "defaults":
-        if v == "off":
-            return "Nowhere: welcomes are off unless a server picks one."
-        if v == "system":
-            return "Each server's system channel"
-        return "A channel set for every server"
-    gid = place.guild_id
-    gname = R.gname(gid)
-    if v == "off":
-        return "Nowhere: welcomes are skipped. Pick a channel."
-    if v == "system":
-        g = R.guilds().get(gid) or {}
-        if "system_channel_id" not in g:
-            return "The server's system channel"
-        sys_id = g.get("system_channel_id")
-        if not sys_id:
-            return (f"⚠ {gname} has no system channel, so welcomes are "
-                    f"skipped. Pick a channel.")
-        n = R.look(sys_id)
-        text = "The server's system channel, " + (f"#{n}" if n
-                                                   else "<#" + sys_id + ">")
-        if (R.chan(gid, sys_id) or {}).get("can_send") is False:
-            text += "\n-# The bot can't post there; welcomes are skipped."
-        return text
-    if _ID.fullmatch(str(v)):
-        text = f"<#{v}>"
-        if (R.chan(gid, v) or {}).get("can_send") is False:
-            text += "\n-# The bot can't post there; welcomes are skipped."
-        return text
-    return f"#{esc(v)}"
+# -- Where ---------------------------------------------------------------------
+def where_options(R, place):
+    """The places the Where select offers: here (the channel /settings
+    was typed in, or DMs), its server, everywhere; a server opened from
+    the join notice in a DM stays on the list while it is shown."""
+    here = R.here()
+    out = [here]
+    if here.kind == "channel":
+        out.append(ms.Place.server(here.guild_id))
+    if place.kind == "server" and place not in out:
+        out.insert(0, place)
+    out.append(ms.Place.defaults())
+    return out
 
 
-def page_extras(R, place):
-    """S4: Extras details (a server or Defaults)."""
-    tok = ptok(place)
-    where = R.name(place)
-    inner = [td(f"## {where} › Extras"), sep()]
-    st = R.st
-    if "welcome" in st.manifests:
-        inner.append(toggle_section(R, place, "plugins.welcome.enabled",
-                                    "e"))
-        inner.append(td(f"**Where welcomes go**\n{welcome_where(R, place)}"))
-        cur = value(R, place, "plugins.welcome.channel")
-        if place.kind == "server":
-            s, _pages = channel_select_or_fallback(
-                R, place.guild_id, cid("set", tok, "~welcome.channel"), tok,
-                "Pick a channel…", TEXT_CHANNEL_TYPES, cur)
-            if s:
-                inner.append(row(s))
-            inner.append(row(
-                btn("Use the system channel",
-                    cid("val", tok, "~welcome.channel", "system", "e")),
-                btn("Edit welcome notes", cid("mod", tok, "wn", "e"))))
-        else:
-            inner.append(row(
-                btn("Use each server's system channel",
-                    cid("val", tok, "~welcome.channel", "system", "e")),
-                btn("Off", cid("val", tok, "~welcome.channel", "off", "e")),
-                btn("Edit welcome notes", cid("mod", tok, "wn", "e"))))
-        sc = _scope_at(place, "plugins.welcome.daily_cap")
-        cap = st.get("plugins.welcome.daily_cap", sc)
-        age = st.get("plugins.welcome.max_age_hours", sc)
-        line = ("-# " + (f"At most {cap:,} welcomes a day" if cap is not None
-                         else "No daily limit on welcomes")
-                + "; " + (f"joins older than {age:,} hours are skipped"
-                          if age is not None else "old joins are welcomed "
-                          "too") + ". Change these in config.yaml.")
-        prompt = st.get("plugins.welcome.prompt", sc)
-        spec = st.spec("plugins.welcome.prompt")
-        if spec is not None and prompt != spec.default:
-            line += (" A custom welcome prompt is set in config.yaml; your "
-                     "notes are added to it.")
-        inner.append(td(line))
-    if "media" in st.manifests:
-        if len(inner) > 2:
-            inner.append(sep())
-        inner.append(toggle_section(R, place, "plugins.media.enabled", "e"))
-        v = Val(R, place, "plugins.media.who")
-        pend = ("\nPick people below; nothing changes until you do."
-                if R.pending == "plugins.media.who" else "")
-        inner.append(td(f"**Who can ask for images and video**{tag(R, v)}"
-                        f"{pend}"))
-        inner.append(row(choice_select(
-            R, place, "plugins.media.who", cid("set", tok, "~media.who"),
-            values=["owners", "everyone", "list"])))
-        if isinstance(v.value, list) or R.pending == "plugins.media.who":
-            picked = [p for p in (v.value if isinstance(v.value, list)
-                                  else []) if p not in R.ctx.owners]
-            inner.append(people_select(R, place, "plugins.media.who",
-                                       MENTIONABLE_SELECT, "Pick people…",
-                                       value_=picked))
-        vp = Val(R, place, "plugins.media.per_day")
-        cur = "No cap" if vp.value is None else f"{vp.value:,} a day"
-        if not vp.set and place.kind != "defaults":
-            cur = f"Same as Defaults: {cur}"
-        inner.append(section(f"**Generations per day**{tag(R, vp)}\n{cur}",
-                             btn("Change", cid("mod", tok, "mpd", "e"))))
-    return finish(R, place, inner,
-                  [row(btn(f"Back to {where}", cid("pg", tok, "b")))])
-
-
-def page_defaults(R):
-    """S5: Defaults (the hub in a DM)."""
-    place = ms.Place.defaults()
-    guilds = R.guilds()
-    own = [g for g in R.st.servers_listed() if g in guilds]
-    n = len(guilds)
-    lines = ["## Defaults",
-             f"-# Every server and DM follows these unless it sets its own. "
-             f"The bot is in {n:,} server{'s' if n != 1 else ''}; "
-             + (f"{len(own):,} has its own settings." if len(own) == 1
-                else f"{len(own):,} have their own settings.")]
-    if ms.is_paused(R.st, place):
-        lines.append("**Paused everywhere:** it isn't answering anyone "
-                     "without its own setting.")
-    inner = [td("\n".join(lines)), sep()]
-    keys = ms.place_keys(R.st, place, "basics")
-    if "who.replies" in keys:
-        v = Val(R, place, "who.replies")
-        inner.append(td(f"**When it answers in servers**{tag(R, v)}"))
-        inner.append(row(choice_select(R, place, "who.replies",
-                                       cid("set", "x", "r"))))
-    access = ms.dm_access(R.st)
-    inner.append(section(f"**Who can DM it**\n"
-                         f"{dm_access_words(R, access)}",
-                         btn("Change", cid("pg", "d", "b", "x"))))
-    if "privacy.memory" in keys:
-        v = Val(R, place, "privacy.memory")
-        inner.append(td(f"**What it may say about you**{tag(R, v)}"))
-        inner.append(row(choice_select(R, place, "privacy.memory",
-                                       cid("set", "x", "m"))))
-    if "style.notes" in keys:
-        inner.append(section(notes_text(R, place),
-                             btn("Edit", cid("mod", "x", "i", "b"),
-                                 PRIMARY)))
-    if "limits.per_person_per_day" in keys:
-        inner.append(cap_section(
-            R, place, "limits.per_person_per_day", "c", "b",
-            "\n-# Counted per person across every server and DM together."))
-    extras = [toggle_button(R, place, k, "b") for k in extra_keys(keys)]
-    if extras:
-        inner.append(td("**Extras in every server**"))
-        inner.append(row(*(extras[:4] + [btn("Extras settings",
-                                             cid("pg", "x", "e"))])))
-    footer = [row(btn("More settings", cid("pg", "x", "m")),
-                  btn("Bot-wide", cid("pg", "x", "w")),
-                  pause_button(R, place))]
-    here, _thread = R.typed()
-    if R.guild_id:
-        back = btn(f"Back to {R.gname(R.guild_id)}",
-                   cid("pg", f"s{R.guild_id}", "b"))
-        if here:
-            back = btn(f"Back to #{R.look(here) or 'this channel'}",
-                       cid("pg", f"c{R.guild_id}.{here}", "b"))
-        footer.append(row(back, btn("DMs", cid("pg", "d", "b")),
-                          btn("Other servers", cid("pg", "x", "o"))))
-    else:
-        footer.append(row(go_select(R, place)))
-    return finish(R, place, inner, footer,
-                  GREY if ms.is_paused(R.st, place) else BLURPLE)
-
-
-def dm_access_words(R, access):
-    if access == "list":
-        people = value(R, ms.Place.dms(), "who.dms_from")
-        return "You and " + mention_list(people, 5)
-    return value_name(R, "who.dms_from", access)
-
-
-def dm_people(R):
-    v = value(R, ms.Place.dms(), "who.dms_from")
-    return [p for p in v if p not in R.ctx.owners] \
-        if isinstance(v, list) else []
-
-
-def page_dms(R):
-    """S6: DMs: who can DM it, and what it says there."""
-    place = ms.Place.dms()
-    inner = [td("## DMs\n-# Direct messages with the bot. Your own DMs "
-                "always get answers unless Who can DM it is Nobody."), sep()]
-    access = ms.dm_access(R.st)
-    v = Val(R, place, "who.dms_from")
-    tg = tag(R, v)
-    if access == "nobody":
-        tg = tag(R, Val(R, place, "who.replies"))
-    inner.append(td(f"**Who can DM it**{tg}"))
-    cur = "list" if R.pending == "who.dms_from" else access
+def where_select(R, place):
+    here = R.here()
     opts = []
-    for x in ("owners", "list", "shared-servers", "anyone", "nobody"):
-        d = option_help(R, place, "who.dms_from", x)
-        if x == "owners":
-            d = "Built-in default · " + d
-        opts.append(opt(value_name(R, "who.dms_from", x)
-                        if x != "list" else "You and people you pick", x, d,
-                        default=x == cur))
-    inner.append(row(sel(cid("set", "d", "df"), opts, "Who can DM it…")))
-    people = dm_people(R)
-    lines = [f"**People you picked:** {mention_list(people)}"]
-    if R.pending == "who.dms_from":
-        lines.append("Pick people below; nothing changes until you do.")
+    for p in where_options(R, place):
+        if p.kind == "channel":
+            label, d = f"{R.name(p)} (here)", "Just this channel"
+        elif p.kind == "server":
+            label = f"All of {R.gname(p.guild_id)}" + (
+                " (here)" if p == here else "")
+            d = "Every channel that has no setting of its own"
+        elif p.kind == "dms":
+            label, d = "DMs (here)", "Direct messages with me"
+        else:
+            label, d = "Everywhere", ("Every server and DM that has no "
+                                      "setting of its own")
+        opts.append(opt(label, ptok(p), d, default=p == place))
+    return sel(cid("wh", ptok(place)), opts, "Where…")
+
+
+# -- The settings on the page --------------------------------------------------
+MEDIA_WHO = "plugins.media.who"
+# The settings each kind of place shows, in order (custom_id codes).
+PLACE_CONTROLS = {"channel": ("r", "med"),
+                  "server": ("r", "ln", "med", "pp"),
+                  "dms": ("df", "ln", "med"),
+                  "defaults": ("r", "df", "ln", "med", "pp")}
+CONTROL_KEYS = {"r": "who.replies", "ln": "style.length", "med": MEDIA_ON,
+                "df": "who.dms_from", "pp": "limits.per_person_per_day"}
+CAP_CHOICES = (5, 10, 20, 50, 100)
+
+
+def follow_name(R, place):
+    """What a channel follows, in words: "the rest of Muse Lounge"."""
+    return f"the rest of {R.gname(place.guild_id)}"
+
+
+def only_you(R):
+    return "Only you" if len(owners_set(R)) <= 1 else "Only the owners"
+
+
+def ctl_replies(R, place):
+    v = Val(R, place, "who.replies")
+    opts = []
+    if place.kind == "channel":
+        inh = UI_VALUES.get(("who.replies", v.inherited), "off")
+        opts.append(opt("Like the server", "=",
+                        f"Now {inh}, like {follow_name(R, place)}",
+                        default=not v.set))
+    cur = v.here if place.kind == "channel" else v.value
+    for x, label, d in (
+            ("conversational", "Chat freely", "Answers @mentions, replies "
+             "to me, and follow-ups for 2 minutes"),
+            ("when-addressed", "Only when @mentioned", "Answers @mentions "
+             "and replies to my messages")):
+        opts.append(opt(label, x, d, default=(v.set or place.kind !=
+                                               "channel") and cur == x))
+    title = "When I reply" + (" in servers" if place.kind == "defaults"
+                              else "")
+    ph = "Paused · pick one to turn me on" if v.value == "off" \
+        else "When I reply…"
+    return title, sel(cid("set", ptok(place), "r"), opts, ph)
+
+
+def ctl_length(R, place):
+    cur = value(R, place, "style.length")
+    opts = [opt(label, x, d, default=cur == x) for x, label, d in (
+        ("brief", "Short", "A line or two"),
+        ("normal", "Normal", "As long as the message needs"),
+        ("detailed", "Detailed", "Longer, fuller replies"))]
+    return "Reply length", sel(cid("set", ptok(place), "ln"), opts,
+                               "Reply length…")
+
+
+def media_now(R, place):
+    """"off", "owners", "everyone" or "list" in force at a server or
+    everywhere."""
+    if not value(R, place, MEDIA_ON):
+        return "off"
+    who = value(R, place, MEDIA_WHO)
+    if isinstance(who, list):
+        others = [p for p in who if p not in R.ctx.owners]
+        return "list" if others else "owners"
+    return who if who in ("owners", "everyone") else "owners"
+
+
+def ctl_media(R, place):
+    opts = []
+    if place.kind in ("channel", "dms"):
+        v = Val(R, place, MEDIA_ON)
+        if place.kind == "channel":
+            inh = "on" if v.inherited else "off"
+            opts.append(opt("Like the server", "=",
+                            f"Now {inh}, like {follow_name(R, place)}",
+                            default=not v.set))
+        on = bool(v.here if v.set else v.value)
+        pick = v.set or place.kind == "dms"
+        opts.append(opt("On", "on", "For the people allowed in the server"
+                        if place.kind == "channel" else
+                        "For the people allowed everywhere",
+                        default=pick and on))
+        opts.append(opt("Off", "off", default=pick and not on))
     else:
-        lines.append("-# Picking someone switches Who can DM it to You and "
-                     "people you pick.")
-    allow = R.st.file_values.get((("dms",), "who.allow"))
-    if isinstance(allow, list) and allow:
-        lines.append(f"-# config.yaml also limits DMs to {len(allow)} "
-                     f"{'person' if len(allow) == 1 else 'people'}; remove "
-                     f"it there to use the list above alone.")
-    fallback = not R.guild_id and not DM_USER_SELECT_SEARCHES
-    if fallback:
-        lines.append("-# To search by name, run /settings in a server you "
-                     "share with them and press DMs.")
-    inner.append(td("\n".join(lines)))
-    if fallback:
-        inner.append(row(btn("Add by ID", cid("mod", "d", "id.df", "b"),
-                             PRIMARY)))
-        if people:
-            inner.append(row(sel(cid("rm", "d", "df"), [
-                opt(R.person(p) or "Someone you added", p)
-                for p in people[:25]], "Remove someone…", 1,
-                min(25, len(people)))))
+        cur = media_now(R, place)
+        opts.append(opt("Off", "off", "No images or video",
+                        default=cur == "off"))
+        opts.append(opt(only_you(R), "owners", "Only the bot's owners can "
+                        "ask", default=cur == "owners"))
+        opts.append(opt("Everyone", "everyone", "Anyone can ask; this can "
+                        "cost real money", default=cur == "everyone"))
+        if cur == "list":
+            opts.append(opt("You and people you picked", "list",
+                            "DM me to change who", default=True))
+    return "Images & video", sel(cid("set", ptok(place), "med"), opts,
+                                 "Images & video…")
+
+
+def ctl_dms(R, place):
+    access = ms.dm_access(R.st)
+    opts = [opt(only_you(R), "owners", "Strangers' DMs go unanswered",
+                default=access == "owners"),
+            opt("Anyone in your servers", "shared-servers",
+                "Anyone who shares a server with me",
+                default=access == "shared-servers"),
+            opt("Anyone", "anyone", "Anyone on Discord, strangers too",
+                default=access == "anyone"),
+            opt("Nobody", "nobody", "No DM gets an answer, not even yours",
+                default=access == "nobody")]
+    if access == "list":
+        n = len(dm_people(R))
+        opts.insert(1, opt(f"You and {n} {'person' if n == 1 else 'people'}"
+                           f" you picked", "list", "DM me to change who",
+                           default=True))
+    return "Who can DM me", sel(cid("set", ptok(place), "df"), opts,
+                                "Who can DM me…")
+
+
+def ctl_cap(R, place):
+    cur = value(R, place, "limits.per_person_per_day")
+    opts = [opt("No limit", "none", "Owners are never limited",
+                default=cur is None)]
+    choices = list(CAP_CHOICES)
+    if isinstance(cur, int) and cur not in choices:
+        choices = sorted(choices + [cur])
+    for n in choices:
+        opts.append(opt(f"{n:,} a day", str(n),
+                        default=cur == n))
+    title = "Replies a person a day" + (
+        "\n-# Counted across every server and DM together"
+        if place.kind == "defaults" else "")
+    return title, sel(cid("set", ptok(place), "pp"), opts,
+                      "Replies a person a day…")
+
+
+CONTROLS = {"r": ctl_replies, "ln": ctl_length, "med": ctl_media,
+            "df": ctl_dms, "pp": ctl_cap}
+
+
+def controls_for(R, place):
+    """[(title, select)] for the settings place shows."""
+    out = []
+    for code in PLACE_CONTROLS.get(place.kind, ()):
+        if code == "med" and R.st.spec(MEDIA_ON) is None:
+            continue
+        out.append(CONTROLS[code](R, place))
+    return out
+
+
+def head_lines(R, place):
+    lines = []
+    if place.kind == "channel":
+        gid = place.guild_id
+        lines.append(f"## {R.name(place)}")
+        lines.append(status_text(R, place))
+        sub = [f"In {R.gname(gid)}"]
+        if R.thread_note:
+            sub.append(f"threads follow {R.name(place)}")
+        if not R.can_see(gid, place.channel_id):
+            sub.append(f"I can't see {R.name(place)}, so I never reply "
+                       f"there")
+        elif value(R, place, "who.replies") == "off" \
+                and paused_at(R, place) is None:
+            sub.append("off for this channel or its category")
+        lines.append("-# " + " · ".join(sub))
+    elif place.kind == "server":
+        gid = place.guild_id
+        n = R.members(gid)
+        lines.append(f"## All of {R.gname(gid)}")
+        lines.append(status_text(R, place))
+        lines.append("-# Every channel without its own setting" + (
+            f" · {n:,} members" if n is not None else ""))
+    elif place.kind == "dms":
+        lines.append("## DMs with me")
+        lines.append(status_text(R, place))
     else:
-        inner.append(row(picker(USER_SELECT, cid("ppl", "d", "df"),
-                                "Pick people who can DM it…", 0, 25,
-                                people_defaults(people))))
-    keys = ms.place_keys(R.st, place, "basics")
-    if "privacy.memory" in keys:
-        vm = Val(R, place, "privacy.memory")
-        inner.append(td(f"**What it may say about you in DMs**{tag(R, vm)}"))
-        inner.append(row(choice_select(R, place, "privacy.memory",
-                                       cid("set", "d", "m"))))
-    if "style.notes" in keys:
-        inner.append(section(notes_text(R, place),
-                             btn("Edit", cid("mod", "d", "i", "b"),
-                                 PRIMARY)))
-    if "limits.per_person_per_day" in keys:
-        inner.append(cap_section(R, place, "limits.per_person_per_day",
-                                 "c", "b"))
-    for k in keys:
-        if k.startswith("plugins.") and k.endswith(".enabled"):
-            inner.append(toggle_section(R, place, k, "b"))
-    footer = [row(btn("More settings", cid("pg", "d", "m")),
-                  btn("Why no reply?", cid("pg", "d", "y"))),
-              row(go_select(R, place))]
-    return finish(R, place, inner, footer,
-                  GREY if access == "nobody" else BLURPLE)
+        lines.append("## Everywhere")
+        lines.append(status_text(R, place))
+        lines.append("-# Every server and DM follows these unless it has "
+                     "its own setting.")
+    return lines
 
 
-def page_botwide(R):
-    """S7: status line and update notices."""
-    place = ms.Place.defaults()
-    st = R.st
-    status = st.top("presence.status")
-    kind = st.top("presence.kind")
-    sv = Val(R, place, "presence.status")
-    uv = Val(R, place, "updates.notify")
-    text = (f"“{esc(clip(status, 128))}”" if status else "None") + \
-        f"\n-# Shown as {str(kind).capitalize()}; the kind is set in " \
-        f"config.yaml."
-    on = bool(st.top("updates.notify"))
-    inner = [td("## Bot-wide\n-# How the bot shows up on Discord, and what "
-                "it tells you."), sep(),
-             section(f"**Status line**{tag(R, sv)}\n{text}",
-                     btn("Edit", cid("mod", "x", "st", "w"), PRIMARY)),
-             section(f"**Update notices**{tag(R, uv)}\n"
-                     + ("On: DMs you when a new version is out" if on
-                        else "Off: no DM when a new version is out"),
-                     btn("Turn off" if on else "Turn on",
-                         cid("val", "x", "un", "off" if on else "on",
-                             "w")))]
-    return finish(R, place, inner,
-                  [row(btn("Back to Defaults", cid("pg", "x", "b")))])
-
-
-def page_servers(R, origin):
-    """S15: Other servers (paged; Find a server past 3 pages)."""
-    opts, page, pages, n = server_options(R, R.server_page, more="o")
-    head = (f"## Other servers\n-# The bot is in {len(R.guilds()):,} "
-            f"server{'s' if len(R.guilds()) != 1 else ''}"
-            + (f" (page {page + 1} of {pages})." if pages > 1 else "."))
-    if R.server_query:
-        head += f"\n-# {n:,} matching “{esc(clip(R.server_query, 40))}”."
-    inner = [td(head)]
-    if opts:
-        inner.append(row(sel(cid("go", ptok(origin)), opts,
-                             "Pick a server…")))
-    else:
-        inner.append(td("No server matches."))
-    footer = []
-    if pages > FIND_AFTER_PAGES or R.server_query:
-        footer.append(btn("Find a server",
-                          cid("mod", ptok(origin), "fs", "o")))
-    footer.append(btn("Back", cid("pg", ptok(origin), "b")))
-    return [container(inner, BLURPLE), row(*footer)]
+def page_home(R, place):
+    """The screen: how the bot behaves at place, where (here, its server,
+    everywhere), a few settings, the server's style, pause, why, the
+    last change, and the DM footer."""
+    inner = [td("\n".join(head_lines(R, place))),
+             row(where_select(R, place)), sep()]
+    for title, s in controls_for(R, place):
+        head, _, note = title.partition("\n")
+        inner.append(td(f"**{head}**" + (f"\n{note}" if note else "")))
+        inner.append(row(s))
+    if place.kind in ("channel", "server"):
+        gid = place.guild_id
+        inner.append(sep())
+        style = ms.matching_preset(R.st, ms.Place.server(gid))
+        inner.append(td(f"**Style for all of {R.gname(gid)}**"
+                        + ("" if style else ": a custom mix")))
+        inner.append(row(style_select(R, gid)))
+    inner += last_change_slot(R, place)
+    paused = paused_at(R, place) is not None
+    buttons = pause_buttons(R, place)
+    if place.kind != "defaults":
+        buttons.append(btn("Why no reply?",
+                           cid("pg", ptok(place), "y")))
+    comps = [container(inner, GREY if paused else BLURPLE),
+             row(*buttons), td(FOOTER_DM if not R.guild_id
+                               else FOOTER_SERVER)]
+    return finish(R, comps)
 
 
 # ---------------------------------------------------------------------------
-# Why no reply?
+# Why didn't it reply?
 # ---------------------------------------------------------------------------
 REFUSED = ("skipped", "quarantined", "enqueue_failed")
 
@@ -1852,8 +1369,6 @@ def _may_fix(R, changes):
     try:
         ms.admin_changes(R.st, R.admin_gid, changes, R.ctx)
         return True
-    except ms.SettingsError:
-        return False
     except Exception:
         return False
 
@@ -1866,9 +1381,11 @@ def is_category(R, place):
 
 def setter_name(R, place):
     if place is None:
-        return "Defaults"
+        return "every server"
     if is_category(R, place):
-        return f"{R.look(place.channel_id) or 'its category'} (category)"
+        return f"the {R.look(place.channel_id) or 'its'} category"
+    if place.kind == "server":
+        return f"all of {R.name(place)}"
     return R.name(place)
 
 
@@ -1883,6 +1400,9 @@ def _fix_button(R, label, place, key, op, changes=None):
         return None
 
 
+DM_ME = " DM me to change it."
+
+
 def explain_outcome(R, o):
     """(copy, fix button or None, still holds?) for one refused message,
     re-checked against the settings in force now."""
@@ -1895,39 +1415,34 @@ def explain_outcome(R, o):
     sc, place = _outcome_scope(R, o)
     where = R.name(place) if place else "DMs"
     detail = o.get("detail") if isinstance(o.get("detail"), dict) else {}
+    tip = DM_ME if R.owner else ""
     if code in ("replies-off", "dm-off"):
         cur = R.st.get("who.replies", sc)
         if cur != "off":
-            return (f"When it answers was Off in {where}.\n-# No longer "
-                    f"applies: it's {vl(R, 'who.replies', cur)} now."), \
+            return (f"I was off in {where} then.\n-# Not any more: "
+                    f"{REPLIES_WORDS.get(cur, 'I reply')} there now."), \
                 None, False
         setter, path = _setter(R, sc, "who.replies")
         if setter is None or setter.kind == "defaults":
-            return ("When it answers is Off by default in servers (Pause "
-                    "everywhere)." if path and path[0] == "all_servers"
-                    else f"When it answers is Off in {where}."), None, True
+            return ("I'm paused in every server." if path and path[0] ==
+                    "all_servers" else f"I'm off in {where}."), None, True
         s, _v, src = R.st.layer(path, "who.replies")
         by = f" (by {who_text(R, src[1])})" if src and src[0] == \
             "discord" else ""
-        parent = parent_name(R, setter, "who.replies") or "Defaults"
-        if setter.kind == "dms":
-            parent = "Defaults"
         ch = [ms.Change(setter, "who.replies", "inherit")]
-        return (f"When it answers is Off in {setter_name(R, setter)}{by}.",
-                _fix_button(R, f"Same as {parent}", setter, "who.replies",
+        return (f"I'm off in {setter_name(R, setter)}{by}.",
+                _fix_button(R, "Turn me back on", setter, "who.replies",
                             "=", ch), True)
     if code == "bots-ignore":
         cur = R.st.get("who.bots", sc)
         if cur != "ignore":
-            return ("Other bots were ignored then.\n-# No longer applies: "
-                    "it answers bots that address it now."), None, False
+            return ("I ignored other bots then.\n-# Not any more: I answer "
+                    "bots that address me now."), None, False
         setter, _p = _setter(R, sc, "who.bots")
         ch = [ms.Change(setter, "who.bots", "when-addressed")] \
             if setter else None
-        return ("Other bots: Ignore other bots"
-                + (f" (set in {setter_name(R, setter)})." if setter
-                   else "."),
-                _fix_button(R, "Answer bots that address it", setter,
+        return (f"I ignore other bots in {setter_name(R, setter)}.",
+                _fix_button(R, "Answer bots that @mention me", setter,
                             "who.bots", "vwhen-addressed", ch)
                 if setter else None, True)
     if code in ("not-allowed", "dm-not-allowed") and _ID.fullmatch(aid):
@@ -1939,7 +1454,7 @@ def explain_outcome(R, o):
                 _s, _v, src = R.st.layer(path, "who.ignore")
                 entry = R.st.overlay.get((path, "who.ignore"))
                 if src and src[0] == "discord":
-                    role = ", admin" if ms.entry_role(entry) == "admin" \
+                    role = ", an admin" if ms.entry_role(entry) == "admin" \
                         else ""
                     added = (f" (added by {who_text(R, src[1])}{role}, "
                              f"{short_date(src[2])})")
@@ -1948,11 +1463,10 @@ def explain_outcome(R, o):
             fix = None
             if setter is not None:
                 ch = fix_changes(R, setter, "who.ignore", f"-{aid}")
-                fix = _fix_button(R, f"Remove {short}", setter,
-                                  "who.ignore", f"-{aid}", ch)
-            return (f"{who_m} is on **Never answer** in "
-                    f"{setter_name(R, setter)}{added}.",
-                    fix, True)
+                fix = _fix_button(R, f"Stop ignoring {plain(short)}",
+                                  setter, "who.ignore", f"-{aid}", ch)
+            return (f"I ignore {who_m} in {setter_name(R, setter)}"
+                    f"{added}.", fix, True)
         allow = R.st.get("who.allow", sc)
         if isinstance(allow, list) and aid not in allow \
                 and aid not in R.ctx.owners:
@@ -1960,91 +1474,77 @@ def explain_outcome(R, o):
             fix = None
             if setter is not None:
                 ch = [ms.Change(setter, "who.allow", list(allow) + [aid])]
-                fix = _fix_button(R, f"Add {short}", setter, "who.allow",
-                                  f"+{aid}", ch)
-            return (f"Only answer these people is set in "
-                    f"{setter_name(R, setter)} and "
-                    f"{who_m} isn't on it.", fix, True)
+                fix = _fix_button(R, f"Let {plain(short)} talk to me",
+                                  setter, "who.allow", f"+{aid}", ch)
+            return (f"In {setter_name(R, setter)} I only answer people on "
+                    f"a list, and {who_m} isn't on it.", fix, True)
         if code == "dm-not-allowed":
             return person_check_text(R, aid, short)[0], None, True
-        return (f"{who_m} wasn't allowed then.\n-# No longer applies: "
-                f"they can get answers now."), None, False
+        return (f"{who_m} wasn't allowed then.\n-# Not any more: they can "
+                f"get replies now."), None, False
     if code in ("not-allowed", "dm-not-allowed"):
-        return ("They weren't allowed by Only answer these people or Never "
-                "answer."), None, True
+        return "They weren't on the list of people I answer.", None, True
     if code == "cap":
         key = detail.get("key")
-        cp = counter_place(detail.get("counter"))
         n = detail.get("cap")
-        if key not in ("limits.per_day", "limits.per_person_per_day") \
-                or cp is None:
-            return "It hit a daily reply cap.", None, True
-        owner = "the Defaults" if cp.kind == "defaults" else \
-            f"{R.name(cp)}'s"
-        what = (f"{who_m} hit {owner} cap of {n:,} replies per person per "
-                f"day." if key == "limits.per_person_per_day" else
-                f"The bot hit {owner} cap of {n:,} replies per day (total).") \
-            if isinstance(n, int) else f"It hit {owner} daily reply cap."
-        fix = None
-        if R.owner:
-            fix = btn("Change cap", cid("mod", ptok(cp), "c", "b"))
-        return what, fix, True
+        if key == "limits.per_person_per_day" and isinstance(n, int):
+            return (f"{who_m} hit the daily limit of {n:,} replies a "
+                    f"person.{tip}"), None, True
+        if key == "limits.per_day" and isinstance(n, int):
+            return (f"I hit the daily limit of {n:,} replies in total."
+                    f"{tip}"), None, True
+        return f"I hit a daily reply limit.{tip}", None, True
     if code == "bot-exchange":
         lim = detail.get("limit")
-        setter, _p = _setter(R, sc, "who.bot_exchange_limit")
-        fix = btn("Change limit", cid("mod", ptok(setter), "bx", "m")) \
-            if setter is not None and R.owner else None
-        return ("It had answered other bots "
+        return ("I'd already answered other bots "
                 + (f"{lim} times" if isinstance(lim, int) else "too often")
-                + f" in a row in {where} (Replies in a row to other bots)."
-                ), fix, True
+                + f" in a row in {where}, so I stopped.{tip}"), None, True
     if code == "suspicious-ignored":
         cur = R.st.get("privacy.suspicious", sc)
         if cur != "ignore":
-            return ("It looked like prompt injection and was dropped.\n-# "
-                    "No longer applies: such messages are held for your "
+            return ("It looked like a prompt-injection attempt, so I "
+                    "dropped it.\n-# Not any more: I hold those for your "
                     "review now."), None, False
         setter, _p = _setter(R, sc, "privacy.suspicious")
         ch = [ms.Change(setter, "privacy.suspicious", "hold-for-review")] \
             if setter else None
-        return ("It looked like prompt injection, and Possible prompt "
-                "injection is Drop it.",
-                _fix_button(R, "Hold for my review instead", setter,
+        return ("It looked like a prompt-injection attempt, so I dropped "
+                "it.",
+                _fix_button(R, "Hold these for my review", setter,
                             "privacy.suspicious", "vhold-for-review", ch)
                 if setter else None, True)
     if R.admin and code in ("quarantined", "never-share"):
-        return ("Held for the owners' review." if code == "quarantined"
-                else "The reply was held for the owners."), None, True
+        return "I held it for my owners to look at.", None, True
     text = {
-        "quarantined": "Held for your review; look for the bot's DM.",
-        "predates-join": "It was sent before the bot joined.",
-        "no-send": f"The bot can't send in {where}; fix it in Discord's "
-                   f"channel permissions.",
-        "internal": "The bot hit an internal error; see monitor.log.",
-        "worker-skipped": "The Muse read it and chose not to answer.",
-        "send-failed": "Sending the reply failed; see monitor.log.",
-        "never-share": "The reply was held because it contained a phrase "
-                       "you never share.",
-    }.get(code, "It wasn't answered.")
+        "quarantined": "I held it for your review; look for my DM.",
+        "predates-join": "It was sent before I joined.",
+        "no-send": f"I can't send messages in {where}; fix it in "
+                   f"Discord's channel permissions.",
+        "internal": "I hit an internal error; see monitor.log.",
+        "worker-skipped": "I read it and chose not to answer.",
+        "send-failed": "Sending my reply failed; see monitor.log.",
+        "never-share": "I held my reply: it contained a phrase you never "
+                       "share.",
+    }.get(code, "I didn't answer it.")
     return text, None, True
 
 
 def page_why(R, place):
-    """S8a: the last refused messages that addressed the bot here."""
+    """The last refused messages that addressed the bot here."""
     if place.kind == "dms":
         return page_why_dms(R)
     tok = ptok(place)
     where = R.name(place)
-    inner = [td(f"## Why no reply? · {where}\n-# The last {WHY_ENTRIES} "
-                f"messages here that addressed the bot and got no answer, "
-                f"newest first. Ordinary chatter isn't recorded."), sep()]
+    inner = [td(f"## Why didn't it reply? · {where}\n-# The last "
+                f"{WHY_ENTRIES} messages here that addressed me and got no "
+                f"answer, newest first. Ordinary chatter isn't recorded."),
+             sep()]
     try:
         got = R.ctx.recent_outcomes(place, 50) or []
     except Exception as e:
         R.ctx.log(f"settings_ui: recent_outcomes: {e}")
         got = []
     shown = 0
-    # Four with a banner on top, so the page stays within 21 components.
     most = WHY_ENTRIES - (1 if R.banner else 0)
     for o in got:
         if not isinstance(o, dict) or o.get("status") not in REFUSED:
@@ -2064,23 +1564,17 @@ def page_why(R, place):
         text, fix, holds = explain_outcome(R, o)
         if not aid:
             fix = None   # an older entry: no fix
-        head = f"**{who_m}** · [message]({link}) · {when}\n"
-        body = head + text
+        body = f"**{who_m}** · [message]({link}) · {when}\n" + text
         if R.fixed and R.fixed == aid and not holds:
             body += "\n" + FIXED_NOTE.format(who=who_m)
         inner.append(section(body, fix) if fix else td(body))
     if not shown:
-        if place.kind == "channel":
-            tail = (f"check that the bot can see and send messages in "
-                    f"{where}.")
-        else:
-            tail = "check that the bot can see and send messages there."
-        inner.append(td(f"Nothing was refused here recently. If someone "
-                        f"@mentioned the bot and got no answer, {tail}"))
-    back = cid("pg", tok, "q" if R.admin else "b")
-    return finish(R, place, inner,
-                  [row(btn(f"Back to {where}", back),
-                       btn("Refresh", cid("pg", tok, "y")))], slot=False)
+        inner.append(td(f"Nothing was refused here lately. If someone "
+                        f"@mentioned me and got no answer, check that I "
+                        f"can see and send messages in {where}."))
+    return finish(R, [container(inner, BLURPLE),
+                      row(btn("Back", cid("pg", tok, "h")),
+                          btn("Refresh", cid("pg", tok, "y")))])
 
 
 def person_check_text(R, uid, short):
@@ -2090,43 +1584,46 @@ def person_check_text(R, uid, short):
     who_m = f"<@{uid}>"
     if uid in R.ctx.owners:
         if access == "nobody":
-            return (f"{who_m} is an owner, but Who can DM it is Nobody, so "
-                    f"no DM gets an answer."), None
-        return f"{who_m} is an owner and can always DM it.", None
+            return (f"{who_m} is an owner, but nobody can DM me right "
+                    f"now, owners included."), None
+        return f"{who_m} is an owner and can always DM me.", None
     people = dm_people(R)
     let = ms.dms_from_changes(st, "list", people + [uid])
     if access == "nobody":
-        return (f"{short} can't DM it: Who can DM it is Nobody."), let
+        return f"{short} can't DM me: nobody can right now.", let
     if access == "owners":
-        return (f"{short} can't DM it: Who can DM it is "
-                f"{value_name(R, 'who.dms_from', 'owners')}."), let
+        return f"{short} can't DM me: only you can.", let
     if access == "list" and uid not in people:
-        return (f"{short} can't DM it: they aren't on your list of people "
-                f"who can."), let
+        return (f"{short} can't DM me: they aren't one of the people you "
+                f"picked."), let
     r = st.resolve(ms.Scope.dm())
-    ign = r["who.ignore"] or []
-    if uid in ign:
-        return f"{short} can't DM it: they're on Never answer in DMs.", None
+    if uid in (r["who.ignore"] or []):
+        return f"{short} can't DM me: I ignore them in DMs.", None
     allow = r["who.allow"]
     if isinstance(allow, list) and uid not in allow:
-        return (f"{short} can't DM it: Only answer these people is set for "
-                f"DMs and they aren't on it."), None
+        return (f"{short} can't DM me: I only answer a list of people in "
+                f"DMs, and they aren't on it."), None
     if access == "shared-servers":
-        return (f"{short} can DM it if they share a server with the "
-                f"bot."), None
-    return f"{short} can DM it.", None
+        return f"{short} can DM me if we share a server.", None
+    return f"{short} can DM me.", None
+
+
+def dm_people(R):
+    v = value(R, ms.Place.dms(), "who.dms_from")
+    return [p for p in v if p not in R.ctx.owners] \
+        if isinstance(v, list) else []
 
 
 def page_why_dms(R):
-    """S8a, DMs: strangers' DMs aren't recorded, so check a person."""
-    place = ms.Place.dms()
-    inner = [td("## Why no reply? · DMs\n-# DMs from people who aren't "
-                "allowed aren't recorded. Check a person instead."), sep()]
+    """DMs: strangers' DMs aren't recorded, so check a person."""
+    inner = [td("## Why didn't it reply? · DMs\n-# DMs from people who "
+                "may not DM me aren't recorded. Check a person instead."),
+             sep()]
     if R.guild_id or DM_USER_SELECT_SEARCHES:
         inner.append(row(picker(USER_SELECT, cid("wy", "d"),
                                 "Check a person…", 1, 1)))
     else:
-        inner.append(row(btn("Check by ID", cid("mod", "d", "id.wy", "y"),
+        inner.append(row(btn("Check someone by ID", cid("mod", "d", "wy"),
                              PRIMARY)))
     if R.check:
         uid = R.check
@@ -2135,18 +1632,18 @@ def page_why_dms(R):
         b = None
         if let and R.owner:
             try:
-                b = btn(f"Let {R.person(uid) or 'them'} DM it",
+                b = btn(f"Let {plain(R.person(uid) or 'them')} DM me",
                         cid("fx", "d", "df", f"+{uid}"), PRIMARY)
             except BadId:
                 b = None
         inner.append(section(text, b) if b else td(text))
-    return finish(R, place, inner,
-                  [row(btn("Back to DMs", cid("pg", "d", "b")),
-                       btn("Refresh", cid("pg", "d", "y")))], slot=False)
+    return finish(R, [container(inner, BLURPLE),
+                      row(btn("Back", cid("pg", "d", "h")),
+                          btn("Refresh", cid("pg", "d", "y")))])
 
 
 def why_card(R):
-    """S8b: the message context command's card for one message."""
+    """The message context command's card for one message."""
     data = R.data
     tid = str(data.get("target_id") or "")
     msg = ((data.get("resolved") or {}).get("messages") or {}).get(tid) \
@@ -2168,8 +1665,8 @@ def why_card(R):
     when = ago(R, snowflake_time(tid))
     link = msg_link(gid, ch, tid)
     who_m = f"<@{aid}>" if aid else "Someone"
-    inner = [td(f"## Why no reply?\n-# {who_m}'s [message]({link}) in "
-                f"{where}, {when}"), sep()]
+    inner = [td(f"## Why didn't it reply?\n-# {who_m}'s [message]({link}) "
+                f"in {where}, {when}"), sep()]
     o = None
     fn = getattr(R.ctx, "outcome", None)
     try:
@@ -2190,34 +1687,26 @@ def why_card(R):
             o = dict(o, guild_id=None, parent_id=None)
     tail = None
     if aid and aid == str(R.ctx.bot_id):
-        inner.append(td("That's the bot's own message."))
+        inner.append(td("That's my own message."))
     elif o and o.get("status") == "replied":
-        inner.append(td("It replied."))
+        inner.append(td("I replied."))
     elif o and o.get("status") == "queued":
-        inner.append(td(f"Still working on it (queued "
-                        f"{ago(R, o.get('at')).replace(' ago', '')} ago)."))
+        inner.append(td(f"I'm still working on it (since "
+                        f"{ago(R, o.get('at'))})."))
     elif o and o.get("status") in REFUSED:
         o = dict(o, author_id=aid or o.get("author_id"))
         text, fix, holds = explain_outcome(R, o)
         inner.append(section(text, fix) if fix else td(text))
         if fix:
             short = R.person(aid) or "them"
-            tail = (f"-# Removing {short} doesn't answer this message; ask "
-                    f"{short} to send it again."
-                    if fix.get("label", "").startswith("Remove") else
-                    f"-# Fixing this doesn't answer this message; ask "
+            tail = (f"-# Fixing this doesn't answer this message; ask "
                     f"{short} to send it again.")
     else:
         inner.append(td(not_recorded(R, msg, place)))
     if tail:
         inner.append(td(tail))
-    if place.kind == "dms":
-        open_id = cid("pg", "d", "b")
-        label = "Open DMs settings"
-    else:
-        open_id = cid("pg", ptok(place), "q" if R.admin else "b")
-        label = f"Open {where} settings"
-    return [container(inner, BLURPLE), row(btn(label, open_id))]
+    return [container(inner, BLURPLE),
+            row(btn("Open settings", cid("pg", ptok(place), "h")))]
 
 
 def not_recorded(R, msg, place):
@@ -2226,19 +1715,20 @@ def not_recorded(R, msg, place):
     ref = (msg.get("referenced_message") or {}).get("author") or {}
     addressed = bot in mentions or str(ref.get("id") or "") == bot
     if place.kind == "dms":
-        return ("Not recorded: DMs from people who may not DM it aren't "
-                "kept. Use Why no reply? on the DMs page to check them.")
+        return ("Not recorded: DMs from people who may not DM me aren't "
+                "kept. Use Why no reply? in /settings to check "
+                "them.")
     where = R.name(place)
     if addressed:
-        return ("Not recorded: the bot has no record of it, maybe because "
-                "it's older than what the bot keeps.")
+        return ("Not recorded: I have no record of it, maybe because it's "
+                "older than what I keep.")
     rep = value(R, place, "who.replies")
-    how = {"off": f"When it answers is Off in {where}",
-           "when-addressed": f"in {where} it answers only when @mentioned",
-           "conversational": f"in {where} it answers @mentions, replies and "
-                             f"follow-ups within 2 minutes of its reply"
+    how = {"off": f"I'm off in {where}",
+           "when-addressed": f"in {where} I reply only when @mentioned",
+           "conversational": f"in {where} I reply to @mentions, replies "
+                             f"and follow-ups within 2 minutes"
            }.get(rep, "")
-    return (f"Not recorded: it didn't @mention the bot or reply to it, and "
+    return (f"Not recorded: it didn't @mention me or reply to me, and "
             f"{how}.")
 
 
@@ -2246,6 +1736,7 @@ def not_recorded(R, msg, place):
 # Server admins: "Quiet the bot"
 # ---------------------------------------------------------------------------
 QUIETER = ("when-addressed", "off")
+QUIET_WORDS = {"when-addressed": "Only when @mentioned", "off": "Off"}
 
 
 def quieter_values(cur):
@@ -2255,135 +1746,78 @@ def quieter_values(cur):
     return [v for v in QUIETER if r.index(v) < r.index(cur)]
 
 
+def admin_ignore(R, gid):
+    """(the owners' own ignore list at the server's layer, the admins'
+    additions) for a server: an admin's entry holds only those two (the
+    engine adds what the owners set elsewhere)."""
+    path = ("servers", str(gid))
+    s_, pin, _src = ms.owners_view(R.st, gid).layer(path, "who.ignore")
+    pin = list(pin) if s_ and isinstance(pin, list) else []
+    e = R.st.overlay.get((path, "who.ignore"))
+    own = e.get("_norm") if isinstance(e, dict) \
+        and ms.entry_role(e) == "admin" else None
+    adds = [p for p in (own if isinstance(own, list) else [])
+            if p not in pin]
+    return pin, adds
+
+
+def quiet_row(R, place, where):
+    """"**In #general:** I chat freely" and its quieter buttons."""
+    cur = value(R, place, "who.replies")
+    words = REPLIES_WORDS.get(cur, "I chat freely")
+    bs = [btn(QUIET_WORDS[x], cid("val", ptok(place), "r", x),
+              DANGER if x == "off" else SECONDARY)
+          for x in quieter_values(cur)]
+    return [td(f"**{where}:** {words}"), row(*bs) if bs else None]
+
+
 def page_quiet(R, gid):
-    """S12: the admin panel for one server (here = where it was typed)."""
+    """The admin panel for one server (here = where it was typed)."""
     st = R.st
     server = ms.Place.server(gid)
     gname = R.gname(gid)
-    here, _thread = R.typed() if R.in_guild(gid) else (None, False)
-    if here and (R.chan(gid, here) or {}).get("type") == CATEGORY:
-        here = None
-    inner = [td(f"## Quiet the bot in {gname}\n-# You're a server admin "
-                f"here, so you can make the bot quieter and undo what "
-                f"admins changed. The bot's owners get a summary of every "
-                f"change."), sep()]
-    if here:
-        hp = ms.Place.channel(gid, here, R.category_of(gid, here))
-        v = Val(R, hp, "who.replies")
-        src = "set here" if v.set else \
-            f"same as {parent_name(R, hp, 'who.replies')}"
-        cname = R.name(hp)
-        inner.append(td(f"**In {cname}** · now "
-                        f"{vl(R, 'who.replies', v.value)} ({src})"))
-        bs = [btn(f"{value_name(R, 'who.replies', x)} in {cname}",
-                  cid("val", ptok(hp), "r", x, "q"),
-                  DANGER if x == "off" else SECONDARY)
-              for x in quieter_values(v.value)]
-        if bs:
-            inner.append(row(*bs))
-    cur = value(R, server, "who.replies")
-    inner.append(td(f"**In all of {gname}** · now "
-                    f"{vl(R, 'who.replies', cur)}"))
-    bs = [btn(f"{value_name(R, 'who.replies', x)} in all of {gname}",
-              cid("val", f"s{gid}", "r", x, "q"),
-              DANGER if x == "off" else SECONDARY)
-          for x in quieter_values(cur)]
-    if bs:
-        inner.append(row(*bs))
+    here = R.here() if R.in_guild(gid) else server
+    inner = [td(f"## Quiet the bot in {gname}\n-# You're an admin here, so "
+                f"you can make me quieter, never louder. My owners see "
+                f"every change."), sep()]
+    if here.kind == "channel":
+        inner += quiet_row(R, here, f"In {R.name(here)}")
+    inner += quiet_row(R, server, f"In all of {gname}")
     inner.append(sep())
     ign = value(R, server, "who.ignore") or []
-    owners_list = ms.owners_view(st, gid).get("who.ignore",
-                                              ms.Scope.server(gid)) or []
-    entry = st.overlay.get((("servers", gid), "who.ignore"))
-    by = (entry or {}).get("by") if ms.entry_role(entry) == "admin" \
-        else None
     _pin, adds = admin_ignore(R, gid)
-    added = [p for p in adds if p not in owners_list]
     parts = []
     for p in ign[:10]:
         m = f"<@&{p[5:]}>" if str(p).startswith("role:") else f"<@{p}>"
-        if p not in added:
-            parts.append(f"{m} (set by the owners)")
-        else:
-            parts.append(f"{m} (added by {who_text(R, by)})" if by
-                         else f"{m} (added by an admin)")
+        parts.append(m + (" (an admin)" if p in adds else " (the owners)"))
     if len(ign) > 10:
         parts.append(f"and {len(ign) - 10} more")
-    inner.append(td(f"**Never answer** in {gname}\n"
-                    + (", ".join(parts) if parts else "Nobody yet.")))
+    inner.append(td("**People I ignore here:** "
+                    + (", ".join(parts) if parts else "nobody")))
     inner.append(row(picker(MENTIONABLE_SELECT, cid("ppl", f"s{gid}", "ig"),
-                            "Add to Never answer…", 1, 25)))
-    if added:
+                            "Ignore someone…", 1, 25)))
+    if adds:
         inner.append(row(sel(cid("rm", f"s{gid}", "ig"), [
             opt((R.person(p[5:]) if str(p).startswith("role:")
                  else R.person(p)) or "Someone an admin added", p)
-            for p in added[:25]], "Remove someone admins added…", 1,
-            min(25, len(added)))))
-    offs = []
-    for key, label in (("plugins.welcome.enabled", "Turn off welcome"),
-                       ("plugins.media.enabled",
-                        "Turn off image and video")):
-        if st.spec(key) is not None and value(R, server, key):
-            offs.append(btn(label, cid("val", f"s{gid}", kcode(key), "off",
-                                       "q"), DANGER))
-    if offs:
-        inner.append(row(*offs))
-    inner.append(sep())
-    inner.append(td("**Changes admins made here**"))
-    changes = []
-    owners = ms.owners_view(st, gid)
-    for (path, key), e in st.overlay.items():
-        if path[0] != "servers" or path[1] != gid \
-                or ms.entry_role(e) != "admin" or kcode(key) is None:
-            continue
-        pl = ms.place_of_path(path)
-        sc = ms.Scope.server(gid, channel_id=pl.channel_id,
-                             category_id=R.category_of(gid, pl.channel_id)
-                             if pl.channel_id else None)
-        if e.get("_norm", e.get("value")) == owners.get(key, sc):
-            continue    # back at the owners' value (an undone change)
-        changes.append((str(e.get("at") or ""), path, key, e))
-    changes.sort(key=lambda c: c[0], reverse=True)
-    for _at, path, key, e in changes[:ADMIN_CHANGES_SHOWN]:
-        pl = ms.place_of_path(path)
-        if pl.kind == "channel":
-            pl = ms.Place.channel(gid, pl.channel_id,
-                                  R.category_of(gid, pl.channel_id))
-        sc = pl.scope(key)
-        where = R.name(pl) if pl.kind == "channel" else f"All of {gname}"
-        new = e.get("_norm", e.get("value"))
-        what = f"{ms.label(key)} → {vl(R, key, new)}"
-        if key == "who.ignore":
-            what = (f"{ms.label(key)}: added "
-                    f"{mention_list(admin_ignore(R, gid)[1], 5)}")
-        line = (f"{where}: {what} · "
-                f"{who_text(R, e.get('by'))}, {ago(R, e.get('at'))}\n-# Undo "
-                f"goes back to the owners' setting: "
-                f"{vl(R, key, owners.get(key, sc))}")
-        try:
-            b = btn("Undo", cid("val", ptok(pl), kcode(key), "=", "q"))
-        except BadId:
-            b = None
-        inner.append(section(line, b) if b else td(line))
-    if not changes:
-        inner.append(td("-# No changes by admins are in effect here."))
-    elif len(changes) > ADMIN_CHANGES_SHOWN:
-        inner.append(td(f"-# and {len(changes) - ADMIN_CHANGES_SHOWN} more; "
-                        f"the owners can see them all."))
-    tok = f"c{gid}.{here}" if here else f"s{gid}"
-    comps = list(R.banner or []) + [container(inner, AMBER),
-                                    row(btn("Why no reply?",
-                                            cid("pg", tok, "y")))]
-    if st.overlay_error:
-        comps = read_only(comps)
-    return comps
+            for p in adds[:25]], "Stop ignoring…", 1,
+            min(25, len(adds)))))
+    if st.spec(MEDIA_ON) is not None and value(R, server, MEDIA_ON):
+        inner.append(section(
+            f"**Images & video:** on in {gname}",
+            btn("Turn off", cid("val", f"s{gid}", kcode(MEDIA_ON), "off"),
+                DANGER)))
+    inner += last_change_slot(R, server)
+    return finish(R, [container(inner, AMBER),
+                      row(btn("Why no reply?",
+                              cid("pg", ptok(here), "y")))])
 
 
 # ---------------------------------------------------------------------------
-# Confirm card and preset preview
+# Confirm card
 # ---------------------------------------------------------------------------
 def page_confirm(R, origin, lines, warnings, tok, undo=False):
-    """S9: a risky outcome; Apply or Cancel (back to the origin page)."""
+    """A risky outcome; Apply or Cancel (back to the origin page)."""
     place, page = origin
     head = "## Check before undoing" if undo else "## Check before applying"
     body = "\n".join([head] + [clip(x, 300) for x in lines[:8]])
@@ -2395,376 +1829,50 @@ def page_confirm(R, origin, lines, warnings, tok, undo=False):
                 btn("Cancel", cid("pg", ptok(place), page)))]
 
 
-PRESET_SKIP_WORDS = {
-    "plugins.media.per_day": "{label} (image and video is off here)",
-    "style.notes": "{label} ({where} has its own)",
-}
-
-
-def page_preset(R, place, name):
-    """S10: a preset's preview, which is also its confirmation."""
-    title, values = ms.PRESETS[name]
-    gid = place.guild_id
-    gname = R.gname(gid)
-    members = R.members(gid)
-    big = title == "Friends" and members is not None \
-        and members > ms.BIG_FOR_MEMORY
-    try:
-        changes = ms.preset_changes(R.st, name, place, R.ctx, big="skip")
-        planned = ms.plan_changes(R.st, changes)
-    except ms.SettingsError as e:
-        R.banner = banner_error(str(e))
-        return page_server(R, place)
-    if not planned:
-        text = f"## {title} preset\n{gname} already matches {title}."
-        if big:
-            cur = vl(R, "privacy.memory", R.st.get(
-                "privacy.memory", ms.Scope.server(gid)))
-            text = (f"## {title} preset\n{gname} already matches {title}, "
-                    f"except What it may say about you: it stays {cur}, "
-                    f"because {gname} has more than {ms.BIG_FOR_MEMORY} "
-                    f"members. Change it yourself if you're sure.")
-        inner = [td(text)]
-        return [container(inner, BLURPLE),
-                row(btn("Back", cid("pg", ptok(place), "b")))]
-    lines = []
-    for p in planned:
-        lines.append(f"- {ms.label(p.key)}: {vl(R, p.key, p.old)} → "
-                     f"{vl(R, p.key, p.new)}")
-    sc = ms.Scope.server(gid)
-    changed = {p.key for p in planned}
-    already, skipped = [], []
-    for key, v in values.items():
-        if key in changed or R.st.spec(key) is None:
-            continue
-        if key == "privacy.memory" and big:
-            continue
-        if isinstance(v, tuple):
-            cond, _val = v
-            if cond == "if-media-on" and not R.st.get(
-                    "plugins.media.enabled", sc):
-                skipped.append(PRESET_SKIP_WORDS[key].format(
-                    label=ms.label(key), where=gname))
-                continue
-            if cond == "if-empty" and R.st.get(key, sc):
-                skipped.append(PRESET_SKIP_WORDS[key].format(
-                    label=ms.label(key), where=gname))
-                continue
-        already.append(ms.label(key))
-    notes = []
-    if already:
-        notes.append("Already matches: " + ", ".join(already) + ".")
-    if skipped:
-        notes.append("Skipped: " + ", ".join(skipped) + ".")
-    tail = "-# " + " ".join(notes) if notes else ""
-    if big:
-        cur = vl(R, "privacy.memory", R.st.get("privacy.memory", sc))
-        tail += ("\n" if tail else "") + (
-            f"Not included: What it may say about you stays {cur}, because "
-            f"{gname} has more than {ms.BIG_FOR_MEMORY} members. Change it "
-            f"yourself if you're sure.")
-    try:
-        a = ms.assess(R.st, changes, R.ctx, R.look)
-    except ms.SettingsError as e:
-        R.banner = banner_error(str(e))
-        return page_server(R, place)
-    inner = [td(f"## Apply the {title} preset to {gname}?\n-# One change "
-                f"you can undo in one click. Channels keep their own "
-                f"settings."), sep(),
-             td("**Changes**\n" + "\n".join(lines))]
-    if tail:
-        inner.append(td(tail))
-    if a.risky:
-        inner.append(td("**What this means**\n" + "\n".join(
-            f"- {clip(w, 400)}" for w in a.warnings[:6])))
-    tok = R.ctx.stash_put(R.uid, {
-        "kind": "apply", "changes": [c.to_dict() for c in changes],
-        "origin": [ptok(place), "b"], "preset": title}, STASH_TTL)
-    return [container(inner, RED if a.risky else BLURPLE),
-            row(btn(f"Apply {title}", cid("ok", ptok(place), tok),
-                    DANGER if a.risky else PRIMARY),
-                btn("Cancel", cid("pg", ptok(place), "b")))]
-
-
 # ---------------------------------------------------------------------------
-# Modals
+# Rendering
 # ---------------------------------------------------------------------------
-CAP_FIELDS = {"pp": "limits.per_person_per_day", "pd": "limits.per_day",
-              "bx": "who.bot_exchange_limit", "mpd": "plugins.media.per_day"}
-CAP_WORDS = {"limits.per_person_per_day": "Replies per person per day",
-             "limits.per_day": "Replies per day",
-             "who.bot_exchange_limit": "Replies in a row to other bots",
-             "plugins.media.per_day": "Generations per day"}
-NO_CAP = ("", "none", "no cap", "nocap", "unlimited", "-", "no limit",
-          "nolimit")
-FORM_KEYS = {"i": ("style.notes",), "c": ("limits.per_person_per_day",
-                                          "limits.per_day"),
-             "bx": ("who.bot_exchange_limit",),
-             "mpd": ("plugins.media.per_day",),
-             "wn": ("plugins.welcome.notes",), "st": ("presence.status",)}
-
-
-def form_ok(R, place, form):
-    """The modal form is offered at this place."""
-    if form in ("fc",):
-        return place.kind in ("server", "channel")
-    if form == "fs":
-        return True
-    if form == "id.df":
-        return place.kind == "dms"
-    if form == "id.wy":
-        return place.kind == "dms"
-    keys = FORM_KEYS.get(form)
-    if not keys:
-        return False
-    return all(offered(R, place, k) for k in keys) if form != "c" else \
-        any(offered(R, place, k) for k in keys)
-
-
-def draft_value(draft, name, default):
-    if draft is None:
-        return default
-    v = (draft.get("values") or {}).get(name)
-    return default if v is None else v
-
-
-def open_modal(R, place, form, page, draft=None):
-    tok = ptok(place)
-    where = R.name(place)
-    sub = cid("sub", tok, form, page)
-    st = R.st
-    if form == "i":
-        v = Val(R, place, "style.notes")
-        if place.kind == "channel":
-            gname = R.gname(place.guild_id)
-            comps = [td(f"Added after {gname}'s instructions in {where}. "
-                        f"Blank = nothing extra."),
-                     labelled("Instructions for the Muse", text_input(
-                         "n", 2, ms.NOTES_MAX,
-                         draft_value(draft, "n", v.here if v.set else ""),
-                         "Example: Keep it friendly; no swearing."),
-                         f"Up to {ms.NOTES_MAX} characters. Blank = nothing "
-                         f"extra.")]
-            return modal(sub, f"Instructions · {where}", comps)
-        blank = "no instructions" if place.kind == "defaults" \
-            else "same as Defaults"
-        ph = (f"Same as Defaults: “{clip(v.inherited, 70)}”"
-              if place.kind != "defaults" and v.inherited
-              else "Example: Keep it friendly; no swearing.")
-        intro = (f"The Muse reads these with every reply in {where}. They "
-                 f"replace the Defaults instructions here; channel "
-                 f"instructions are added after them."
-                 if place.kind == "server" else
-                 f"The Muse reads these with every reply in {where}."
-                 + (" They replace the Defaults instructions here."
-                    if place.kind == "dms" else
-                    " A server or DMs can replace them; channel "
-                    "instructions are added after them."))
-        lv = Val(R, place, "style.length")
-        cur_len = draft_value(draft, "ln", None)
-        cur_len = cur_len[0] if isinstance(cur_len, list) and cur_len \
-            else (lv.here if lv.set else ("=" if place.kind != "defaults"
-                                          else lv.value))
-        opts = []
-        if place.kind != "defaults":
-            opts.append(opt(f"Same as Defaults: "
-                            f"{value_name(R, 'style.length', lv.inherited)}",
-                            "=", "Follows Defaults", cur_len == "="))
-        for x in ("brief", "normal", "detailed"):
-            d = OPTION_HELP[("style.length", x)]
-            if place.kind == "defaults" and x == "normal":
-                d = "Built-in default · " + d
-            opts.append(opt(value_name(R, "style.length", x), x, d,
-                            cur_len == x))
-        length = {"type": STRING_SELECT, "custom_id": "ln", "options": opts,
-                  "min_values": 1, "max_values": 1, "required": True,
-                  "placeholder": "Reply length…"}
-        comps = [td(intro),
-                 labelled("Instructions for the Muse", text_input(
-                     "n", 2, ms.NOTES_MAX,
-                     draft_value(draft, "n", v.here if v.set else ""), ph),
-                     f"Up to {ms.NOTES_MAX} characters. Blank = {blank}."),
-                 labelled("Reply length", length,
-                          "How long replies tend to be.")]
-        return modal(sub, f"Instructions · {where}", comps)
-    if form == "c":
-        comps = []
-        intro = ("Leave a box blank for no cap here. Owners are never "
-                 "capped. 0 means only owners get replies.")
-        for name, key in (("pp", "limits.per_person_per_day"),
-                          ("pd", "limits.per_day")):
-            if not offered(R, place, key):
-                continue
-            v = Val(R, place, key)
-            sc = _scope_at(place, key, v.path)
-            others = [(c, n) for c, n in st.cap_layers(key, sc)
-                      if not _counter_is(c, place)]
-            if others and name == "pp":
-                c, n = min(others, key=lambda x: x[1])
-                intro += (f"\n-# {_counter_name(R, c)} also caps each "
-                          f"person at {n:,} a day; that still applies.")
-            counted = ("across every server and DM together"
-                       if place.kind == "defaults" else f"in {where}")
-            desc = (f"Per person, counted {counted}. Blank = no cap."
-                    if name == "pp" else
-                    f"All replies {counted} except the owners'. Blank = no "
-                    f"cap.")
-            cur = str(v.here) if v.set and v.here is not None else ""
-            comps.append(labelled(CAP_WORDS[key] if name == "pp"
-                                  else "Replies per day (total)",
-                                  text_input(name, 1, 7,
-                                             draft_value(draft, name, cur),
-                                             "No cap"), desc))
-        return modal(sub, f"Reply caps · {where}", [td(intro)] + comps)
-    if form in ("bx", "mpd"):
-        key = CAP_FIELDS[form]
-        v = Val(R, place, key)
-        cur = str(v.here) if v.set and v.here is not None else ""
-        spec = v.spec
-        desc = (f"{spec.min:,} to {spec.max:,}. Blank = no cap"
-                + ("" if place.kind == "defaults" else " here") + ".")
-        title = ("Bot replies in a row" if form == "bx"
-                 else "Generations per day")
-        intro = ("How many times in a row it answers other bots in one "
-                 "channel without a human." if form == "bx" else
-                 "Replies with generated images or video it sends a day, "
-                 "counted where this is set.")
-        return modal(sub, f"{title} · {where}", [
-            td(intro),
-            labelled(CAP_WORDS[key], text_input(
-                "v", 1, 7, draft_value(draft, "v", cur), "No cap"), desc)])
-    if form == "wn":
-        v = Val(R, place, "plugins.welcome.notes")
-        blank = "nothing extra" if place.kind == "defaults" \
-            else "same as Defaults"
-        return modal(sub, f"Welcome notes · {where}", [
-            td("What to mention to newcomers; added to the welcome prompt."),
-            labelled("Welcome notes", text_input(
-                "v", 2, 500, draft_value(draft, "v", v.here if v.set
-                                         else ""),
-                "Example: Point them to #rules and #introductions."),
-                f"Up to 500 characters. Blank = {blank}.")])
-    if form == "st":
-        cur = st.top("presence.status") or ""
-        return modal(sub, "Status line", [
-            labelled("Status line", text_input(
-                "v", 1, 128, draft_value(draft, "v", cur),
-                "Example: Helping out in #general"),
-                "Up to 128 characters. Blank = no status line.")])
-    if form in ("id.df", "id.wy"):
-        title = "Add people by ID" if form == "id.df" else "Check a person"
-        return modal(sub, title, [
-            td("In Discord: Settings › Advanced › Developer Mode, then "
-               "right-click a person › Copy User ID."),
-            labelled("User IDs" if form == "id.df" else "User ID",
-                     text_input("ids", 2 if form == "id.df" else 1, 600,
-                                draft_value(draft, "ids", "")),
-                     "One or more, separated by spaces or commas. "
-                     "@mentions work too." if form == "id.df" else
-                     "One ID or @mention.")])
-    if form in ("fc", "fs"):
-        what = "channel" if form == "fc" else "server"
-        return modal(sub, f"Find a {what}", [
-            labelled(f"{what.capitalize()} name", text_input(
-                "q", 1, 100, draft_value(draft, "q", ""), None, True),
-                "Part of the name is enough.")])
-    return None
-
-
-def modal_fields(data):
-    """{custom_id: text or [values]} from a modal submit, in the Label
-    shape or the older action-row shape."""
-    out = {}
-
-    def walk(c):
-        if not isinstance(c, dict):
-            return
-        if c.get("type") == LABEL:
-            walk(c.get("component"))
-            return
-        if c.get("type") == ROW:
-            for x in c.get("components") or []:
-                walk(x)
-            return
-        if c.get("custom_id"):
-            if "values" in c:
-                out[str(c["custom_id"])] = [str(v) for v in
-                                            c.get("values") or []]
-            else:
-                out[str(c["custom_id"])] = str(c.get("value") or "")
-    for c in data.get("components") or []:
-        walk(c)
-    return out
-
-
-def parse_cap(R, key, text):
-    """(value to write | "inherit", error text or None)."""
-    spec = R.st.spec(key)
-    raw = str(text or "").strip()
-    t = re.sub(r"[\s,_]", "", raw.lower())
-    if raw.lower() in NO_CAP or t in NO_CAP:
-        return "inherit", None
-    rng = f"{spec.min:,} to {spec.max:,}, or blank for no cap"
-    if re.fullmatch(r"-\d+", t):
-        return None, (f"“{clip(raw, 30)}” can't be negative. "
-                      f"{CAP_WORDS[key]} takes {rng}.")
-    if not re.fullmatch(r"\d+", t):
-        return None, (f"“{clip(raw, 30)}” isn't a whole number. "
-                      f"{CAP_WORDS[key]} takes {rng}.")
-    n = int(t)
-    if n < spec.min or n > spec.max:
-        return None, (f"{n:,} is out of range. {CAP_WORDS[key]} takes "
-                      f"{rng}.")
-    return n, None
-
-
-def parse_ids(text):
-    return list(dict.fromkeys(re.findall(r"\d{15,25}", str(text or ""))))
-
-
-# ---------------------------------------------------------------------------
-# Rendering a place's page
-# ---------------------------------------------------------------------------
-def page_of(place, key):
-    """The page a key's control lives on."""
-    if key in ms.BOT_WIDE_KEYS or key in ms.TOP:
-        return "w"
-    if key.startswith("plugins.") and not key.endswith(".enabled"):
-        return "e"
-    if key in ms.MORE_KEYS and place.kind != "channel":
-        return "m"
-    return "b"
-
-
 def render(R, place, page):
     """The components of one page (owners; server admins get the panel,
     or Why)."""
-    if R.admin:
-        if page == "y":
-            return page_why(R, place)
-        return page_quiet(R, R.admin_gid)
-    k = place.kind
-    if page == "o":
-        return page_servers(R, place)
-    if page == "y" and k in ("channel", "server", "dms"):
+    if page == "y" and place.kind in ("channel", "server", "dms"):
         return page_why(R, place)
-    if page == "m" and k in ("server", "defaults", "dms"):
-        return page_more(R, place)
-    if page == "e" and k in ("server", "defaults"):
-        return page_extras(R, place)
-    if page == "w" and k == "defaults":
-        return page_botwide(R)
-    if k == "channel":
-        return page_channel(R, place)
-    if k == "server":
-        return page_server(R, place)
-    if k == "dms":
-        return page_dms(R)
-    return page_defaults(R)
+    if R.admin:
+        return page_quiet(R, R.admin_gid)
+    return page_home(R, place)
 
 
 def show(R, place, page):
     return message(R, render(R, place, page))
+
+
+def shown(R, fallback):
+    """(place, page) the clicked message showed, from its own controls:
+    the Why page has a Back (pg:<place>:h); the home page a Why button
+    (pg:<place>:y). (fallback, "h") when it can't tell."""
+    found = {}
+    for c in _walk((R.ix.get("message") or {}).get("components") or []):
+        parts = str(c.get("custom_id") or "").split(":")
+        if len(parts) == 5 and parts[:3] == [PREFIX, VERSION, "pg"] \
+                and parts[4] in PAGES:
+            p = R.place(parts[3])
+            if p is not None:
+                found.setdefault(parts[4], p)
+    if "h" in found:
+        return found["h"], "y"
+    if "y" in found:
+        return found["y"], "h"
+    return fallback, "h"
+
+
+def _walk(comps):
+    for c in comps:
+        if not isinstance(c, dict):
+            continue
+        yield c
+        yield from _walk(c.get("components") or [])
+        if isinstance(c.get("accessory"), dict):
+            yield c["accessory"]
 
 
 # ---------------------------------------------------------------------------
@@ -2790,48 +1898,17 @@ def written_place(res, fallback):
     return fallback
 
 
-def done_notes(R, res):
-    """Extra words for the Done banner."""
-    out = []
-    for p in res.written:
-        place, key = p.change.place, p.key
-        if key == "plugins.welcome.enabled" and p.new is True \
-                and place.kind == "server":
-            w = welcome_where(R, place)
-            out.append(w if w.startswith("⚠") else
-                       f"Welcomes go to: {w.splitlines()[0]}.")
-        if key in ("limits.per_day", "limits.per_person_per_day") \
-                and p.new == 0 and place.kind != "defaults":
-            out.append(f"0 means only the owners get replies in "
-                       f"{R.name(place)}.")
-        if key == "who.replies" and p.new == "off" \
-                and place.kind == "server":
-            loud = []
-            for c in R.st.channels_listed(place.guild_id):
-                s, v, _src = R.st.layer(("servers", place.guild_id,
-                                         "channels", c), "who.replies")
-                if s and v != "off":
-                    loud.append("#" + (R.look(c) or "a channel"))
-            if loud:
-                one = len(loud) == 1
-                out.append(f"-# {', '.join(loud[:5])} still answer"
-                           f"{'s' if one else ''}; "
-                           f"{'it has its' if one else 'they have their'} "
-                           f"own setting.")
-    return out
-
-
-def do_changes(R, origin, changes, confirmed=False, named=(), notes=()):
+def do_changes(R, origin, changes, confirmed=False, named=(), notes=(),
+               headline=None):
     """Apply changes (one group) and show the origin page with a banner,
-    or a confirm card, or the error in the banner."""
+    or a confirm card, or the error in the banner. headline: the
+    banner's words instead of each change (listed small below it)."""
     place, page = origin
     if changes and not confirmed and R.owner:
-        skipped = [c for c in changes if ui_noop(R, c)]
-        if len(skipped) == len(changes):
-            R.banner = [td(clip("**No change:** " + "; ".join(
-                no_change_words(R, c) for c in skipped), 800))]
+        changes = [c for c in changes if not ui_noop(R, c)]
+        if not changes:
+            R.banner = [td("**No change:** it's already like that.")]
             return show(R, place, page)
-        changes = [c for c in changes if c not in skipped]
     if not changes:
         R.banner = [td("**No change.**")]
         return show(R, place, page)
@@ -2855,11 +1932,13 @@ def do_changes(R, origin, changes, confirmed=False, named=(), notes=()):
                 "changes": [dict(c.to_dict(), revert=c.revert)
                             for c in changes],
                 "named": list(named), "notes": list(notes),
+                "headline": headline,
                 "origin": [ptok(place), page]}, STASH_TTL)
             return message(R, page_confirm(
-                R, origin, [p.describe(R.look) for p in planned
-                            if not p.noop] or ["No change"], a.warnings,
-                tok))
+                R, origin, [say_change(R, p.change.place, p.key, p.old,
+                                       p.new, p.path)
+                            for p in planned if not p.noop]
+                or ["No change"], a.warnings, tok))
     try:
         if R.admin:
             res = R.ctx.apply(changes, R.uid, "admin",
@@ -2875,8 +1954,7 @@ def do_changes(R, origin, changes, confirmed=False, named=(), notes=()):
         return show(R, place, page)
     R.reload()
     if not res.changed:
-        R.banner = [td(clip("**No change:** " + "; ".join(
-            no_change_text(R, p) for p in res.unchanged), 800))]
+        R.banner = [td("**No change:** it's already like that.")]
         return show(R, place, page)
     if R.admin:
         for p in res.written:
@@ -2885,10 +1963,15 @@ def do_changes(R, origin, changes, confirmed=False, named=(), notes=()):
                     R.admin_gid, R.uid, p.keystr, p.old, p.new)
             except Exception as e:
                 R.ctx.log(f"settings_ui: admin notice: {e}")
-    text = "; ".join(res.describe(R.look))
-    extra = list(notes) + done_notes(R, res)
-    if extra:
-        text += "\n" + "\n".join(extra)
+    if headline:
+        text = headline + "\n-# " + " · ".join(
+            f"{ui_label(p.key)}: {ui_value(R, p.key, p.old)} → "
+            f"{ui_value(R, p.key, p.new)}" for p in res.written)
+    else:
+        text = "; ".join(say_change(R, p.change.place, p.key, p.old,
+                                    p.new, p.path) for p in res.written)
+    if notes:
+        text += "\n" + "\n".join(notes)
     up = ms.Place.server(R.admin_gid) if R.admin \
         else written_place(res, place)
     R.banner = banner_done(R, text, up, res.group)
@@ -2922,28 +2005,8 @@ def ui_noop(R, change):
     return norm == v.inherited
 
 
-def no_change_words(R, change):
-    pl, key = change.place, change.key
-    parent = parent_name(R, pl, key) or "Defaults"
-    v = Val(R, pl, key)
-    if change.value == "inherit":
-        return f"{R.name(pl)} already follows {parent} for {ms.label(key)}."
-    if not v.set and pl.kind != "defaults":
-        return (f"{ms.describe_change(pl, key, v.value, v.value, R.look)}, "
-                f"same as {parent}.")
-    return ms.describe_change(pl, key, v.value, v.value, R.look) + "."
-
-
-def no_change_text(R, p):
-    pl = p.change.place
-    if p.change.value == "inherit":
-        parent = parent_name(R, pl, p.key) or "Defaults"
-        return f"{R.name(pl)} already follows {parent} for {ms.label(p.key)}."
-    return ms.describe_change(pl, p.key, p.old, p.new, R.look, p.path) + "."
-
-
 def do_undo(R, place, expect=None, origin=None, confirmed=False):
-    origin = origin or (place, "b")
+    origin = origin or (place, "h")
     if R.st.overlay_error:
         R.banner = banner_error(OVERLAY_BROKEN.lstrip("⚠ "))
         return show(R, *origin)
@@ -2970,8 +2033,9 @@ def do_undo(R, place, expect=None, origin=None, confirmed=False):
             b = btn("Undo that", cid("un", ptok(up), gid))
         except BadId:
             b = btn("Undo that", cid("un", ptok(up)))
-        R.banner = [section(clip(f"Something changed since. Undo now would: "
-                                 f"{text[len('Undo: '):]}", 900), b)]
+        R.banner = [section(clip(f"Something changed since. Undo now "
+                                 f"would make: {say_undo(R, plan)}", 900),
+                            b)]
         return show(R, *origin)
     if R.owner and not confirmed:
         try:
@@ -2982,12 +2046,10 @@ def do_undo(R, place, expect=None, origin=None, confirmed=False):
             tok = R.ctx.stash_put(R.uid, {
                 "kind": "undo", "place": ptok(up), "expect": gid,
                 "origin": [ptok(origin[0]), origin[1]]}, STASH_TTL)
-            lines = ["Undo would make: " + clip(text[len("Undo: "):], 600)]
+            lines = ["Undo would make: " + clip(say_undo(R, plan), 600)]
             return message(R, page_confirm(R, origin, lines, a.warnings,
                                            tok, undo=True))
-    if R.admin:
-        text = text.replace(" (this includes a change in a channel of this "
-                            "server)", "")
+    text = say_undo(R, plan)
     try:
         kw = {"children": children, "expect": gid}
         if admin_gid:
@@ -3014,7 +2076,7 @@ def do_undo(R, place, expect=None, origin=None, confirmed=False):
             except Exception as e:
                 R.ctx.log(f"settings_ui: admin notice: {e}")
     R.reload()
-    R.banner = [td(clip(f"**Undone:** {text[len('Undo: '):]}", 900))]
+    R.banner = [td(clip(f"↩ **Undone.** {text}", 900))]
     return show(R, *origin)
 
 
@@ -3043,21 +2105,6 @@ def people_from(R, values, place):
     return list(dict.fromkeys(out)), dropped
 
 
-def admin_ignore(R, gid):
-    """(the owners' own Never answer list at the server's layer, the
-    admins' additions) for a server: an admin's entry holds only those
-    two (the engine adds what the owners set elsewhere)."""
-    path = ("servers", str(gid))
-    s_, pin, _src = ms.owners_view(R.st, gid).layer(path, "who.ignore")
-    pin = list(pin) if s_ and isinstance(pin, list) else []
-    e = R.st.overlay.get((path, "who.ignore"))
-    own = e.get("_norm") if isinstance(e, dict) \
-        and ms.entry_role(e) == "admin" else None
-    adds = [p for p in (own if isinstance(own, list) else [])
-            if p not in pin]
-    return pin, adds
-
-
 def list_change(R, place, key, new):
     """A Change setting a people list, or a reset when it matches what
     the place would inherit anyway."""
@@ -3073,36 +2120,6 @@ def list_change(R, place, key, new):
 
 def owners_set(R):
     return {str(o) for o in R.ctx.owners}
-
-
-def changes_for_people(R, place, key, picked, add_only=False):
-    """(changes, notes, named) for a people select."""
-    notes = []
-    owners = owners_set(R)
-    if key == "who.dms_from":
-        people = [p for p in picked if not p.startswith("role:")
-                  and p not in owners]
-        if len(people) < len([p for p in picked
-                              if not p.startswith("role:")]):
-            notes.append("Owners can always DM it.")
-        if not people:
-            return ms.dms_from_changes(R.st, "owners"), notes, ()
-        return ms.dms_from_changes(R.st, "list", people), notes, people
-    if key == "who.ignore":
-        kept = [p for p in picked if p not in owners]
-        if len(kept) < len(picked):
-            notes.append("Owners can't be added to Never answer.")
-        if add_only:
-            pin, adds = admin_ignore(R, place.guild_id)
-            new = list(dict.fromkeys(pin + adds + kept))
-            return [ms.Change(place, key, new)], notes, ()
-        return [list_change(R, place, key, kept)], notes, ()
-    if key == "plugins.media.who":
-        if not picked:
-            return [ms.Change(place, key, "owners")], notes, ()
-        full = list(dict.fromkeys(sorted(owners) + picked))
-        return [list_change(R, place, key, full)], notes, ()
-    return [list_change(R, place, key, picked)], notes, ()
 
 
 def fix_changes(R, place, key, op):
@@ -3133,27 +2150,8 @@ def fix_changes(R, place, key, op):
     return None
 
 
-def why_origin(R, fallback):
-    """The Why page a fix was clicked on (from the message's own Refresh
-    or Open button), else fallback."""
-    msg = R.ix.get("message") or {}
-
-    def walk(comps):
-        for c in comps or []:
-            if not isinstance(c, dict):
-                continue
-            parts = str(c.get("custom_id") or "").split(":")
-            if len(parts) == 5 and parts[:3] == [PREFIX, VERSION, "pg"] \
-                    and parts[4] in ("y", "b", "q"):
-                p = R.place(parts[3])
-                if p is not None:
-                    return p
-            for sub in (c.get("components"), [c.get("accessory")]):
-                got = walk(sub)
-                if got is not None:
-                    return got
-        return None
-    return walk(msg.get("components")) or fallback
+def parse_ids(text):
+    return list(dict.fromkeys(re.findall(r"\d{15,25}", str(text or ""))))
 
 
 # ---------------------------------------------------------------------------
@@ -3207,7 +2205,7 @@ def _handle(ix, ctx):
         if not R.owner:
             return refusal(R)
         R.new = True
-        return show(R, ms.Place.server(parts[3]), "b")
+        return show(R, ms.Place.server(parts[3]), "h")
     if parts[1] != VERSION or len(parts) < 4:
         return notice(OUT_OF_DATE)
     if R.role is None:
@@ -3236,8 +2234,8 @@ def admin_may(R, verb, place, args):
                                           place.channel_id) is None:
         return False
     if verb == "pg":
-        return len(args) > 1 and args[1] in ("q", "y", "b")
-    return verb in ("val", "set", "ppl", "rm", "un", "fx", "pz", "ok")
+        return len(args) == 2 and args[1] in PAGES
+    return verb in ("val", "ppl", "rm", "un", "fx", "pz", "ok")
 
 
 def on_command(R):
@@ -3245,359 +2243,137 @@ def on_command(R):
     the "Quiet the bot" panel; anyone else a refusal."""
     if R.role is None:
         return refusal(R)
-    if not R.guild_id:
-        return show(R, ms.Place.dms(), "b")
     if R.admin:
         return message(R, page_quiet(R, R.admin_gid))
-    here, thread = R.typed()
-    if not here:
-        return show(R, ms.Place.server(R.guild_id), "b")
-    R.thread_note = thread
-    if (R.chan(R.guild_id, here) or {}).get("type") == CATEGORY:
-        return show(R, ms.Place.server(R.guild_id), "b")
-    place = ms.Place.channel(R.guild_id, here,
-                             R.category_of(R.guild_id, here))
-    return show(R, place, "b")
+    R.thread_note = R.typed()[1]
+    return show(R, R.here(), "h")
 
 
 def gone(R, place):
-    """The parent page when place no longer exists (a deleted channel, a
-    server the bot left), else None."""
+    """The page to show instead when place no longer exists (a deleted
+    channel, a server the bot left), else None."""
     if place.kind == "channel":
         chans = R.channels(place.guild_id)
         if chans and place.channel_id not in chans \
-                and R.resolved_channel != place.channel_id \
                 and place.channel_id not in R.st.channels_listed(
                     place.guild_id):
             R.banner = [td("That channel no longer exists.")]
-            return show(R, ms.Place.server(place.guild_id), "b")
+            return show(R, ms.Place.server(place.guild_id), "h")
     if place.kind in ("server", "channel"):
         gs = R.guilds()
         if gs and place.guild_id not in gs \
                 and place.guild_id not in R.st.servers_listed():
-            R.banner = [td("The bot isn't in that server any more.")]
-            return show(R, ms.Place.defaults(), "b")
+            R.banner = [td("I'm not in that server any more.")]
+            return show(R, R.here(), "h")
     return None
 
 
-def v_pg(R, place, args, values):
-    # pg:<place>:<page>[:<from>]: <from> (a place token) only tells two
-    # buttons to the same page apart.
-    if not args or args[0] not in PAGES or len(args) > 2 \
-            or len(args) == 2 and R.place(args[1]) is None:
-        return notice(OUT_OF_DATE)
-    page = args[0]
-    if R.admin:
-        if page == "b":
-            page = "q"
-        return show(R, place, page)
-    if page == "q":
-        page = "b"
-    return gone(R, place) or show(R, place, page)
-
-
-def v_go(R, place, args, values):
-    if not R.owner or not values:
-        return refusal(R) if not R.owner else notice(OUT_OF_DATE)
-    v = values[0]
-    m = re.fullmatch(r"([po])(\d{1,4})", v)
-    if m:
-        if m[1] == "o":
-            R.server_page = int(m[2])
-            return show(R, place, "o")
-        R.go_page = int(m[2])
-        return show(R, place, "b")
-    target = R.place(v)
-    if target is None or target.kind == "channel":
-        return notice(OUT_OF_DATE)
-    return gone(R, target) or show(R, target, "b")
-
-
-def v_gc(R, place, args, values):
-    if not R.owner or not values or place.kind not in ("server", "channel"):
-        return refusal(R) if not R.owner else notice(OUT_OF_DATE)
-    gid = place.guild_id
-    v = values[0]
-    m = re.fullmatch(r"p(\d{1,4})", v)
-    if m:
-        R.chan_page = int(m[1])
-        return show(R, place, "b")
-    if v == "find":
-        return open_modal(R, place, "fc", "b")
-    if not _ID.fullmatch(v):
-        return notice(OUT_OF_DATE)
-    res = (R.data.get("resolved") or {}).get("channels") or {}
-    if v in res:
-        R.resolved_channel = v
-        info = res[v] if isinstance(res[v], dict) else {}
-        if info.get("type") == CATEGORY:
-            return notice(OUT_OF_DATE)
-    elif R.chan(gid, v) is None:
-        return notice(OUT_OF_DATE)
-    target = ms.Place.channel(gid, v, R.category_of(gid, v))
-    return show(R, target, "b")
-
-
-def _key(R, place, code):
+def _key(R, code):
     key = kdecode(code)
     if key is None or R.st.spec(key) is None:
         return None
     return key
 
 
-def v_set(R, place, args, values):
-    if len(args) != 1 or not values:
+def v_pg(R, place, args, values):
+    if len(args) != 1 or args[0] not in PAGES:
         return notice(OUT_OF_DATE)
-    key = _key(R, place, args[0])
-    if key is None or not offered(R, place, key):
+    return gone(R, place) or show(R, place, args[0])
+
+
+def v_wh(R, place, args, values):
+    """The Where select: here, its server, or everywhere."""
+    if not R.owner:
+        return refusal(R)
+    if args or len(values) != 1:
         return notice(OUT_OF_DATE)
-    v = values[0]
-    page = page_of(place, key)
-    if key == "who.dms_from":
-        if not R.owner:
-            return refusal(R)
+    target = R.place(values[0])
+    if target is None or target not in where_options(R, place):
+        return notice(OUT_OF_DATE)
+    return gone(R, target) or show(R, target, "h")
+
+
+def set_changes(R, place, code, v):
+    """The changes one of the page's selects makes, None (not a value
+    it offers), or a str (nothing to change: the banner's words)."""
+    kind = place.kind
+    if code == "r":
+        if v == "=" and kind == "channel":
+            return [ms.Change(place, "who.replies", "inherit")]
+        if v in ("conversational", "when-addressed"):
+            return [ms.Change(place, "who.replies", v)]
+        return None
+    if code == "ln":
+        if v in ("brief", "normal", "detailed"):
+            return [ms.Change(place, "style.length", v)]
+        return None
+    if code == "med":
+        if kind in ("channel", "dms"):
+            if v == "=" and kind == "channel":
+                return [ms.Change(place, MEDIA_ON, "inherit")]
+            if v in ("on", "off"):
+                return [ms.Change(place, MEDIA_ON, v)]
+            return None
+        if v == "off":
+            return [ms.Change(place, MEDIA_ON, "off")]
+        if v in ("owners", "everyone"):
+            return [ms.Change(place, MEDIA_ON, "on"),
+                    ms.Change(place, MEDIA_WHO, v)]
         if v == "list":
-            if ms.dm_access(R.st) == "list":
-                R.banner = [td("**No change:** you already picked people "
-                               "who can DM it.")]
-                return show(R, place, page)
-            R.pending = "who.dms_from"
-            return show(R, place, page)
-        if v not in ("owners", "shared-servers", "anyone", "nobody"):
-            return notice(OUT_OF_DATE)
-        return do_changes(R, (place, page),
-                          ms.dms_from_changes(R.st, v))
-    if key == "plugins.media.who" and v == "list":
-        if isinstance(value(R, place, key), list):
-            R.banner = [td("**No change:** pick people below.")]
-            return show(R, place, page)
-        R.pending = key
-        return show(R, place, page)
-    if key == "plugins.welcome.channel":
-        m = re.fullmatch(r"p(\d{1,4})", v)
-        if m:
-            R.chan_page = int(m[1])
-            return show(R, place, page)
-        if not _ID.fullmatch(v):
-            return notice(OUT_OF_DATE)
-    write = "inherit" if v == "=" else v
-    spec = R.st.spec(key)
-    if spec.type == "choice" and write != "inherit" \
-            and write not in spec.values:
-        if write in spec.hidden_values:
-            R.banner = [td("**No change.**")]
-            return show(R, place, page)
+            return "You already picked who can. DM me to change who."
+        return None
+    if code == "df":
+        if v in ("owners", "shared-servers", "anyone", "nobody"):
+            return ms.dms_from_changes(R.st, v)
+        if v == "list":
+            return "You already picked who can DM me. DM me to change who."
+        return None
+    if code == "pp":
+        if v == "none":
+            return [ms.Change(place, "limits.per_person_per_day", "none")]
+        if _ID.fullmatch(v):
+            ok, _n = ms.normalize(R.st.spec("limits.per_person_per_day"), v)
+            return [ms.Change(place, "limits.per_person_per_day",
+                              int(v))] if ok else None
+        return None
+    return None
+
+
+def v_set(R, place, args, values):
+    """One of the page's settings selects."""
+    if not R.owner:
+        return refusal(R)
+    if len(args) != 1 or len(values) != 1 \
+            or args[0] not in PLACE_CONTROLS.get(place.kind, ()):
         return notice(OUT_OF_DATE)
-    return do_changes(R, (place, page), [ms.Change(place, key, write)])
+    if args[0] == "med" and R.st.spec(MEDIA_ON) is None:
+        return notice(OUT_OF_DATE)
+    changes = set_changes(R, place, args[0], values[0])
+    if changes is None:
+        return notice(OUT_OF_DATE)
+    origin = shown(R, place)
+    if isinstance(changes, str):
+        R.banner = [td(f"**No change:** {changes}")]
+        return show(R, *origin)
+    return do_changes(R, origin, changes)
+
+
+# The keys an owner's val button may set (the page's own controls).
+OWNER_VAL_KEYS = ("who.replies", MEDIA_ON)
 
 
 def v_val(R, place, args, values):
-    if len(args) not in (2, 3):
+    if len(args) != 2:
         return notice(OUT_OF_DATE)
-    key = _key(R, place, args[0])
-    if key is None:
+    key = _key(R, args[0])
+    if key is None or (R.owner and key not in OWNER_VAL_KEYS):
         return notice(OUT_OF_DATE)
-    page = args[2] if len(args) == 3 else page_of(place, key)
-    if page not in PAGES:
-        return notice(OUT_OF_DATE)
-    if not offered(R, place, key) and not R.admin:
-        return notice(OUT_OF_DATE)
-    v = args[1]
-    write = "inherit" if v == "=" else v
-    spec = R.st.spec(key)
+    write = "inherit" if args[1] == "=" else args[1]
     if write != "inherit":
-        ok, norm = ms.normalize(spec, write)
+        ok, _norm = ms.normalize(R.st.spec(key), write)
         if not ok:
             return notice(OUT_OF_DATE)
-    return do_changes(R, (place, page), [ms.Change(place, key, write)])
-
-
-def v_ppl(R, place, args, values):
-    if len(args) != 1:
-        return notice(OUT_OF_DATE)
-    key = _key(R, place, args[0])
-    if key is None or not offered(R, place, key) and not R.admin:
-        return notice(OUT_OF_DATE)
-    spec = R.st.spec(key)
-    if key != "who.dms_from" and (spec is None or spec.type != "people"):
-        return notice(OUT_OF_DATE)
-    picked, dropped = people_from(R, values, place)
-    if R.admin and (key != "who.ignore" or place.kind != "server"):
-        return notice(ADMIN_ONLY_QUIETER)
-    if R.admin and not picked:
-        return notice(OUT_OF_DATE)
-    if dropped and not picked:
-        R.banner = banner_error(ROLES_ELSEWHERE)
-        return show(R, place, "q" if R.admin else page_of(place, key))
-    if not roles_here(R, place) and key != "who.dms_from":
-        # A user select (see people_select): keep the roles on the list.
-        cur = value(R, place, key)
-        picked = picked + [p for p in (cur if isinstance(cur, list)
-                                       else []) if p.startswith("role:")]
-    changes, notes, named = changes_for_people(R, place, key, picked,
-                                               add_only=R.admin)
-    if dropped:
-        notes = list(notes) + [ROLES_ELSEWHERE]
-    return do_changes(R, (place, page_of(place, key)), changes,
-                      named=named, notes=notes)
-
-
-def v_rm(R, place, args, values):
-    if len(args) != 1 or not values:
-        return notice(OUT_OF_DATE)
-    key = _key(R, place, args[0])
-    if key not in ("who.dms_from", "who.ignore"):
-        return notice(OUT_OF_DATE)
-    gone_ = set(values)
-    if key == "who.dms_from":
-        if not R.owner or place.kind != "dms":
-            return refusal(R) if not R.owner else notice(OUT_OF_DATE)
-        left = [p for p in dm_people(R) if p not in gone_]
-        changes = ms.dms_from_changes(R.st, "list", left) if left \
-            else ms.dms_from_changes(R.st, "owners")
-        return do_changes(R, (place, "b"), changes)
-    if place.kind != "server" and not (R.owner and place.kind in
-                                       ("defaults", "dms")):
-        return notice(OUT_OF_DATE)
-    if R.admin:
-        pin, adds = admin_ignore(R, place.guild_id)
-        if gone_ - set(adds):
-            return notice(ADMIN_ONLY_QUIETER)
-        left = pin + [p for p in adds if p not in gone_]
-        return do_changes(R, (place, "q"), [ms.Change(
-            place, key, left if left != pin or not adds else "inherit")])
-    cur = value(R, place, key) or []
-    left = [p for p in cur if p not in gone_]
-    return do_changes(R, (place, "q" if R.admin else page_of(place, key)),
-                      [list_change(R, place, key, left)])
-
-
-def v_mod(R, place, args, values):
-    if not R.owner:
-        return refusal(R)
-    if not args or len(args) > 2:
-        return notice(OUT_OF_DATE)
-    form = args[0]
-    page = args[1] if len(args) == 2 else "b"
-    if page not in PAGES or not form_ok(R, place, form):
-        return notice(OUT_OF_DATE)
-    m = open_modal(R, place, form, page)
-    return m or notice(OUT_OF_DATE)
-
-
-def v_re(R, place, args, values):
-    if not R.owner:
-        return refusal(R)
-    if len(args) != 2 or not form_ok(R, place, args[0]):
-        return notice(OUT_OF_DATE)
-    try:
-        draft = R.ctx.stash_take(R.uid, args[1])
-    except PermissionError:
-        return notice(WRONG_USER)
-    if not isinstance(draft, dict) or draft.get("kind") != "draft":
-        draft = None
-    page = (draft or {}).get("page") or "b"
-    return open_modal(R, place, args[0], page if page in PAGES else "b",
-                      draft) or notice(OUT_OF_DATE)
-
-
-def v_sub(R, place, args, values):
-    if not R.owner:
-        return refusal(R)
-    if R.ix.get("type") != 5 or not args or len(args) > 2:
-        return notice(OUT_OF_DATE)
-    form = args[0]
-    page = args[1] if len(args) == 2 else "b"
-    if page not in PAGES or not form_ok(R, place, form):
-        return notice(OUT_OF_DATE)
-    fields = modal_fields(R.data)
-    origin = (place, page)
-
-    def fail(text):
-        tok = R.ctx.stash_put(R.uid, {"kind": "draft", "form": form,
-                                      "values": fields, "page": page},
-                              STASH_TTL)
-        try:
-            retry = cid("re", ptok(place), form, tok)
-        except BadId:
-            retry = None
-        R.banner = banner_error(text, retry)
-        return show(R, place, page)
-
-    if form == "fc":
-        R.chan_query = (fields.get("q") or "").strip()[:100] or None
-        return show(R, place, "b")
-    if form == "fs":
-        R.server_query = (fields.get("q") or "").strip()[:100] or None
-        return show(R, place, "o")
-    if form == "id.wy":
-        ids = parse_ids(fields.get("ids"))
-        if not ids:
-            return fail("No user ID found. Copy one with Developer Mode on.")
-        R.check = ids[0]
-        return show(R, place, "y")
-    if form == "id.df":
-        ids = parse_ids(fields.get("ids"))
-        if not ids:
-            return fail("No user ID found. Copy one with Developer Mode on.")
-        owners = owners_set(R)
-        new = [i for i in ids if i not in owners]
-        notes = ["Owners can always DM it."] if len(new) < len(ids) else []
-        if not new:
-            R.banner = [td("**No change:** owners can always DM it.")]
-            return show(R, place, page)
-        people = list(dict.fromkeys(dm_people(R) + new))
-        return do_changes(R, origin,
-                          ms.dms_from_changes(R.st, "list", people),
-                          named=new, notes=notes)
-    changes = []
-    if form == "i":
-        if "n" not in fields:
-            return notice(OUT_OF_DATE)
-        text = fields["n"].strip()
-        if len(text) > ms.NOTES_MAX:
-            return fail(f"Instructions take up to {ms.NOTES_MAX} "
-                        f"characters; that was {len(text):,}.")
-        changes.append(ms.Change(place, "style.notes", text or "inherit"))
-        ln = fields.get("ln")
-        if isinstance(ln, list) and ln and place.kind != "channel":
-            if ln[0] == "=" and place.kind != "defaults":
-                changes.append(ms.Change(place, "style.length", "inherit"))
-            elif ln[0] in ("brief", "normal", "detailed"):
-                changes.append(ms.Change(place, "style.length", ln[0]))
-    elif form == "c":
-        for name, key in (("pp", "limits.per_person_per_day"),
-                          ("pd", "limits.per_day")):
-            if name not in fields or not offered(R, place, key):
-                continue
-            v, err = parse_cap(R, key, fields[name])
-            if err:
-                return fail(err)
-            changes.append(ms.Change(place, key, v))
-    elif form in ("bx", "mpd"):
-        key = CAP_FIELDS[form]
-        if "v" not in fields:
-            return notice(OUT_OF_DATE)
-        v, err = parse_cap(R, key, fields["v"])
-        if err:
-            return fail(err)
-        changes.append(ms.Change(place, key, v))
-    elif form == "wn":
-        text = (fields.get("v") or "").strip()
-        if len(text) > 500:
-            return fail(f"Welcome notes take up to 500 characters; that was "
-                        f"{len(text):,}.")
-        changes.append(ms.Change(place, "plugins.welcome.notes",
-                                 text or "inherit"))
-    elif form == "st":
-        text = (fields.get("v") or "").strip()
-        if len(text) > 128:
-            return fail(f"The status line takes up to 128 characters; that "
-                        f"was {len(text):,}.")
-        changes.append(ms.Change(place, "presence.status", text))
-    if not changes:
-        return notice(OUT_OF_DATE)
-    return do_changes(R, origin, changes)
+    return do_changes(R, shown(R, place), [ms.Change(place, key, write)])
 
 
 def v_pre(R, place, args, values):
@@ -3606,7 +2382,90 @@ def v_pre(R, place, args, values):
     if args or place.kind != "server" or not values \
             or values[0] not in ms.PRESETS:
         return notice(OUT_OF_DATE)
-    return message(R, page_preset(R, place, values[0]))
+    name = values[0]
+    try:
+        changes = ms.preset_changes(R.st, name, place, R.ctx, big="skip")
+    except ms.SettingsError as e:
+        R.banner = banner_error(plain_error(e))
+        return show(R, *shown(R, place))
+    title = ms.PRESETS[name][0]
+    notes = []
+    members = R.members(place.guild_id)
+    if title == "Friends" and members is not None \
+            and members > ms.BIG_FOR_MEMORY:
+        gname = R.gname(place.guild_id)
+        notes.append(f"-# I still keep to public facts: {gname} has more "
+                     f"than {ms.BIG_FOR_MEMORY} members. DM me if you're "
+                     f"sure.")
+    if not changes:
+        R.banner = [td(f"**No change:** {R.gname(place.guild_id)} already "
+                       f"has the {title} style.")]
+        return show(R, *shown(R, place))
+    return do_changes(R, shown(R, place), changes, notes=notes,
+                      headline=f"{R.gname(place.guild_id)} now has the "
+                               f"{title} style.")
+
+
+def v_ppl(R, place, args, values):
+    """Admins: add people or roles to the server's ignore list."""
+    if not R.admin or args != ["ig"] or place.kind != "server":
+        return notice(ADMIN_ONLY_QUIETER if R.admin else OUT_OF_DATE)
+    picked, dropped = people_from(R, values, place)
+    if not picked:
+        return notice(OUT_OF_DATE)
+    owners = owners_set(R)
+    kept = [p for p in picked if p not in owners]
+    notes = ["Owners can't be ignored."] if len(kept) < len(picked) else []
+    if dropped:
+        notes.append(ROLES_ELSEWHERE)
+    pin, adds = admin_ignore(R, place.guild_id)
+    new = list(dict.fromkeys(pin + adds + kept))
+    return do_changes(R, (place, "h"), [ms.Change(place, "who.ignore", new)],
+                      notes=notes)
+
+
+def v_rm(R, place, args, values):
+    """Admins: take their own additions off the ignore list."""
+    if not R.admin or args != ["ig"] or place.kind != "server" \
+            or not values:
+        return notice(ADMIN_ONLY_QUIETER if R.admin else OUT_OF_DATE)
+    pin, adds = admin_ignore(R, place.guild_id)
+    if set(values) - set(adds):
+        return notice(ADMIN_ONLY_QUIETER)
+    left = pin + [p for p in adds if p not in set(values)]
+    return do_changes(R, (place, "h"), [ms.Change(
+        place, "who.ignore", left if left != pin or not adds
+        else "inherit")])
+
+
+def v_mod(R, place, args, values):
+    if not R.owner:
+        return refusal(R)
+    if args != ["wy"] or place.kind != "dms":
+        return notice(OUT_OF_DATE)
+    return modal(cid("sub", "d", "wy"), "Check a person", [
+        td("In Discord: Settings › Advanced › Developer Mode, then "
+           "right-click a person › Copy User ID."),
+        labelled("User ID", text_input("ids", 1, 600, None, None, True),
+                 "One ID or @mention.")])
+
+
+def v_sub(R, place, args, values):
+    if not R.owner:
+        return refusal(R)
+    if R.ix.get("type") != 5 or args != ["wy"] or place.kind != "dms":
+        return notice(OUT_OF_DATE)
+    comps = []
+    for c in _all(R.data.get("components") or []):
+        if c.get("custom_id") == "ids":
+            comps.append(str(c.get("value") or ""))
+    ids = parse_ids(" ".join(comps))
+    if not ids:
+        R.banner = banner_error("No user ID found. Copy one with Developer "
+                                "Mode on.")
+    else:
+        R.check = ids[0]
+    return show(R, place, "y")
 
 
 def v_ok(R, place, args, values):
@@ -3621,11 +2480,11 @@ def v_ok(R, place, args, values):
     if not isinstance(payload, dict) or payload.get("kind") not in (
             "apply", "undo"):
         return message(R, [container([td(EXPIRED)], BLURPLE),
-                           row(btn(f"Open {R.name(place)} settings",
-                                   cid("pg", ptok(place), "b")))])
-    otok, opage = (payload.get("origin") or [ptok(place), "b"])[:2]
+                           row(btn("Open settings",
+                                   cid("pg", ptok(place), "h")))])
+    otok, opage = (payload.get("origin") or [ptok(place), "h"])[:2]
     oplace = R.place(otok) or place
-    opage = opage if opage in PAGES else "b"
+    opage = opage if opage in PAGES else "h"
     if payload["kind"] == "undo":
         up = R.place(payload.get("place") or "")
         if up is None:
@@ -3642,65 +2501,28 @@ def v_ok(R, place, args, values):
         return notice(OUT_OF_DATE)
     return do_changes(R, (oplace, opage), changes, confirmed=True,
                       named=payload.get("named") or (),
-                      notes=payload.get("notes") or ())
+                      notes=payload.get("notes") or (),
+                      headline=payload.get("headline"))
 
 
 def v_un(R, place, args, values):
     if len(args) > 1:
         return notice(OUT_OF_DATE)
-    origin = (place, "q" if R.admin else "b")
-    msg = R.ix.get("message") or {}
-    # Undo from the Why page or Extras: stay on that page.
-    page = page_in_message(R, msg)
-    if page and not R.admin:
-        origin = page
-    return do_undo(R, place, args[0] if args else None, origin)
-
-
-def page_in_message(R, msg):
-    """(place, page) the clicked message showed, from its own controls:
-    Why has a Refresh button; the other pages' val / mod ids end with
-    their page. None when it can't tell."""
-    best = None
-    for c in _walk(msg.get("components") or []):
-        parts = str(c.get("custom_id") or "").split(":")
-        if len(parts) < 4 or parts[:2] != [PREFIX, VERSION]:
-            continue
-        if parts[2] == "pg" and len(parts) == 5 and parts[4] == "y" \
-                and c.get("label") == "Refresh":
-            p = R.place(parts[3])
-            if p is not None:
-                return p, "y"
-        if parts[2] in ("val", "mod") and len(parts) >= 6 \
-                and parts[-1] in PAGES and best is None:
-            p = R.place(parts[3])
-            if p is not None:
-                best = (p, parts[-1])
-    return best
-
-
-def _walk(comps):
-    for c in comps:
-        if not isinstance(c, dict):
-            continue
-        yield c
-        yield from _walk(c.get("components") or [])
-        if isinstance(c.get("accessory"), dict):
-            yield c["accessory"]
+    return do_undo(R, place, args[0] if args else None, shown(R, place))
 
 
 def v_pz(R, place, args, values, resume=False):
     if args:
         return notice(OUT_OF_DATE)
+    origin = shown(R, place)
     if resume:
         changes = ms.resume_changes(R.st, place)
         if not changes:
-            R.banner = [td(f"**No change:** {R.name(place)} isn't "
-                           f"paused.")]
-            return show(R, place, "b")
+            R.banner = [td("**No change:** it isn't paused there.")]
+            return show(R, *origin)
     else:
         changes = ms.pause_changes(place)
-    return do_changes(R, (place, "q" if R.admin else "b"), changes)
+    return do_changes(R, origin, changes)
 
 
 def v_rs(R, place, args, values):
@@ -3712,22 +2534,25 @@ def v_rs(R, place, args, values):
 def v_fx(R, place, args, values):
     if len(args) != 2:
         return notice(OUT_OF_DATE)
-    key = _key(R, place, args[0])
+    key = _key(R, args[0])
     if key is None:
         return notice(OUT_OF_DATE)
     if R.admin and key == "who.ignore" and args[1].startswith("-") \
             and args[1][1:] not in admin_ignore(R, place.guild_id)[1]:
         return notice(ADMIN_ONLY_QUIETER)
-    changes = fix_changes(R, place, key, args[1])
+    try:
+        changes = fix_changes(R, place, key, args[1])
+    except ms.SettingsError:    # not a setting of that place
+        changes = None
     if not changes:
         return notice(OUT_OF_DATE)
-    origin = why_origin(R, place)
     if args[1][:1] in "+-":
         R.fixed = args[1][1:]
     if place.kind == "dms" and key == "who.dms_from":
         R.check = args[1][1:]
         return do_changes(R, (ms.Place.dms(), "y"), changes,
                           named=[args[1][1:]])
+    origin, page = shown(R, place)
     return do_changes(R, (origin, "y"), changes)
 
 
@@ -3743,7 +2568,6 @@ def v_wy(R, place, args, values):
     return show(R, place, "y")
 
 
-VERBS = {"pg": v_pg, "go": v_go, "gc": v_gc, "set": v_set, "val": v_val,
-         "ppl": v_ppl, "rm": v_rm, "mod": v_mod, "sub": v_sub, "re": v_re,
-         "pre": v_pre, "ok": v_ok, "un": v_un, "pz": v_pz, "rs": v_rs,
-         "fx": v_fx, "wy": v_wy}
+VERBS = {"pg": v_pg, "wh": v_wh, "set": v_set, "val": v_val, "pre": v_pre, "ppl": v_ppl, "rm": v_rm,
+         "mod": v_mod, "sub": v_sub, "ok": v_ok, "un": v_un, "pz": v_pz,
+         "rs": v_rs, "fx": v_fx, "wy": v_wy}

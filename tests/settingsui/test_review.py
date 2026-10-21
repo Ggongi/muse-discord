@@ -1,8 +1,8 @@
 """Regression tests for the adversarial review of the /settings redesign
-(review B, 2026-10-19): another server's data never shown, roles and
-ids no resolved data vouches for never written, an admin's entry holding
-only the admins' additions. The monitor-side ones are in
-tests/settingsplumb; the hostile-fixture crawl is test_crawl_hostile.py.
+(review B, 2026-10-19): another server's data never shown, ids no
+resolved data vouches for never written, an admin's entry holding only
+the admins' additions. The monitor-side ones are in tests/settingsplumb;
+the hostile-fixture crawl is test_crawl_hostile.py.
 
 Usage: [MUT_DIR=<tree>] python3 tests/settingsui/test_review.py"""
 import os
@@ -15,9 +15,7 @@ import json  # noqa: E402
 import crawl  # noqa: E402
 import harness as H  # noqa: E402
 from harness import (ADMIN, G1, G2, G3, MANAGE, MS, OWNER, SAM,  # noqa: E402
-                     UI, FakeCtx, component, context_command, text)
-
-UNMAPPED = "70000000000000000999"
+                     UI, FakeCtx, P, component, context_command, text)
 
 
 def apply(ctx, changes):
@@ -55,47 +53,21 @@ class WhyScope(Base):
         o = dict(H.OUTCOMES[0], guild_id=G3, message_id="1999")
         self.ctx.outcomes = [o]
         self.ctx.recent_outcomes = lambda place, limit=20: [dict(o)]
-        r = self.h(component(OWNER, f"mdset:2:pg:s{G1}:y", None, G1, "0"))
+        r = self.h(component(OWNER, f"{P}pg:s{G1}:y", None, G1, "0"))
         self.assertNotIn("1999", json.dumps(r))
 
 
 class People(Base):
-    def test_foreign_role_is_never_written(self):
-        """#3: a role of the server the interaction is in, picked for
-        another server."""
-        r = self.h(component(OWNER, f"mdset:2:pg:s{G2}:m", None, G1, "0"))
-        sel = H.find(r, f"mdset:2:ppl:s{G2}:al")
-        self.assertEqual(sel["type"], 5)        # a user select off-guild
-        self.h(component(OWNER, f"mdset:2:ppl:s{G2}:al", [H.ROLE], G1, "0",
-                         resolved=H.resolved_for(7, [H.ROLE])))
-        self.assertEqual(self.ctx.value("who.allow", MS.Place.server(G2)),
-                         "everyone")
-        # a person picked with it is written, the role left out
-        self.h(component(OWNER, f"mdset:2:ppl:s{G2}:ig", [H.ROLE, SAM],
-                         G1, "0", resolved=H.resolved_for(7, [H.ROLE, SAM])))
-        self.assertEqual(self.ctx.value("who.ignore", MS.Place.server(G2)),
-                         [SAM])
-
-    def test_roles_kept_when_editing_off_guild(self):
-        apply(self.ctx, [MS.Change(MS.Place.server(G2), "who.ignore",
-                                   [f"role:{H.ROLE}"])])
-        self.h(component(OWNER, f"mdset:2:ppl:s{G2}:ig", [SAM], G1, "0",
-                         resolved=H.resolved_for(5, [SAM])))
-        self.assertEqual(self.ctx.value("who.ignore", MS.Place.server(G2)),
-                         [SAM, f"role:{H.ROLE}"])
-
     def test_forged_ids_are_dropped(self):
         """#6: ids no resolved data vouches for (another server's, a
         channel's) are never written, and never named."""
         before = self.ctx.overlay()
-        r = self.h(component(ADMIN, f"mdset:2:ppl:s{G1}:ig", [G2, H.ART],
+        r = self.h(component(ADMIN, f"{P}ppl:s{G1}:ig", [G2, H.ART],
                              G1, MANAGE))
         self.assertEqual(self.ctx.overlay(), before)
         self.assertNotIn("Study Group", text(r))
-        self.h(component(OWNER, f"mdset:2:ppl:s{G1}:al", [G2], G1, "0"))
-        self.assertEqual(self.ctx.overlay(), before)
         # a person's name only comes from people lookups
-        R = UI.Req(component(OWNER, "mdset:2:pg:x:b"), self.ctx)
+        R = UI.Req(component(OWNER, f"{P}pg:d:h"), self.ctx)
         self.assertIsNone(R.person(G2))
         self.assertEqual(R.person(SAM), "Sam")
 
@@ -103,7 +75,7 @@ class People(Base):
         """#5: an admin's add copies nothing the owners set elsewhere."""
         apply(self.ctx, [MS.Change(MS.Place.defaults(), "who.ignore",
                                    [H.KAI])])
-        self.h(component(ADMIN, f"mdset:2:ppl:s{G2}:ig", [SAM], G2, MANAGE,
+        self.h(component(ADMIN, f"{P}ppl:s{G2}:ig", [SAM], G2, MANAGE,
                          H.HOMEWORK, resolved=H.resolved_for(5, [SAM])))
         e = self.ctx.overlay()["values"][f'servers."{G2}".who.ignore']
         self.assertEqual(e["value"], [SAM])
@@ -115,7 +87,7 @@ class People(Base):
         apply(self.ctx, [MS.Change(MS.Place.defaults(), "who.ignore",
                                    [H.KAI])])
         r = self.h(H.command(ADMIN, G2, MANAGE, H.HOMEWORK))
-        rm = H.find(r, f"mdset:2:rm:s{G2}:ig")
+        rm = H.find(r, f"{P}rm:s{G2}:ig")
         self.assertEqual([o["value"] for o in rm["options"]], [SAM])
         # removing it leaves the owners' list alone
         self.h(component(ADMIN, rm["custom_id"], [SAM], G2, MANAGE,
@@ -123,11 +95,11 @@ class People(Base):
         self.assertEqual(self.ctx.value("who.ignore", MS.Place.server(G2)),
                          [H.KAI])
         # the owners' entry at the server layer stays in an admin's add
-        r = self.h(component(ADMIN, f"mdset:2:ppl:s{G1}:ig", [SAM], G1,
+        r = self.h(component(ADMIN, f"{P}ppl:s{G1}:ig", [SAM], G1,
                              MANAGE, resolved=H.resolved_for(5, [SAM])))
         self.assertEqual(self.ctx.value("who.ignore", MS.Place.server(G1)),
                          [H.BOB, H.SPAM, SAM])
-        self.assertIsNotNone(H.find(r, f"mdset:2:rm:s{G1}:ig"))
+        self.assertIsNotNone(H.find(r, f"{P}rm:s{G1}:ig"))
 
 
 if __name__ == "__main__":

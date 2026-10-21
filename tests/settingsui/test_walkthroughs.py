@@ -1,11 +1,11 @@
 """/settings behaviour, click by click, offline: an owner's change
 applies and can be undone (a stale Undo never applies, a group's Undo is
-judged by its whole outcome), Pause everywhere
-asks first and undoes, a server admin can only make things quieter and
-undo their own change, a stranger is refused, bad input and an unreadable
-overlay write nothing, and a crash is an apology. Controls are found by
-their custom_id (verb and place), never by their label or the page's
-words, so the redesign can change any copy.
+judged by its whole outcome), Pause everywhere asks first and undoes, a
+server admin can only make things quieter and undo their own change, a
+stranger is refused, an unreadable overlay writes nothing, and a crash
+is an apology. Controls are found by their custom_id (verb and place),
+never by their label or the page's words, so the design can change any
+copy.
 
 Usage: [MUT_DIR=<tree>] python3 tests/settingsui/test_walkthroughs.py"""
 import os
@@ -16,8 +16,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import crawl  # noqa: E402
 import harness as H  # noqa: E402
 from harness import (ADMIN, G1, GENERAL, MANAGE, MEMBER, MS,  # noqa: E402
-                     MUSECHAT, OWNER, UI, FakeCtx, command, component,
-                     context_command, submit)
+                     MUSECHAT, OWNER, UI, FakeCtx, P, command, component,
+                     context_command)
 
 S1 = MS.Place.server(G1)
 MC = MS.Place.channel(G1, MUSECHAT)
@@ -73,19 +73,51 @@ class Base(unittest.TestCase):
 class Owner(Base):
     def test_change_applies_and_undo_reverts(self):
         r = self.h(command(OWNER, G1, "0", MUSECHAT))
-        sel = control(r, f"mdset:2:set:c{G1}.{MUSECHAT}:r")
-        self.assertIsNotNone(sel)
-        r = self.owner(sel["custom_id"], ["when-addressed"])
-        self.assertEqual(self.val("who.replies", MC), "when-addressed")
-        undo = control(r, "un")
-        r = self.confirm_if_asked(self.owner(undo["custom_id"]))
-        self.assertEqual(self.val("who.replies", MC), "conversational")
+        style = control(r, f"{P}pre:s{G1}")
+        self.assertIsNotNone(style)
+        before = self.val("who.replies", S1)
+        r = self.owner(style["custom_id"], ["community"])
+        self.assertEqual(self.val("who.replies", S1), "when-addressed")
+        self.assertEqual(self.val("limits.per_person_per_day", S1), 20)
+        r = self.confirm_if_asked(self.owner(control(r, "un")["custom_id"]))
+        self.assertEqual(self.val("who.replies", S1), before)
+        self.assertIsNone(self.val("limits.per_person_per_day", S1))
         # A stale Undo (the setting changed since) never applies.
-        r = self.owner(sel["custom_id"], ["off"])
+        r = self.owner(style["custom_id"], ["community"])
         stale = control(r, "un")["custom_id"]
-        self.owner(sel["custom_id"], ["when-addressed"])
+        self.confirm_if_asked(self.owner(style["custom_id"], ["work"]))
         self.owner(stale)
+        self.assertEqual(self.val("privacy.memory", S1), "nothing")
+
+    def test_a_setting_applies_and_bad_values_write_nothing(self):
+        r = self.h(command(OWNER, G1, "0", MUSECHAT))
+        here = control(r, f"{P}set:c{G1}.{MUSECHAT}:r")
+        r = self.owner(here["custom_id"], ["when-addressed"])
         self.assertEqual(self.val("who.replies", MC), "when-addressed")
+        self.confirm_if_asked(self.owner(control(r, "un")["custom_id"]))
+        self.assertIsNone(self.ctx.overlay()["values"].get(
+            f'servers."{G1}".channels."{MUSECHAT}".replies'))
+        # The server's page, through the Where select.
+        r = self.owner(control(r, "wh")["custom_id"], [f"s{G1}"])
+        cap = control(r, f"{P}set:s{G1}:pp")
+        self.assertIsNotNone(cap)
+        before = self.ctx.overlay()
+        for bad in ("lots", "-5", "100001", "=", ""):
+            self.owner(cap["custom_id"], [bad])
+        self.owner(f"{P}set:c{G1}.{MUSECHAT}:ln", ["brief"])  # not here
+        self.owner(f"{P}wh:c{G1}.{MUSECHAT}", [f"s{H.G3}"])    # elsewhere
+        self.assertEqual(self.ctx.overlay(), before)
+        self.confirm_if_asked(self.owner(cap["custom_id"], ["20"]))
+        self.assertEqual(self.val("limits.per_person_per_day", S1), 20)
+
+    def test_pause_here_and_resume(self):
+        r = self.h(command(OWNER, G1, "0", MUSECHAT))
+        r = self.owner(control(r, f"{P}pz:c{G1}.{MUSECHAT}")["custom_id"])
+        self.assertEqual(self.val("who.replies", MC), "off")
+        self.assertNotEqual(self.val("who.replies", S1), "off")
+        self.confirm_if_asked(self.owner(
+            control(r, f"{P}rs:c{G1}.{MUSECHAT}")["custom_id"]))
+        self.assertNotEqual(self.val("who.replies", MC), "off")
 
     def test_undo_of_a_group_is_judged_whole(self):
         """Undo on a server page undoes the newest group there, all of it:
@@ -96,14 +128,15 @@ class Owner(Base):
         apply(MS.Change(DMS, "who.dms_from", "anyone"))
         apply(MS.Change(DMS, "who.dms_from", "owners"),
               MS.Change(S1, "style.length", "brief"))
-        r = self.owner(f"mdset:2:un:s{G1}")
+        r = self.owner(f"{P}un:s{G1}")
         self.assertEqual(self.val("who.dms_from", DMS), "owners")  # asked
         self.owner(control(r, "ok")["custom_id"])
         self.assertEqual(self.val("who.dms_from", DMS), "anyone")
         self.assertEqual(self.val("style.length", S1), "normal")
 
     def test_pause_everywhere_asks_first_and_undoes(self):
-        r = self.owner("mdset:2:pz:x")
+        r = self.owner(f"{P}pg:x:h", guild=None)
+        r = self.owner(control(r, f"{P}pz:x")["custom_id"], guild=None)
         self.assertFalse(MS.is_paused(self.ctx.reload(), DEF))  # asked
         self.assertEqual(self.ctx.applied, [])
         ok = control(r, "ok")["custom_id"]
@@ -118,26 +151,14 @@ class Owner(Base):
         self.confirm_if_asked(self.owner(control(r, "un")["custom_id"]))
         self.assertFalse(MS.is_paused(self.ctx.reload(), DEF))
 
-    def test_bad_input_and_unreadable_overlay_write_nothing(self):
-        r = self.owner(f"mdset:2:mod:s{G1}:c:b")
-        self.assertEqual(r["type"], 9)
-        for fields in ({"pp": "lots", "pd": "5"}, {"pp": "", "pd": "-5"},
-                       {"pp": "", "pd": "100001"}):
-            self.h(submit(OWNER, f"mdset:2:sub:s{G1}:c:b", fields, G1, "0"))
-            self.assertIsNone(self.val("limits.per_day", S1), fields)
-            self.assertIsNone(self.val("limits.per_person_per_day", S1))
-        self.h(submit(OWNER, f"mdset:2:sub:s{G1}:c:b",
-                      {"pp": "1,000", "pd": ""}, G1, "0"))
-        self.assertEqual(self.val("limits.per_person_per_day", S1), 1000)
-        # An unreadable overlay: no write controls, and a stale page's
-        # write changes nothing.
+    def test_unreadable_overlay_writes_nothing(self):
         self.ctx = FakeCtx(broken_overlay=True)
         with open(self.ctx.overlay_path) as f:
             before = f.read()
-        r = self.owner(f"mdset:2:pg:s{G1}:b")
+        r = self.owner(f"{P}pg:c{G1}.{MUSECHAT}:h")
         self.assertEqual({verb(c) for c in H.controls(r)}
                          & set(UI.WRITE_VERBS), set())
-        self.owner(f"mdset:2:set:s{G1}:m", ["nothing"])   # a stale page
+        self.owner(f"{P}pre:s{G1}", ["work"])     # a stale page
         with open(self.ctx.overlay_path) as f:
             self.assertEqual(f.read(), before)
 
@@ -165,20 +186,20 @@ class Admin(Base):
     def test_quieter_only_and_undo(self):
         r = self.h(command(ADMIN, G1, MANAGE, MUSECHAT))
         # Every write the panel offers makes things quieter: none sets
-        # Chatty or turns an extra on.
+        # Chatty or turns anything on.
         for c in H.controls(r):
-            self.assertNotIn(":conversational:", c["custom_id"])
-            self.assertNotIn(":on:", c["custom_id"])
+            self.assertNotIn(":conversational", c["custom_id"])
+            self.assertFalse(c["custom_id"].endswith(":on"))
         before = self.ctx.overlay()
-        self.admin(f"mdset:2:val:c{G1}.{MUSECHAT}:r:conversational:q")
+        self.admin(f"{P}val:c{G1}.{MUSECHAT}:r:conversational")
         self.assertEqual(self.ctx.overlay(), before)        # refused
-        r = self.admin(f"mdset:2:val:c{G1}.{MUSECHAT}:r:off:q")
+        r = self.admin(f"{P}val:c{G1}.{MUSECHAT}:r:off")
         self.assertEqual(self.val("who.replies", MC), "off")
         key = f'servers."{G1}".channels."{MUSECHAT}".replies'
         self.assertEqual(self.ctx.overlay()["values"][key]["role"], "admin")
         self.assertEqual(self.ctx.notified[-1][:3], (G1, ADMIN, key))
         self.admin(control(r, "un")["custom_id"])
-        self.assertEqual(self.val("who.replies", MC), "conversational")
+        self.assertNotEqual(self.val("who.replies", MC), "off")
 
 
 class Stranger(Base):

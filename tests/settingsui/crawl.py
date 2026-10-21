@@ -28,7 +28,8 @@ from harness import UI  # noqa: E402
 DISCORD_MAX_COMPONENTS = 40
 DISCORD_MAX_TEXT = 4000         # all Text Displays together
 SELECT_TYPES = (3, 5, 6, 7, 8)
-NAV_VERBS = ("pg", "go", "gc")
+OURS = f"{UI.PREFIX}:{UI.VERSION}:"     # every custom_id the pages render
+NAV_VERBS = ("pg", "wh")
 # Text Displays: the only links are ours (messages), names never ping or
 # mention anyone (spec §7, review B #4).
 FOREIGN_LINK = re.compile(r"(?<!\\)\]\((?!https://discord\.com/channels/)")
@@ -81,7 +82,7 @@ def check(resp, where):
         no("content" in data or "embeds" in data, "content or embeds")
         no(data.get("allowed_mentions") != {"parse": []}, "mentions")
     if t == 9:
-        no(not data.get("custom_id", "").startswith("mdset:2:"),
+        no(not data.get("custom_id", "").startswith(OURS),
            f"modal id {data.get('custom_id')}")
         no(len(data.get("custom_id", "")) > 100, "modal id too long")
         no(not 1 <= len(data.get("title", "")) <= 45,
@@ -150,7 +151,7 @@ def check(resp, where):
         if "custom_id" in c and t != 9:
             cid = c["custom_id"]
             ids.append(cid)
-            no(not cid.startswith("mdset:2:"), f"custom id {cid}")
+            no(not cid.startswith(OURS), f"custom id {cid}")
             no(len(cid) > 100, f"custom id {len(cid)} chars: {cid}")
     no(len(ids) != len(set(ids)), "duplicate custom ids")
     for c in H.walk(data.get("components")):
@@ -355,7 +356,7 @@ def entries():
          H.context_command(MS_, H.OUTCOMES[0]["message_id"])),
         ("old_id", H.FakeCtx, Actor(O), H.component(O, "mdset:p:e")),
         ("expired", H.FakeCtx, Actor(O, H.G1, "0"),
-         H.component(O, f"mdset:2:ok:s{H.G1}:t999999999", None, H.G1,
+         H.component(O, f"{OURS}ok:s{H.G1}:t999999999", None, H.G1,
                      "0")),
         ("overlay_broken", lambda: H.FakeCtx(broken_overlay=True),
          Actor(O, H.G1, "0", H.MUSECHAT),

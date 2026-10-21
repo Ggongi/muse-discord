@@ -22,6 +22,8 @@ import muse_settings as MS  # noqa: E402
 import settings_ui as UI  # noqa: E402,F401 (re-exported)
 
 PLUGINS = os.path.join(MUT, "plugins")
+# The custom_id prefix the pages render now ("mdset:<version>:").
+P = f"{UI.PREFIX}:{UI.VERSION}:"
 
 # 20-digit snowflakes (the longest real ids).
 OWNER = "11100000000000000001"

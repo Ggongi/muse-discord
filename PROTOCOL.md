@@ -559,15 +559,22 @@ invite URL in SETUP.md step 2 needs no other scope.
 Who may use it (checked on every interaction, never trusted from a
 custom id):
 
-- **Owners**: everything editable from Discord, at any place, from
-  a DM or any server.
+- **Owners**: one screen for the place they typed it in (a channel,
+  or DMs in the bot's DM; the join notice's **Configure** opens a
+  whole server), with a **Where** select for its server or
+  everywhere: how the bot behaves there, a few direct settings (when it
+  replies, reply length, images & video, who can DM it, replies a
+  person a day: whichever that place has), the server's style (the
+  Friends / Community / Work presets), pause and resume, **Why no
+  reply?** and Undo of the last change. Every other setting is changed
+  by DMing the bot in plain words ("Settings requests" below).
 - **Server admins** (Manage Server or Administrator in that server,
   from the interaction's member permissions; not owners): their own
   server only, on the **Quiet the bot** panel, and only quieter:
-  `replies` off or when-addressed for the server or a channel, extras
-  off, additions to `ignore`; plus reverting what admins wrote there
-  (back to the owners' value, never louder: muse_settings' admin
-  rule), and **Why no reply?** for that server. Never privacy, caps,
+  `replies` off or when-addressed for the server or a channel, image
+  and video generation off, additions to `ignore`; plus Undo of what
+  admins wrote there (back to the owners' value, never louder:
+  muse_settings' admin rule), and **Why no reply?** for that server. Never privacy, caps,
   presets, Defaults, DMs or another server.
 - **Anyone else**: an ephemeral "Only the bot's owners can change
   its settings. Server admins (Manage Server) can make it quieter
@@ -585,10 +592,11 @@ for the commands, a refusal or an out-of-date notice, a modal (type
 Without `settings_ui.py` the monitor logs it once and answers
 "Settings UI unavailable."
 
-- Custom ids are `mdset:2:<verb>:<place>[:…]` (place `x` Defaults,
+- Custom ids are `mdset:3:<verb>:<place>[:…]` (place `x` everywhere,
   `d` DMs, `s<server id>`, `c<server id>.<channel id>`); the grammar
   is in `settings_ui.py`'s docstring. Any other `mdset:` id (a page
-  from before 2026-10-19) answers "This settings page is out of date",
+  from an earlier design, `mdset:2:…` included) answers "This settings
+  page is out of date" and changes nothing,
   except the join notice's `mdset:open:server:<server id>`, which
   still opens that server's page (owners only).
 - Writes go through `muse_settings.apply` into `config.discord.yaml`
