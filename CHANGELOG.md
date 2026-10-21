@@ -6,6 +6,53 @@ entries below the releases are pre-release history. **Action
 needed** lists what an existing install must do after updating;
 UPDATING.md walks a Muse through it.
 
+## 2026-10-21: Replies stay where they belong
+
+Fixed (security):
+
+- A reply can only go where the message it answers was said. Before,
+  any worker run (woken by anyone's message, so maybe reading a
+  stranger's prompt injection) could have the bot post in any channel
+  or DM it can reach under a made-up item: in a server none of the
+  owners is in, a paused server, a place where replies are off, or
+  the DM of someone your DM settings refuse. Now every outbox item
+  must answer a message the monitor queued, in that message's channel
+  (a thread, for a message in a thread); anything else is set aside in
+  `reply_outbox.rejected.json` and logged. Held replies you chose to
+  send still go out.
+- `bin/discord-api.py` acts only for an owner's command, in the run
+  that holds it. Before, any run could `read` someone's private DM and
+  `post` it into a public channel. Now `read`, `post`, `thread`,
+  `react`, `pin`, `unpin`, `edit` and `delete-own` need `--for <the
+  owner's item> --nonce <its owner_command_nonce>`, a secret the
+  monitor mints for each owner's message (`owner_items.json`, mode
+  600) and the wake hook hands only to a run that holds nothing but
+  the owner's items. `resolve-channel` and `list-threads` (channel and
+  thread names, no messages) still work without it.
+- An owner's server message now wakes alone, as owner DMs already did,
+  so a stranger's message never shares the run that can act for you.
+  Other people's messages that arrive with it wait a few seconds for
+  the next run.
+
+Changed:
+
+- An outbox item that names no queued message (neither `item` nor
+  `reply_to`), or a very late one the monitor has entirely forgotten,
+  is refused instead of posted. Workers on the shipped prompt always
+  set `item`.
+
+**Action needed:**
+
+- Update the worker prompt (re-render it): `python3
+  bin/render-worker-prompt.py` with the options you used before.
+  Until then owner commands ("pin that", "post this in
+  #announcements", "what did X say in #dev?") get a reply but no
+  action: the old prompt calls `bin/discord-api.py` without `--for`
+  and `--nonce`, which is now refused.
+- Restart the monitor if your update path does not (UPDATING.md).
+  Until a monitor that writes `owner_items.json` runs, owner commands
+  get a reply but no action.
+
 ## 2026-10-21: Setup in five steps
 
 New:
