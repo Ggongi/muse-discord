@@ -332,6 +332,14 @@ answer an item its own run was handed, where that item was said:
   a resend from `reply_outbox.processing.json` after a restart, keep
   it. While the item is queued the monitor keeps it, and mints a new
   one if it is missing (`state.json` lost), for the item's next wake.
+- An outdated worker prompt (from before reply nonces) writes items
+  without `reply_nonce`, and every one is refused, so the bot goes
+  silent. After 3 such refusals within an hour the monitor logs
+  `WORKER PROMPT OUT OF DATE`, writes `prompt_outdated.json` (which
+  `bin/doctor.py` reports as a problem, with the fix) and DMs the
+  owners, at most once a day, to have their Muse follow UPDATING.md
+  (it re-renders the prompt). An outbox item that carries its nonce
+  clears it.
 - The wake hook counts an outbox entry as answering an item only when
   it carries that item's `reply_nonce`, so a forged entry never keeps
   an item from its own wake. An item whose nonce is not written yet

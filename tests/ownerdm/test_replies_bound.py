@@ -168,6 +168,26 @@ class StillWorks(_B):
         self.assert_refused_here(CH2)
         self.assertEqual(len(self.sends(CH)), 1)
 
+    def test_outdated_prompt_tells_the_owners_once_a_day(self):
+        """A worker prompt from before reply nonces: its replies are all
+        refused. After 3 within an hour the owners are DMed (once a
+        day) and bin/doctor.py's marker is written; a reply with its
+        nonce clears the marker."""
+        items = [self.stranger_mention() for _ in range(5)]
+        for m in items[:2]:
+            self.outbox(self.reply(m, "hi", reply_nonce=None))
+        self.assertFalse(os.path.exists(self.mod.STALE_PROMPT_FILE))
+        for m in items[2:4]:
+            self.outbox(self.reply(m, "hi", reply_nonce=None))
+        dms = [d for p, d in self.mod.api.posts
+               if d.get("content") == self.mod.STALE_PROMPT_DM]
+        self.assertEqual(len(dms), 2)                  # each owner, once
+        self.assertTrue(os.path.exists(self.mod.STALE_PROMPT_FILE))
+        self.assertIn("WORKER PROMPT OUT OF DATE", self.out)
+        self.outbox(self.reply(items[4], "hi"))         # current prompt
+        self.assertEqual(len(self.sends(CH)), 1)
+        self.assertFalse(os.path.exists(self.mod.STALE_PROMPT_FILE))
+
     def test_retry_and_restart_keep_the_nonce(self):
         s = self.stranger_mention()
         real = self.mod.api_post

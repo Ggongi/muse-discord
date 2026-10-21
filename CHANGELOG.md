@@ -77,7 +77,9 @@ Changed:
   each item's `reply_nonce`, and the monitor refuses every reply
   without it (they wait in `reply_outbox.rejected.json`, and the
   messages stay queued for the next run). Owner commands also need
-  the new prompt (`--for` and `--nonce` on every call).
+  the new prompt (`--for` and `--nonce` on every call). If it is
+  missed, the bot DMs you (at most once a day) that the worker prompt
+  is out of date and how to fix it, and `bin/doctor.py` reports it.
 - Restart the monitor if your update path does not (UPDATING.md).
   Until a monitor that writes `item_nonces.json` and
   `owner_items.json` runs, owner commands get a reply but no action.

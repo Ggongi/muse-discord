@@ -32,6 +32,7 @@ directory.json
 owner_dm_nonces.json
 owner_items.json
 item_nonces.json
+prompt_outdated.json
 nl_journal.json
 watches.json
 watches.json.bad-*

@@ -6231,6 +6231,57 @@ def hold_released_ok(state, item):
         and str(rec["qid"]) == str(_answered_id(state, item))
 
 
+# An outdated worker prompt (from before reply nonces) writes outbox
+# items without reply_nonce, every one of which is refused: the bot goes
+# silent. STALE_PROMPT_HITS such refusals within STALE_PROMPT_WINDOW
+# mark it (prompt_outdated.json, for bin/doctor.py) and DM the owners
+# once a day; an outbox item that carries its reply_nonce clears it.
+MISSING_REPLY_NONCE = "no reply_nonce"
+STALE_PROMPT_FILE = os.path.join(BASE_DIR, "prompt_outdated.json")
+STALE_PROMPT_HITS = 3
+STALE_PROMPT_WINDOW = 3600
+STALE_PROMPT_DM = ("Your Muse's worker prompt is out of date, so I can't "
+                   "send replies. Ask your Muse: 'Update muse-discord by "
+                   "following UPDATING.md' (it re-renders the prompt).")
+
+
+def note_reply_nonce(state, refusal):
+    """After own_channel_problem: count refusals for a missing
+    reply_nonce (see STALE_PROMPT_HITS); a passing item clears them."""
+    now = time.time()
+    if refusal is None:
+        if state.pop("stale_prompt_hits", None) is not None \
+                or os.path.exists(STALE_PROMPT_FILE):
+            try:
+                os.remove(STALE_PROMPT_FILE)
+            except OSError:
+                pass
+        return
+    if MISSING_REPLY_NONCE not in refusal:
+        return
+    hits = [t for t in state.get("stale_prompt_hits") or []
+            if isinstance(t, (int, float)) and now - t < STALE_PROMPT_WINDOW]
+    hits.append(now)
+    state["stale_prompt_hits"] = hits[-STALE_PROMPT_HITS:]
+    if len(hits) < STALE_PROMPT_HITS:
+        return
+    if not os.path.exists(STALE_PROMPT_FILE):
+        print("WORKER PROMPT OUT OF DATE: outbox items carry no "
+              "reply_nonce; re-render the worker prompt (UPDATING.md).",
+              flush=True)
+        try:
+            atomic_write(STALE_PROMPT_FILE, {"since": now,
+                                             "refused": len(hits)})
+        except OSError:
+            pass
+    day = time.strftime("%Y-%m-%d")
+    if state.get("stale_prompt_alert") != day:
+        state["stale_prompt_alert"] = day
+        for uid in sorted(OWNER_USER_IDS):
+            dm_owner(uid, {"content": STALE_PROMPT_DM,
+                           "allowed_mentions": {"parse": []}})
+
+
 def bound_elsewhere(state, item):
     """True for an outbox item whose own binder has checked it in full,
     so own_channel_problem leaves it alone: a held reply an owner chose
@@ -6267,6 +6318,9 @@ def own_channel_problem(state, item, index):
     if not want:
         return f"{t}: no live reply_nonce yet (its next wake gets one)"
     got = item.get(REPLY_NONCE_FIELD)
+    if got is None:
+        return (f"{t}: {MISSING_REPLY_NONCE} (copy the item's "
+                f"{REPLY_NONCE_FIELD} from the wake payload)")
     if not isinstance(got, str) or not hmac.compare_digest(
             str(want).encode(), got.encode("utf-8", "replace")):
         return (f"{t}: bad reply_nonce (missing or wrong: copy the item's "
@@ -6351,6 +6405,8 @@ def process_outbox(state):
         # Then: it answers an open queue item it was handed (its
         # reply_nonce), in that item's channel; a fire's answer too.
         stray = own_channel_problem(state, item, index)
+        if not bound_elsewhere(state, item):
+            note_reply_nonce(state, stray)
         if stray:
             print(f"Refused outbox item for {item.get('channel_name') or '?'}"
                   f": {stray} (set aside in "
