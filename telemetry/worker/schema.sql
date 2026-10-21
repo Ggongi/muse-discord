@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS reports (
   install_id       TEXT    NOT NULL,  -- random uuid4 made by the install
   day              TEXT    NOT NULL,  -- the UTC day counted, YYYY-MM-DD
   version          TEXT    NOT NULL,  -- vX.Y.Z, unreleased or unknown
+  ahead            INTEGER NOT NULL DEFAULT 0,  -- commits past that release
+  modified         INTEGER NOT NULL DEFAULT 0,  -- 1 = code edited locally
   python           TEXT    NOT NULL,  -- 3.N
   os               TEXT    NOT NULL,  -- linux, darwin, windows, ...
   servers          INTEGER NOT NULL,

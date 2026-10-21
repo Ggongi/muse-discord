@@ -35,7 +35,8 @@ async function readBody(request) {
 }
 
 const COLUMNS = [
-  "install_id", "day", "version", "python", "os", "servers",
+  "install_id", "day", "version", "ahead", "modified", "python", "os",
+  "servers",
   "members_bucket", "messages_seen", "queued", "replies_sent",
   "quarantined", "wakes", "latency_p50", "latency_p90", "media_sent",
   "restarts", "refusals", "settings_changes", "presets_applied", "crashes",
@@ -54,8 +55,11 @@ export function upsertSql() {
 }
 
 export function rowValues(report) {
-  return COLUMNS.map((c) => (OBJECT_COLUMNS.has(c)
-    ? JSON.stringify(report[c]) : report[c]));
+  return COLUMNS.map((c) => {
+    if (OBJECT_COLUMNS.has(c)) return JSON.stringify(report[c]);
+    if (c === "modified") return report[c] ? 1 : 0;
+    return report[c];
+  });
 }
 
 async function handleReport(request, env, now) {
