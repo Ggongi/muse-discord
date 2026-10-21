@@ -346,8 +346,7 @@ follow it."
 
 Tell the owner, in one line: muse-discord sends its maintainer
 anonymous daily usage counts (no names, ids or messages; README,
-"Privacy and usage stats"; the bot DMs them about it once, a day
-before the first report), and `python3 bin/telemetry.py off` (or
+"Privacy and usage stats"), and `python3 bin/telemetry.py off` (or
 `telemetry: usage_stats: off` in config.yaml) turns them off.
 
 ## Changing settings later

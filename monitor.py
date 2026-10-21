@@ -7156,9 +7156,7 @@ def main():
         except Exception as e:
             print(f"Cleanup error: {e}", flush=True)
 
-        TM.tick(settings, GUILDS, _MEMBER_COUNTS,  # never raises
-                lambda text: bool(OWNER_USER_IDS) and not rest_backing_off()
-                and notify_owners(text))
+        TM.tick(settings, GUILDS, _MEMBER_COUNTS)  # never raises
         # Event-driven wait: a gateway MESSAGE_CREATE wakes the loop at
         # once. Otherwise it idles in ticks of at most 2s, shorter while
         # REST slices are due (none while they are behind), a burst is
