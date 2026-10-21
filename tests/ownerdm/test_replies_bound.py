@@ -157,10 +157,10 @@ class StillWorks(_B):
             stat.S_IMODE(os.stat(self.mod.ITEM_NONCES_FILE).st_mode), 0o600)
         with open(self.mod.QUEUE_FILE) as f:
             self.assertNotIn(data[s["id"]], f.read())
-        # Its own nonce in the text: blanked before it is posted.
-        self.outbox(self.reply(s, f"my nonce is {data[s['id']]}"))
+        # A nonce-shaped string that is no live nonce: blanked.
+        self.outbox(self.reply(s, "a hash: " + "ab" * 16))
         self.assertEqual([x["content"] for x in self.sends(CH)],
-                         ["my nonce is (redacted)"])
+                         ["a hash: (redacted)"])
         with open(self.mod.ITEM_NONCES_FILE) as f:
             self.assertNotIn(s["id"], json.load(f))      # spent
         # A retry of the same answer (its item settled): refused.

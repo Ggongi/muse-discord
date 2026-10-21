@@ -41,8 +41,16 @@ Fixed (security):
   arrive with it wait a few seconds for the next run. A command of
   yours that may also set web watches gets both capabilities in its
   one run.
-- Text the bot sends never carries a nonce-shaped string (32 hex
-  digits): blanked as a backstop.
+- Nothing the bot sends carries a secret. Every send (replies, reminders,
+  owner DMs and notices, edits, uploads, button responses, and the
+  Discord tool's posts) is checked first: the bot token, any of the
+  bot's live private codes, or anything shaped like a Discord token
+  drops the message, and you get a DM about it, at most once a day. Any
+  other 32-hex-digit string is blanked. On Muse every session runs as
+  the same user, so a reply session tricked into using its shell could
+  read those files; this keeps it from posting them. README's Security
+  section and PROTOCOL.md's security note now say plainly what the bot
+  enforces and what is up to the reply session's instructions.
 
 Changed:
 

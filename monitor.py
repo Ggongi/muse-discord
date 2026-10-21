@@ -38,6 +38,7 @@ MUSE_DISCORD_CONFIG env var), plus config.discord.yaml (changes made
 from Discord), both read through muse_settings.py. See
 config.example.yaml for the schema; an old-layout file still works.
 """
+import base64
 import contextlib
 import fcntl
 import hashlib
@@ -1028,7 +1029,139 @@ def api_get(path):
     return _api_call(_do)
 
 
+# ---------------------------------------------------------------------------
+# Secrets never leave in anything the bot sends. On the real platform
+# every session (workers included) runs as the same OS user, so a worker
+# that follows an injection into its shell can read the token file and
+# every nonce file; the nonces bind what it writes to the outbox, but
+# only this filter keeps a secret it read from being posted. Before any
+# send to Discord (replies, fires, owner DMs and notices, edits,
+# interaction responses, uploads), the payload is checked: the bot token
+# itself, any nonce the monitor holds live, or anything shaped like a
+# Discord token (three base64url segments, the first decoding to a
+# snowflake) drops the send (SecretBlocked), logged without the value,
+# and the owners are DMed about it once a day. Any other 32-hex-digit
+# string (a nonce's shape) in visible text is blanked.
+# ---------------------------------------------------------------------------
+class SecretBlocked(Exception):
+    """A send held back because it carried a secret (never retried)."""
+
+
+_TOKEN_SHAPE = re.compile(
+    r"(?<![A-Za-z0-9_-])([A-Za-z0-9_-]{17,40})\.([A-Za-z0-9_-]{4,10})"
+    r"\.([A-Za-z0-9_-]{20,})")
+_SECRET_ALERT = {"day": None, "busy": False}
+# Keys whose values are ids or Discord's own send nonce, not text.
+_NOT_TEXT = {"nonce", "custom_id", "recipient_id", "message_id",
+             "channel_id", "guild_id", "id", "url"}
+
+
+def _token_shaped(text):
+    for m in _TOKEN_SHAPE.finditer(text):
+        seg = m.group(1)
+        try:
+            dec = base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
+        except (ValueError, TypeError):
+            continue
+        if re.fullmatch(rb"[1-9][0-9]{16,19}", dec):
+            return True
+    return False
+
+
+def _live_nonces():
+    """Every nonce the monitor holds live (what its private files hold)."""
+    out = set()
+
+    def walk(v, key=None):
+        if isinstance(v, str):
+            if key == "nonce" or (re.fullmatch(r"[0-9a-f]{16,}", v)
+                                  and not v.isdigit()):
+                out.add(v)
+        elif isinstance(v, dict):
+            for k, x in v.items():
+                walk(x, k)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x, key)
+    for cache in ("_NL_NONCES_WRITTEN", "_ITEM_NONCES_WRITTEN",
+                  "_OWNER_ITEMS_WRITTEN", "_WEB_NONCES_WRITTEN",
+                  "_WEB_DUE_WRITTEN"):
+        walk((globals().get(cache) or {}).get("body"))
+    return out
+
+
+def secret_in(text):
+    """What secret text carries ("the bot token", ...), or None."""
+    if not isinstance(text, str) or not text:
+        return None
+    if TOKEN and len(TOKEN) >= 20 and TOKEN in text:
+        return "the bot token"
+    if any(n in text for n in _live_nonces()):
+        return "a live nonce"
+    if _token_shaped(text):
+        return "a Discord token"
+    return None
+
+
+def _payload_strings(v, key=None):
+    if isinstance(v, str):
+        if key != "nonce":
+            yield v
+    elif isinstance(v, dict):
+        for k, x in v.items():
+            yield from _payload_strings(x, k)
+    elif isinstance(v, list):
+        for x in v:
+            yield from _payload_strings(x, key)
+
+
+def _blank_hex(v, key=None):
+    if isinstance(v, str):
+        return v if key in _NOT_TEXT else scrub_nonce_text(v)
+    if isinstance(v, dict):
+        return {k: _blank_hex(x, k) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_blank_hex(x, key) for x in v]
+    return v
+
+
+def guard_outgoing(data, where):
+    """data with nonce-shaped strings blanked in its text; raises
+    SecretBlocked (and logs, and alerts the owners once a day) when it
+    carries a secret. Every send helper calls it."""
+    for text in _payload_strings(data):
+        what = secret_in(text)
+        if what:
+            print(f"Blocked a send to {where}: it contained {what}; "
+                  f"nothing was sent.", flush=True)
+            _secret_alert(where)
+            raise SecretBlocked(f"blocked: it contained {what}")
+    return _blank_hex(data)
+
+
+def _secret_alert(where):
+    """DM the owners about a blocked send, once a day (never raises)."""
+    day = time.strftime("%Y-%m-%d")
+    if _SECRET_ALERT["day"] == day or _SECRET_ALERT["busy"]:
+        return
+    _SECRET_ALERT.update(day=day, busy=True)
+    try:
+        for uid in sorted(OWNER_USER_IDS):
+            dm_owner(uid, {"content": (
+                "I blocked a message that contained a secret (the bot "
+                "token or one of my private codes), so nothing was sent. "
+                "Someone may have tried to make me leak it; monitor.log "
+                "says where. I tell you about this at most once a day."),
+                "allowed_mentions": {"parse": []}})
+    except Exception as e:
+        print(f"Could not alert the owners about a blocked send: {e}",
+              flush=True)
+    finally:
+        _SECRET_ALERT["busy"] = False
+
+
 def api_post(path, data):
+    data = guard_outgoing(data, path)
     body = json.dumps(data).encode()
     req = urllib.request.Request(API + path, data=body, headers=headers())
 
@@ -1769,6 +1902,7 @@ def dm_owner(uid, payload):
     """Send one message payload (content, components, ...) to one
     owner's DM channel. True when it landed. Never raises."""
     try:
+        payload = guard_outgoing(payload, "an owner's DM")
         c = api_post("/users/@me/channels", {"recipient_id": uid})
         api_post(f"/channels/{c['id']}/messages", payload)
         return True
@@ -2295,6 +2429,7 @@ def interaction_callback(ix, response):
     rate-limit backoff, and it answers 204 with no body."""
     path = (f"/interactions/{urllib.parse.quote(str(ix['id']), safe='')}/"
             f"{urllib.parse.quote(str(ix['token']), safe='')}/callback")
+    response = guard_outgoing(response, "an interaction response")
     req = urllib.request.Request(
         API + path, data=json.dumps(response).encode(),
         headers={"User-Agent": "DiscordBot (muse-discord, 1.0)",
@@ -3743,6 +3878,7 @@ COMMAND_RETRY_SECS = 60
 
 
 def api_patch(path, data):
+    data = guard_outgoing(data, path)
     body = json.dumps(data).encode()
     req = urllib.request.Request(API + path, data=body, headers=headers(),
                                  method="PATCH")
@@ -4240,6 +4376,7 @@ def reply_reference(message_id):
 
 def send_reply(channel_id, text, reply_to=None, nonce=None,
                components=None, mentions=None):
+    text = guard_outgoing({"content": text}, channel_id)["content"]
     data = {"content": text,
             "allowed_mentions": mentions or SEND_ALLOWED_MENTIONS}
     if components:
@@ -4359,6 +4496,7 @@ def add_reaction(channel_id, message_id, emoji):
     reactions drafted by the worker via the outbox 'reactions' list."""
     encoded = urllib.parse.quote(emoji, safe="")  # "/" stays in the segment
     try:
+        guard_outgoing({"content": emoji}, channel_id)
         req = urllib.request.Request(
             API + f"/channels/{channel_id}/messages/{message_id}"
                  f"/reactions/{encoded}/@me",
@@ -4420,6 +4558,9 @@ def send_fragmented(channel_id, parts, reply_to=None, attachments=(),
     reply, and each part's nonce makes Discord return the parts that
     already landed instead of posting them again.
     """
+    # Every part checked before the first goes out: a secret in part 3
+    # never leaves parts 1 and 2 half-sent.
+    guard_outgoing({"content": list(parts)}, channel_id)
     last_idx = len(parts) - 1
     for i, part in enumerate(parts):
         if i > 0:
@@ -4447,6 +4588,7 @@ def send_reply_with_files(channel_id, text, files, reply_to=None,
     """Send a message with file attachments via multipart/form-data.
     files: list of (local_path, filename)."""
     boundary = "----MuseDiscord%d" % int(time.time() * 1000)
+    text = guard_outgoing({"content": text}, channel_id)["content"]
     payload = {"content": text,
                "allowed_mentions": mentions or SEND_ALLOWED_MENTIONS}
     if reply_to:
@@ -6225,8 +6367,8 @@ def process_outbox(state):
         # @everyone neutralization and link_mentions both lengthen text
         # normalize_parts already trimmed, and a part over the limit
         # would fail (400) on every retry.
-        parts = [scrub_nonce_text(link_mentions(
-            p, item.get("channel_id"), state))[:DISCORD_MAX_CHARS]
+        parts = [link_mentions(p, item.get("channel_id"),
+                               state)[:DISCORD_MAX_CHARS]
                  for p in normalize_parts(item)]
         # Worker-drafted emoji reactions: applied to the reply_to
         # message. A react-only item may carry no text.
@@ -6371,6 +6513,12 @@ def process_outbox(state):
                              time.time())
         except Exception as e:
             code = getattr(e, "code", None)
+            if isinstance(e, SecretBlocked):
+                # It carried a secret (guard_outgoing logged it and told
+                # the owners): never sent, never retried.
+                _settle(state, item, "skipped", str(e))
+                settled.append(item)
+                continue
             if code == 403:
                 # Permanent permission failure (the bot cannot post in
                 # that channel): drop it, don't retry forever.

@@ -54,6 +54,7 @@ MUSE_DISCORD_CONFIG), read through muse_settings.py so both config
 layouts work (old layout: the bot.token_env env var first, then
 bot.token_file, mode 600). The token is never printed.
 """
+import base64
 import hmac
 import json
 import mimetypes
@@ -201,11 +202,67 @@ def guard_target(cid):
 
 
 _NONCE_TEXT = re.compile(r"(?<![0-9A-Fa-f])[0-9a-f]{32}(?![0-9A-Fa-f])")
+_TOKEN_SHAPE = re.compile(
+    r"(?<![A-Za-z0-9_-])([A-Za-z0-9_-]{17,40})\.([A-Za-z0-9_-]{4,10})"
+    r"\.([A-Za-z0-9_-]{20,})")
+# The monitor's private files of live nonces (none may ever be posted).
+NONCE_FILES = ("owner_dm_nonces.json", "owner_items.json",
+               "item_nonces.json", "web_nonces.json",
+               "web_watches_due.json")
+
+
+def _live_nonces():
+    out = set()
+
+    def walk(v, key=None):
+        if isinstance(v, str):
+            if key == "nonce" or (re.fullmatch(r"[0-9a-f]{16,}", v)
+                                  and not v.isdigit()):
+                out.add(v)
+        elif isinstance(v, dict):
+            for k, x in v.items():
+                walk(x, k)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x, key)
+    here = os.path.dirname(OWNER_ITEMS_FILE)
+    for path in [OWNER_DM_NONCES_FILE, OWNER_ITEMS_FILE] + [
+            os.path.join(here, n) for n in NONCE_FILES]:
+        try:
+            with open(path) as f:
+                walk(json.load(f))
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def _token_shaped(text):
+    for m in _TOKEN_SHAPE.finditer(text):
+        seg = m.group(1)
+        try:
+            dec = base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
+        except (ValueError, TypeError):
+            continue
+        if re.fullmatch(rb"[1-9][0-9]{16,19}", dec):
+            return True
+    return False
 
 
 def scrub(text):
-    """Text with every 32-hex-digit string (a nonce's shape) blanked: a
-    backstop, so no nonce is ever posted."""
+    """Text to post: refused when it carries the bot token, a live nonce
+    or anything shaped like a Discord token (the value is never
+    printed); any other 32-hex-digit string (a nonce's shape) blanked.
+    The same filter as monitor.py's guard_outgoing."""
+    what = None
+    if TOKEN and len(TOKEN) >= 20 and TOKEN in text:
+        what = "the bot token"
+    elif any(n in text for n in _live_nonces()):
+        what = "a live nonce"
+    elif _token_shaped(text):
+        what = "a Discord token"
+    if what:
+        raise SystemExit(f"Refusing: the text contains {what}; nothing "
+                         f"was sent.")
     return _NONCE_TEXT.sub("(redacted)", text)
 
 
@@ -408,7 +465,7 @@ def cmd_thread(args):
     """
     forum_id, title, text = snowflake(args[0]), args[1], args[2]
     upload = generated_file(args[3]) if len(args) > 3 else None
-    payload = {"name": title,
+    payload = {"name": scrub(title),
                "message": {"content": scrub(text),
                            "allowed_mentions": ALLOWED_MENTIONS},
                "auto_archive_duration": 1440}

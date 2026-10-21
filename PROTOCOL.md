@@ -171,6 +171,16 @@ Monitor-side guarantees on send:
   item; leave it alone.
 - **403 drops**: a permanent permission failure drops the item and is
   recorded in the ledger as skipped.
+- **No secrets**: before any send to Discord (replies and their
+  parts, fires, owner DMs and notices, edits, uploads, interaction
+  responses), a payload carrying the bot token, any nonce the monitor
+  holds live, or anything shaped like a Discord token (three base64url
+  segments, the first decoding to a snowflake) is dropped: an outbox
+  item is settled as skipped (never retried, no part sent), the log
+  says where without the value, and the owners get a DM about it once
+  a day. Any other 32-hex-digit string (a nonce's shape) in the text
+  is blanked. `bin/discord-api.py` applies the same filter to `post`,
+  `edit` and `thread`.
 - **Secret phrases**: a reply containing a `privacy.never_share`
   phrase is not sent unless it goes to an owner in their own DM; it
   is held for the owners (see never_share holds).
@@ -329,8 +339,8 @@ answer an item its own run was handed, where that item was said:
 - A held reply an owner chose to send (never_share holds) is exempt:
   it was checked when first drafted, and the release is bound to the
   hold's own item and channel.
-- Text going out has every 32-hex-digit string (a nonce's shape)
-  blanked, as a backstop.
+- Nothing the bot sends may carry a secret (the outgoing secret
+  filter: Monitor-side guarantees on send).
 - To post somewhere else for an owner ("post this in
   #announcements"), the worker uses `bin/discord-api.py` (Owner
   commands) and answers the owner's item in its own channel.
@@ -1248,26 +1258,47 @@ usage stats"). The wake hook appends one line to `telemetry.wakes` per
 wake once `telemetry.json` exists; a runtime without the shipped hook
 may do the same, or not (wakes then count 0).
 
-Security: these rules hold for what reaches the monitor through the
-outbox and `bin/discord-api.py`. Every outbox item is bound to the run
-that was handed its item (Replies stay with their run), an owner's DM
-also to its owner-DM-only run (Owner DMs), and the tool to the owner's
-own run and words (Owner commands).
+Security: what the monitor enforces, and what it cannot.
 
-In production, the worker's tool limits are only as strong as its
-runtime makes them. The worker prompt says: the outbox append,
-`bin/discord-api.py` (per its rules), the persona file, and this run's
-own media files, never `reply_queue.json` (it holds every open item's
-text, other people's DMs and the owner's included). Unless the agent
-runtime enforces an allowlist like that (the e2e harness does, in
-`e2e/claude_worker.py`: Bash for those two tools only, Read for the
-persona and the current wake's media and generated files only), those
-limits are prompt-level, and a prompt-injected worker with a
-general-purpose shell or file access could read the queue, or any
-secret on disk: `item_nonces.json`, `owner_dm_nonces.json`,
-`owner_items.json`, `web_nonces.json`, `state.json`, the token file,
-or `reply_outbox.json` while another run's reply waits there with its
-nonces. Each of those secrets is only as safe as that boundary.
+- **Enforced by the monitor** (deterministic code that holds the
+  token): every outbox item is bound to the run that was handed its
+  item (Replies stay with their run), an owner's DM also to its
+  owner-DM-only run (Owner DMs), web watches to their nonce, and
+  `bin/discord-api.py` to the owner's own run and words (Owner
+  commands); quarantine holds suspicious messages before any worker
+  sees them; `never_share` holds replies; and the outgoing secret
+  filter checks everything the bot sends (replies, fires, owner DMs and
+  notices, edits, uploads, interaction responses, and the tool's posts
+  and edits): the bot token, any live nonce, or anything shaped like a
+  Discord token (three base64url segments, the first decoding to a
+  snowflake) drops the send, logs it without the value and DMs the
+  owners once a day; any other 32-hex-digit string is blanked.
+- **Prompt-only on the real platform**: the worker's tool limits. The
+  prompt allows the outbox append, `bin/discord-api.py` per its rules,
+  the persona file and the run's own media, never `reply_queue.json`
+  (every open item's text, other people's DMs and the owner's
+  included). On Muse every session (the main chat, hook workers,
+  scheduled runs) runs as the same OS user (root) on the same machine,
+  with no per-session tool restriction or sandbox. So a worker can
+  read the token file (`token_from`, default
+  `~/.config/muse-discord/bot_token`), every nonce file
+  (`item_nonces.json`, `owner_dm_nonces.json`, `owner_items.json`,
+  `web_nonces.json`, `web_watches_due.json`), `state.json`, the queue,
+  and the hook logs (`~/hooks/logs/*.jsonl` record wake payloads,
+  nonces included).
+- **Therefore** the nonces bind what a worker writes to the outbox and
+  passes to the tool, nothing more: a worker that follows an injection
+  into using its shell is out of the monitor's reach. It could read
+  other people's messages from the queue, or forge outbox items with
+  nonces it read. The secret filter still keeps the token and the
+  nonces themselves out of anything the bot posts; nothing keeps such
+  a worker from other actions on the machine.
+- **The e2e harness** enforces the allowlist that production cannot
+  yet: `e2e/claude_worker.py` runs the worker with Bash for the outbox
+  append and the tool only (no pipes, redirections or expansions) and
+  Read for the persona and the current wake's media and generated
+  files only. A runtime that can enforce the same per-session limits
+  turns the prompt-only rules above into real ones.
 
 ### never_share holds
 
