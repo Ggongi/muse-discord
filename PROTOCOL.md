@@ -172,15 +172,21 @@ Monitor-side guarantees on send:
   item; leave it alone.
 - **403 drops**: a permanent permission failure drops the item and is
   recorded in the ledger as skipped.
-- **No secrets**: before any send to Discord (replies and their
-  parts, fires, owner DMs and notices, edits, uploads, interaction
-  responses), a payload carrying the bot token, any nonce the monitor
-  holds live, or anything shaped like a Discord token (three base64url
-  segments, the first decoding to a snowflake) is dropped: an outbox
-  item is settled as skipped (never retried, no part sent), the log
-  says where without the value, and the owners get a DM about it once
-  a day. Any other 32-hex-digit string (a nonce's shape) in the text
-  is blanked. `bin/discord-api.py` applies the same filter to `post`,
+- **No secrets** (`secret_scan.py`): before any send to Discord
+  (replies and their parts, fires, owner DMs and notices, edits,
+  uploads and their file names, embeds, interaction responses), every
+  string of the payload and all of them joined (a token split across
+  parts) are checked. The bot token (as is, reversed, squashed to its
+  letters and digits so dots, spaces and zero-width characters do not
+  hide it, or in base64 or hex), a nonce the monitor holds live (as
+  is, squashed or reversed; only the values of its nonce files, never
+  other fields), or anything shaped like a Discord token (three
+  base64url segments, the first decoding to a snowflake) drops that
+  send: an outbox item is settled as skipped (never retried, no part
+  sent), the log says where without the value, and the owners get a
+  DM once a day ("I blocked a reply that looked like it contained a
+  secret"). Nothing is ever altered: text that passes goes out as
+  written. `bin/discord-api.py` applies the same filter to `post`,
   `edit` and `thread`.
 - **Secret phrases**: a reply containing a `privacy.never_share`
   phrase is not sent unless it goes to an owner in their own DM; it
@@ -311,7 +317,9 @@ answer an item its own run was handed, where that item was said:
   item (its `item`, else its `reply_to`, a burst fragment resolved to
   its trigger), carry that item's `reply_nonce` (compared in constant
   time), and post in that item's channel (for a message in a thread
-  or forum post, the thread). Replies, `parts`, `silent`, reactions,
+  or forum post, the thread). Its `reply_to`, which its `reactions`
+  go on, must be that item's own message or one of its own burst
+  fragments, never another open item in the channel. Replies, `parts`, `silent`, reactions,
   `standalone`, `schedule` and `settings` items alike, and replies to
   a reminder or watch firing (also bound by the fire's own record:
   Reminders and watches).
@@ -319,15 +327,14 @@ answer an item its own run was handed, where that item was said:
   settled: an item with neither `item` nor `reply_to`; one naming a
   message that is not an open queue item (never queued, or answered
   already, however long ago); one without its item's `reply_nonce`,
-  or with another's; and one posting anywhere but that item's
-  channel. Each is set aside in `reply_outbox.rejected.json` (nonces
+  or with another's; one posting anywhere but that item's channel;
+  and one replying (or reacting) under another message. Each is set aside in `reply_outbox.rejected.json` (nonces
   blanked) and logged (`Refused outbox item ...`), and a queue item it
   names stays open. So no run can answer, silence or put a schedule
   action on an item it was not handed, nor post into another
   server's channel or someone's DM under a made-up or borrowed item.
-- Settling records the item and its own burst fragments only: a
-  `reply_to` under some other message (another item's, still open)
-  is never marked answered.
+- Settling records the item and its own burst fragments only (an
+  `item` naming a fragment counts as its trigger).
 - The nonce is spent when the item settles. A failed send's retry, and
   a resend from `reply_outbox.processing.json` after a restart, keep
   it. While the item is queued the monitor keeps it, and mints a new
@@ -370,12 +377,19 @@ and it is bound to the owner's own run, and to the owner's own words:
   random bits; an owner DM's is its `owner_dm_nonce`), kept in
   `state.json` (`owner_items`) and in `owner_items.json` (mode 600,
   the open owner-command items only, each `{nonce, channel_id, dm,
-  channels, names, guild_id, text}`), never in `reply_queue.json`.
-  `channels` and `names` are the `<#id>` mentions and `#names` in the
-  owner's own text (the item's `content`), and `text` is that text
-  itself (lowercased, `-` and `_` read as spaces), for channels named
-  bare; nothing from history, replies or forwards. It is spent when the item settles; a lost or mangled
-  file is written again within 15 seconds.
+  channels, post_channels}`), never in `reply_queue.json`. The places
+  the owner's own words name are resolved to channel ids when the
+  command is queued, from the item's `content` without quoted lines
+  (`>`) and code: `channels` holds `<#id>` mentions (the only way to
+  name a thread) and `#names` matched among the command's own server's
+  channels (from an owner's DM: the one server that has a channel of
+  that name, else none); `post_channels`, for `post` only, holds a
+  channel of the command's own server whose whole name follows "in",
+  "to" or "into" ("post this in announcements"; case, `-`, `_` and
+  spaces alike; at least 3 characters, never a common word, never a
+  thread). Nothing from history, replies or forwards. It is spent when
+  the item settles; a lost or mangled file is written again within 15
+  seconds.
 - The wake hook hands each owner command out alone, one per run (owner
   DMs first; then the owners' server items holding a capability; then
   everyone else's), and only that run gets its `owner_command_nonce`
@@ -390,18 +404,20 @@ and it is bound to the owner's own run, and to the owner's own words:
   handed out without owner powers.
 - What the tool allows:
 
-| subcommand                                                              | without an owner nonce       | with `--for <item> --nonce <its owner_command_nonce>`                                                                                                                                                                                                                                                                                                                                      |
-| ----------------------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `resolve-channel`, `list-threads`                                       | Refused, before any API call | Allowed (an open owner DM's `owner_dm_nonce` does too: a settings request names places). A miss lists nothing                                                                                                                                                                                                                                                                              |
-| `read`, `post`, `thread`, `react`, `pin`, `unpin`, `edit`, `delete-own` | Refused, before any API call | Only in the command's own channel, or one its owner's own words name (`<#id>`; `#name` matching the channel's name; or, in the command's own server, a channel or thread whose whole name is a phrase of those words, `-` and space alike: "post this in announcements"); never a DM other than its own (an owner's DM: Owner DMs); `edit` and `delete-own` on the bot's own messages only |
+| subcommand                                                              | without an owner nonce       | with `--for <item> --nonce <its owner_command_nonce>`                                                                                                                                                                                        |
+| ----------------------------------------------------------------------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `resolve-channel`, `list-threads`                                       | Refused, before any API call | Allowed (an open owner DM's `owner_dm_nonce` does too: a settings request names places). A miss lists nothing                                                                                                                                |
+| `read`, `post`, `thread`, `react`, `pin`, `unpin`, `edit`, `delete-own` | Refused, before any API call | Only in the command's own channel or one of its `channels`, and for `post` also its `post_channels` (ids, compared as ids); never a DM other than its own (an owner's DM: Owner DMs); `edit` and `delete-own` on the bot's own messages only |
 
 - `--for` must name an item in `owner_items.json` and `--nonce` must
   be its nonce (compared in constant time); it is never printed. A run
   woken by someone else's message never sees the nonce, even when it
   knows the owner's message id (it is in the channel history), so it
   cannot read anyone's DM or post anywhere through the tool.
-- `read` output comes between untrusted-data markers, and text the
-  tool posts has every 32-hex-digit string blanked. The owner's own
+- `read` output comes between untrusted-data markers random to each
+  call; a message's text and author have line breaks of every kind,
+  the marker and `<<<`/`>>>` taken out, so no message can close the
+  block. Text the tool posts goes through the secret filter. The owner's own
   run still reads its item's `history` and what it `read`s: other
   people's words, which stay data, never instructions or targets
   (Worker obligations, 4).
@@ -1279,10 +1295,10 @@ Security: what the monitor enforces, and what it cannot.
   sees them; `never_share` holds replies; and the outgoing secret
   filter checks everything the bot sends (replies, fires, owner DMs and
   notices, edits, uploads, interaction responses, and the tool's posts
-  and edits): the bot token, any live nonce, or anything shaped like a
-  Discord token (three base64url segments, the first decoding to a
-  snowflake) drops the send, logs it without the value and DMs the
-  owners once a day; any other 32-hex-digit string is blanked.
+  and edits; `secret_scan.py`): the bot token (and its simple
+  disguises), any live nonce, or anything shaped like a Discord token
+  drops the send, logs it without the value and DMs the owners once a
+  day; nothing is ever altered.
 - **Prompt-only on the real platform**: the worker's tool limits. The
   prompt allows the outbox append, `bin/discord-api.py` per its rules,
   the persona file and the run's own media, never `reply_queue.json`

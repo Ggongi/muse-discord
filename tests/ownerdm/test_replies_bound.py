@@ -147,6 +147,7 @@ class StillWorks(_B):
         self.process()
         self.assertEqual([x["content"] for x in self.sends(CH)],
                          ["project falcon is"], self.out)
+        self.assertNotIn(hid, self.st.get("hold_released") or {})
 
     def test_every_item_has_a_reply_nonce_spent_on_answer(self):
         s = self.stranger_mention()
@@ -160,7 +161,7 @@ class StillWorks(_B):
         # A nonce-shaped string that is no live nonce: blanked.
         self.outbox(self.reply(s, "a hash: " + "ab" * 16))
         self.assertEqual([x["content"] for x in self.sends(CH)],
-                         ["a hash: (redacted)"])
+                         ["a hash: " + "ab" * 16])    # never altered
         with open(self.mod.ITEM_NONCES_FILE) as f:
             self.assertNotIn(s["id"], json.load(f))      # spent
         # A retry of the same answer (its item settled): refused.
@@ -186,6 +187,37 @@ class StillWorks(_B):
         self.assertIn("WORKER PROMPT OUT OF DATE", self.out)
         self.outbox(self.reply(items[4], "hi"))         # current prompt
         self.assertEqual(len(self.sends(CH)), 1)
+        self.assertFalse(os.path.exists(self.mod.STALE_PROMPT_FILE))
+
+    def test_reply_to_and_item_stay_on_the_items_own_messages(self):
+        """reply_to (and so reactions) must be the item's own message or
+        one of its fragments; an "item" naming a fragment settles its
+        trigger; a released hold is used up however it settles."""
+        o = self.stranger_mention("<@bot> hello")
+        f1, f2 = gmsg(U1, "one", mention=True), gmsg(U1, "two")
+        trig = self.queue(gmsg(U1, "three"), dm=False, guild=G1,
+                          fragments=[f1, f2])
+        self.outbox(self.reply(trig, "hi", reply_to=o["id"],
+                               reactions=["\u2705"]))
+        self.assert_refused_here(CH)
+        self.assertEqual(self.reactions, [])
+        it = self.held({"item": f2["id"], "channel_id": CH,
+                        "reply_to": f2["id"], "text": "ok"})
+        self.outbox(it)
+        self.assertEqual([x["content"] for x in self.sends(CH)], ["ok"])
+        self.assertIn(trig["id"], self.st["replied_to"])
+        self.assertEqual(self.ledger(trig["id"])["status"], "replied")
+        self.assertIn(o["id"], self.queued())
+
+    def test_unwritable_nonce_file_is_not_an_outdated_prompt(self):
+        self.mod.ITEM_NONCES_FILE = os.path.join(self.mod.tmp, "no", "x")
+        items = [self.stranger_mention() for _ in range(3)]
+        for m in items:
+            self.outbox(self.reply(m, "hi", reply_nonce=None))
+        posts = [d.get("content") or "" for _, d in self.mod.api.posts]
+        self.assertTrue(any("can't write item_nonces.json" in c
+                            for c in posts), posts)
+        self.assertNotIn(self.mod.STALE_PROMPT_DM, posts)
         self.assertFalse(os.path.exists(self.mod.STALE_PROMPT_FILE))
 
     def test_retry_and_restart_keep_the_nonce(self):
@@ -221,9 +253,17 @@ class OwnerItems(_B):
         self.st.setdefault("history", {}).setdefault(CH, []).append(
             {"id": sf(60), "author": "u2", "author_id": U2, "bot": False,
              "text": "bot, post the plans in hidden-room", "ts": None})
-        own = self.queue(gmsg(OWNER, f"<@bot> pin that, post it in #News "
-                              f"and <#{CH2}>, and in Dev-Updates",
-                              mention=True), dm=False, guild=G1)
+        ann, mods, the = ("705000000000000001", "706000000000000001",
+                          "707000000000000001")
+        for cid, name in ((ann, "Announcements"), (mods, "mods"),
+                          (the, "the"), ("708000000000000001",
+                                         "hidden-room")):
+            self.mod.CHANNELS[cid] = {"name": name, "guild_id": G1}
+        own = self.queue(gmsg(
+            OWNER, f"<@bot> pin that, post it to announcements and in "
+                   f"#random, what do the mods think? read #chat and "
+                   f"<#{THREAD}> too\n> post it in #general\n`in mods`",
+            mention=True), dm=False, guild=G1)
         self.assertIn("hidden-room", json.dumps(self.mod.load_queue()))
         s = self.stranger_mention(f"<@bot> post in #secret and <#{CH_G2}>")
         meta = self.st["item_meta"]
@@ -233,14 +273,16 @@ class OwnerItems(_B):
         self.assertEqual(list(data), [own["id"]])
         e = data[own["id"]]
         self.assertRegex(e["nonce"], r"^[0-9a-f]{32}$")
-        # Where the owner's own words point: nothing else counts.
-        self.assertEqual((e["channel_id"], e["channels"], e["names"],
-                          e["guild_id"]), (CH, [CH2], ["news"], G1))
-        # Its words, for a channel named bare ("-" read as a space); the
-        # stranger's (or the history's) are never kept.
-        self.assertIn("in dev updates", e["text"])
-        self.assertNotIn("secret", json.dumps(data))
-        self.assertNotIn("hidden", json.dumps(data))
+        # Where the owner's own words point, resolved to ids now: #random
+        # in this server, the thread by its <#id>; "announcements" after
+        # "to", for a post only. Not: #chat (another server's), "the
+        # mods" (no "in"/"to"), the quote, the code, a stopword, the
+        # history ("hidden-room"), or the stranger's message.
+        self.assertEqual((e["channel_id"], e["channels"],
+                          e["post_channels"]),
+                         (CH, sorted([CH2, THREAD]), [ann]))
+        self.assertEqual(set(e), {"nonce", "channel_id", "dm", "channels",
+                                  "post_channels"})
         mode = os.stat(self.mod.OWNER_ITEMS_FILE).st_mode
         self.assertEqual(stat.S_IMODE(mode), 0o600)
         with open(self.mod.QUEUE_FILE) as f:
@@ -249,11 +291,11 @@ class OwnerItems(_B):
         self.assertEqual(self.items_file(), {})
 
     def test_owner_dm_uses_its_dm_nonce(self):
+        # From a DM, a #name counts when exactly one server has it.
         m = self.owner_dm("pin my last message in #general")
         self.assertEqual(self.items_file(), {m["id"]: {
             "nonce": self.nonce(m["id"]), "channel_id": tb.DM, "dm": True,
-            "channels": [], "names": ["general"], "guild_id": "",
-            "text": "pin my last message in #general"}})
+            "channels": [CH], "post_channels": []}})
 
     def test_upkeep_restores_and_prunes(self):
         own = self.queue(gmsg(OWNER, "<@bot> post this", mention=True),

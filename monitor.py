@@ -38,7 +38,6 @@ MUSE_DISCORD_CONFIG env var), plus config.discord.yaml (changes made
 from Discord), both read through muse_settings.py. See
 config.example.yaml for the schema; an old-layout file still works.
 """
-import base64
 import contextlib
 import fcntl
 import hashlib
@@ -172,6 +171,23 @@ def _import_watches():
 
 
 W = _import_watches()
+
+
+def _import_scan():
+    """secret_scan.py (the outgoing secret filter) from this package."""
+    here = os.path.join(BASE_DIR, "secret_scan.py")
+    cached = sys.modules.get("secret_scan")
+    if cached is not None and os.path.abspath(
+            getattr(cached, "__file__", "") or "") == here:
+        return cached
+    spec = importlib.util.spec_from_file_location("secret_scan", here)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["secret_scan"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+SCAN = _import_scan()
 
 # Anonymous daily usage counts (telemetry.py; README, "Privacy and usage
 # stats"). Off with telemetry.usage_stats: off or MUSE_DISCORD_TELEMETRY=off.
@@ -1047,65 +1063,43 @@ class SecretBlocked(Exception):
     """A send held back because it carried a secret (never retried)."""
 
 
-_TOKEN_SHAPE = re.compile(
-    r"(?<![A-Za-z0-9_-])([A-Za-z0-9_-]{17,40})\.([A-Za-z0-9_-]{4,10})"
-    r"\.([A-Za-z0-9_-]{20,})")
 _SECRET_ALERT = {"day": None, "busy": False}
-# Keys whose values are ids or Discord's own send nonce, not text.
-_NOT_TEXT = {"nonce", "custom_id", "recipient_id", "message_id",
-             "channel_id", "guild_id", "id", "url"}
-
-
-def _token_shaped(text):
-    for m in _TOKEN_SHAPE.finditer(text):
-        seg = m.group(1)
-        try:
-            dec = base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
-        except (ValueError, TypeError):
-            continue
-        if re.fullmatch(rb"[1-9][0-9]{16,19}", dec):
-            return True
-    return False
 
 
 def _live_nonces():
-    """Every nonce the monitor holds live (what its private files hold)."""
+    """Every nonce the monitor holds live: the values of its flat nonce
+    maps, and the "nonce" fields of owner_items and the web checks
+    (never other fields, such as a check's public group tag)."""
     out = set()
+    for cache in ("_NL_NONCES_WRITTEN", "_ITEM_NONCES_WRITTEN",
+                  "_WEB_NONCES_WRITTEN"):
+        body = (globals().get(cache) or {}).get("body")
+        if isinstance(body, dict):
+            out |= {v for v in body.values() if isinstance(v, str) and v}
 
-    def walk(v, key=None):
-        if isinstance(v, str):
-            if key == "nonce" or (re.fullmatch(r"[0-9a-f]{16,}", v)
-                                  and not v.isdigit()):
-                out.add(v)
-        elif isinstance(v, dict):
+    def walk(v):
+        if isinstance(v, dict):
             for k, x in v.items():
-                walk(x, k)
+                if k == "nonce" and isinstance(x, str) and x:
+                    out.add(x)
+                else:
+                    walk(x)
         elif isinstance(v, list):
             for x in v:
-                walk(x, key)
-    for cache in ("_NL_NONCES_WRITTEN", "_ITEM_NONCES_WRITTEN",
-                  "_OWNER_ITEMS_WRITTEN", "_WEB_NONCES_WRITTEN",
-                  "_WEB_DUE_WRITTEN"):
+                walk(x)
+    for cache in ("_OWNER_ITEMS_WRITTEN", "_WEB_DUE_WRITTEN"):
         walk((globals().get(cache) or {}).get("body"))
     return out
 
 
 def secret_in(text):
-    """What secret text carries ("the bot token", ...), or None."""
-    if not isinstance(text, str) or not text:
-        return None
-    if TOKEN and len(TOKEN) >= 20 and TOKEN in text:
-        return "the bot token"
-    if any(n in text for n in _live_nonces()):
-        return "a live nonce"
-    if _token_shaped(text):
-        return "a Discord token"
-    return None
+    """What secret text carries, or None (secret_scan.find)."""
+    return SCAN.find(text, TOKEN, _live_nonces())
 
 
 def _payload_strings(v, key=None):
     if isinstance(v, str):
-        if key != "nonce":
+        if key != "nonce":   # Discord's own send nonce, derived
             yield v
     elif isinstance(v, dict):
         for k, x in v.items():
@@ -1115,28 +1109,21 @@ def _payload_strings(v, key=None):
             yield from _payload_strings(x, key)
 
 
-def _blank_hex(v, key=None):
-    if isinstance(v, str):
-        return v if key in _NOT_TEXT else scrub_nonce_text(v)
-    if isinstance(v, dict):
-        return {k: _blank_hex(x, k) for k, x in v.items()}
-    if isinstance(v, list):
-        return [_blank_hex(x, key) for x in v]
-    return v
-
-
 def guard_outgoing(data, where):
-    """data with nonce-shaped strings blanked in its text; raises
-    SecretBlocked (and logs, and alerts the owners once a day) when it
-    carries a secret. Every send helper calls it."""
-    for text in _payload_strings(data):
+    """Raise SecretBlocked (and log, and tell the owners once a day) when
+    anything data would send carries a secret: any of its strings, or
+    all of them joined (a token split across parts, embed fields or file
+    names). data is returned as is: nothing is ever altered. Every send
+    helper calls it."""
+    texts = list(_payload_strings(data))
+    for text in texts + ["".join(texts)]:
         what = secret_in(text)
         if what:
             print(f"Blocked a send to {where}: it contained {what}; "
                   f"nothing was sent.", flush=True)
             _secret_alert(where)
             raise SecretBlocked(f"blocked: it contained {what}")
-    return _blank_hex(data)
+    return data
 
 
 def _secret_alert(where):
@@ -1148,10 +1135,10 @@ def _secret_alert(where):
     try:
         for uid in sorted(OWNER_USER_IDS):
             dm_owner(uid, {"content": (
-                "I blocked a message that contained a secret (the bot "
-                "token or one of my private codes), so nothing was sent. "
-                "Someone may have tried to make me leak it; monitor.log "
-                "says where. I tell you about this at most once a day."),
+                "I blocked a reply that looked like it contained a "
+                "secret (a token or one of my private codes), so that "
+                "reply wasn't sent. monitor.log says where. I tell you "
+                "about this at most once a day."),
                 "allowed_mentions": {"parse": []}})
     except Exception as e:
         print(f"Could not alert the owners about a blocked send: {e}",
@@ -3497,40 +3484,90 @@ _OWNER_ITEMS_WRITTEN = {"body": None}
 OWNER_ITEM_GRACE_SECS = 120
 
 
-def owner_text(content):
-    """The owner's own words, for matching a channel or thread named
-    bare ("post this in announcements"): lowercased, "-" and "_" read as
-    spaces, whitespace collapsed (bin/discord-api.py normalizes channel
-    names the same way)."""
+def owner_own_words(content):
+    """The owner's own words in a message: without quoted lines ("> ...")
+    and code (``` blocks and `inline`), which may be someone else's
+    text pasted in."""
     text = content if isinstance(content, str) else ""
-    return " ".join(re.sub(r"[-_]", " ", text.lower()).split())[:2000]
+    text = re.sub(r"```.*?(```|$)", " ", text, flags=re.S)
+    text = re.sub(r"`[^`\n]*`", " ", text)
+    return "\n".join(ln for ln in text.split("\n")
+                     if not ln.lstrip().startswith(">"))
 
 
-def owner_targets(content):
-    """The channels an owner's own words name: <#id> mentions and #names
-    (lowercased). bin/discord-api.py acts only there, in a channel or
-    thread of the command's server whose name the words hold bare
-    (owner_text), and in the item's own channel; never where history or
-    read output points."""
-    text = content if isinstance(content, str) else ""
-    ids = sorted(set(re.findall(r"<#([1-9][0-9]{16,19})>", text)))
-    names = sorted({n.lower() for n in re.findall(
-        r"(?<![\w&<#])#([^\s#<>@:,;!?()\[\]{}'\"`*~|]{1,100})", text)})
-    return ids, names
+def _norm_name(text):
+    """Lowercased, "-" and "_" read as spaces, whitespace collapsed."""
+    return " ".join(re.sub(r"[-_]", " ", str(text).lower()).split())
+
+
+# Bare channel names ("post this in announcements") that are never one.
+BARE_NAME_STOPWORDS = frozenset(
+    "the a an to in into on of for and or but this that these those it "
+    "its here there me you him her us them my your our their all any "
+    "some channel server thread".split())
+_THREAD_TYPES = (10, 11, 12)
+
+
+def _server_channels(gid):
+    """{id: name} of a server's channels the bot knows (no threads, no
+    categories)."""
+    out = {}
+    for c in _GUILD_CHANNELS.get(str(gid)) or []:
+        if isinstance(c, dict) and c.get("type") not in (4,) + _THREAD_TYPES:
+            out[str(c.get("id"))] = str(c.get("name") or "")
+    for cid, info in CHANNELS.items():
+        if str(info.get("guild_id")) == str(gid) and not info.get("thread") \
+                and str(cid) not in out:
+            out[str(cid)] = str(info.get("name") or "")
+    return out
+
+
+def owner_targets(content, guild_id=None):
+    """Where an owner's own words point, as channel ids resolved now, at
+    queue time: (channels, post_channels). channels: <#id> mentions (the
+    only way to name a thread) and #names, resolved among the command's
+    own server's channels (an owner DM: in the one server that has a
+    channel of that name). post_channels, for `post` only: a channel of
+    the command's own server whose whole name (3+ characters, not a
+    common word; "-", "_" and spaces alike) follows "in", "to" or
+    "into" ("post this in announcements"). Quotes and code are not the
+    owner's words (owner_own_words)."""
+    text = owner_own_words(content)
+    ids = set(re.findall(r"<#([1-9][0-9]{16,19})>", text))
+    names = {n.lower() for n in re.findall(
+        r"(?<![\w&<#])#([^\s#<>@:,;!?()\[\]{}'\"`*~|]{1,100})", text)}
+    if guild_id:
+        pools = [_server_channels(guild_id)]
+    else:
+        pools = [_server_channels(g) for g in
+                 {str(i.get("guild_id")) for i in CHANNELS.values()}
+                 | set(_GUILD_CHANNELS)]
+    for name in names:
+        hits = {cid for pool in pools for cid, n in pool.items()
+                if n.lower() == name}
+        if guild_id or len(hits) == 1:
+            ids |= hits
+    post = set()
+    if guild_id:
+        words = _norm_name(text)
+        for cid, n in _server_channels(guild_id).items():
+            bare = _norm_name(n)
+            if len(bare) >= 3 and bare not in BARE_NAME_STOPWORDS \
+                    and re.search(r"(?<!\w)(?:in|to|into) (?:the )?"
+                                  + re.escape(bare) + r"(?!\w)", words):
+                post.add(cid)
+    return sorted(ids), sorted(post - ids)
 
 
 def note_owner_item(state, mid, dm=False, channel_id=None, content="",
                     guild_id=None):
     """Queue item mid is an owner's command: mint its nonce (an owner
-    DM's is its owner_dm_nonce), note where the owner's own words point
-    (owner_targets, owner_text) and the command's server, and write
-    owner_items.json."""
+    DM's is its owner_dm_nonce), resolve where the owner's own words
+    point (owner_targets, ids only), and write owner_items.json."""
     e = state.setdefault("owner_items", {})
-    ids, names = owner_targets(content)
+    ids, post = owner_targets(content, guild_id)
     e[str(mid)] = {"at": time.time(), "channel_id": str(channel_id or ""),
-                   "dm": bool(dm), "channels": ids, "names": names,
-                   "guild_id": str(guild_id or ""),
-                   "text": owner_text(content)}
+                   "dm": bool(dm), "channels": ids, "post_channels": post}
     if not dm:
         e[str(mid)]["nonce"] = secrets.token_hex(16)
     for old in list(e)[:-300]:
@@ -3549,7 +3586,7 @@ def _private_file_ok(path, body):
 
 def owner_items_write(state, check=False):
     """owner_items.json = {message_id: {nonce, channel_id, dm, channels,
-    names}} for the open owner-command items (written only when that
+    post_channels}} for the open owner-command items (written only when that
     changed; check: also when the file was lost or mangled)."""
     nl = state.get("nl_nonces") or {}
     body = {}
@@ -3561,9 +3598,7 @@ def owner_items_write(state, check=False):
             body[mid] = {"nonce": n, "channel_id": e.get("channel_id"),
                          "dm": bool(e.get("dm")),
                          "channels": e.get("channels") or [],
-                         "names": e.get("names") or [],
-                         "guild_id": e.get("guild_id") or "",
-                         "text": e.get("text") or ""}
+                         "post_channels": e.get("post_channels") or []}
     if body == _OWNER_ITEMS_WRITTEN["body"] and not (
             check and not _private_file_ok(OWNER_ITEMS_FILE, body)):
         return
@@ -3609,14 +3644,7 @@ def owner_items_upkeep(state, queue, now):
 REPLY_NONCE_FIELD = "reply_nonce"
 ITEM_NONCES_FILE = os.path.join(BASE_DIR, "item_nonces.json")
 _ITEM_NONCES_WRITTEN = {"body": None}
-_NONCE_TEXT = re.compile(r"(?<![0-9A-Fa-f])[0-9a-f]{32}(?![0-9A-Fa-f])")
-
-
-def scrub_nonce_text(text):
-    """Outgoing text with every 32-hex-digit string (a nonce's shape)
-    blanked: a backstop, so no nonce is ever posted to Discord."""
-    return _NONCE_TEXT.sub("(redacted)", text) if isinstance(text, str) \
-        else text
+_ITEM_NONCES_ALERT = {"day": None}
 
 
 def reply_nonce_mint(state, mid):
@@ -3644,7 +3672,18 @@ def reply_nonces_write(state, check=False):
         _write_private(ITEM_NONCES_FILE, body)
         _ITEM_NONCES_WRITTEN["body"] = body
     except OSError as e:
+        # The wake hook cannot hand out nonces it cannot read, so no
+        # reply can be sent: say so (not "the prompt is out of date").
         print(f"Could not write item_nonces.json: {e}", flush=True)
+        day = time.strftime("%Y-%m-%d")
+        if _ITEM_NONCES_ALERT["day"] != day:
+            _ITEM_NONCES_ALERT["day"] = day
+            for uid in sorted(OWNER_USER_IDS):
+                dm_owner(uid, {"content": (
+                    "I can't write item_nonces.json in my folder, so I "
+                    "can't send replies. Check the disk space and the "
+                    "folder's permissions; monitor.log has the error."),
+                    "allowed_mentions": {"parse": []}})
 
 
 def reply_nonces_upkeep(state, queued, now):
@@ -4578,7 +4617,7 @@ def send_fragmented(channel_id, parts, reply_to=None, attachments=(),
     """
     # Every part checked before the first goes out: a secret in part 3
     # never leaves parts 1 and 2 half-sent.
-    guard_outgoing({"content": list(parts)}, channel_id)
+    guard_outgoing({"content": list(parts)}, channel_id)   # and joined
     last_idx = len(parts) - 1
     for i, part in enumerate(parts):
         if i > 0:
@@ -4606,7 +4645,8 @@ def send_reply_with_files(channel_id, text, files, reply_to=None,
     """Send a message with file attachments via multipart/form-data.
     files: list of (local_path, filename)."""
     boundary = "----MuseDiscord%d" % int(time.time() * 1000)
-    text = guard_outgoing({"content": text}, channel_id)["content"]
+    guard_outgoing({"content": text,
+                    "files": [fname for _, fname in files]}, channel_id)
     payload = {"content": text,
                "allowed_mentions": mentions or SEND_ALLOWED_MENTIONS}
     if reply_to:
@@ -5991,6 +6031,7 @@ def _settle(state, item, status, reason="", replied=False, detail=None):
                                    if reply_to else None)
     if not trigger:
         return
+    trigger = trigger_of(state, trigger)   # an "item" set to a fragment
     ids = [trigger] + [f for f, t in aliases.items() if t == trigger]
     if reply_to and reply_to not in ids \
             and trigger_of(state, reply_to) == trigger:
@@ -6236,7 +6277,7 @@ def hold_released_ok(state, item):
 # silent. STALE_PROMPT_HITS such refusals within STALE_PROMPT_WINDOW
 # mark it (prompt_outdated.json, for bin/doctor.py) and DM the owners
 # once a day; an outbox item that carries its reply_nonce clears it.
-MISSING_REPLY_NONCE = "no reply_nonce"
+MISSING_REPLY_NONCE = "no reply_nonce (an outdated worker prompt?)"
 STALE_PROMPT_FILE = os.path.join(BASE_DIR, "prompt_outdated.json")
 STALE_PROMPT_HITS = 3
 STALE_PROMPT_WINDOW = 3600
@@ -6314,11 +6355,20 @@ def own_channel_problem(state, item, index):
                 f"never queued)")
     if str(item.get("channel_id")) != cid:
         return f"channel_id is not the channel of {t}"
+    # It replies (and reacts: reactions go on reply_to) under its own
+    # message or one of its own burst fragments, never under another
+    # open item in the channel.
+    rt = item.get("reply_to")
+    if rt and trigger_of(state, rt, index["frags"]) != t:
+        return f"reply_to is not {t} or one of its fragments"
     want = ((state.get("reply_nonces") or {}).get(t) or {}).get("nonce")
     if not want:
         return f"{t}: no live reply_nonce yet (its next wake gets one)"
     got = item.get(REPLY_NONCE_FIELD)
     if got is None:
+        if t not in (_ITEM_NONCES_WRITTEN["body"] or {}):
+            # Never written for the hook: no wake could have had it.
+            return f"{t}: its reply_nonce was never written (see the log)"
         return (f"{t}: {MISSING_REPLY_NONCE} (copy the item's "
                 f"{REPLY_NONCE_FIELD} from the wake payload)")
     if not isinstance(got, str) or not hmac.compare_digest(
@@ -6581,8 +6631,6 @@ def process_outbox(state):
                         detail=sched[2])
             else:
                 _settle(state, item, "replied", replied=True)
-            if item.get("_hold"):
-                state.get("hold_released", {}).pop(item["_hold"], None)
             meta = state.get("item_meta", {}).get(qid) if qid else None
             if parts and meta and not meta.get("bot") \
                     and not meta.get("dm") \
@@ -6635,6 +6683,12 @@ def process_outbox(state):
             remaining.append(item)
 
     _OUTBOX_CURRENT["key"] = None
+    # A released hold is used up however its item settled (sent, 403,
+    # a blocked secret, given up).
+    for item in settled:
+        if isinstance(item.get("_hold"), str):
+            (state.get("hold_released") or {}).pop(item["_hold"], None)
+
     # The queue items the settled replies answer. Matched on the outbox
     # item's "item" first; an older worker's item without it matches on
     # reply_to, its burst trigger, or a burst fragment it replied under.

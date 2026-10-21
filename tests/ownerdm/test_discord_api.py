@@ -95,20 +95,20 @@ D.OWNER_ITEMS_FILE = os.path.join(WORK, "owner_items.json")
 SERVER = ("--for", SRV_ITEM, "--nonce", SRV_NONCE)
 
 
-def entry(nonce, cid, dm=False, channels=(), names=(), guild_id="",
-          text=""):
-    """An owner_items.json record, as the monitor writes it (text: the
-    owner's own words, normalized by monitor.owner_text)."""
+def entry(nonce, cid, dm=False, channels=(), post_channels=()):
+    """An owner_items.json record, as the monitor writes it: the places
+    the owner's own words name, resolved to ids when it was queued
+    (monitor.owner_targets)."""
     return {"nonce": nonce, "channel_id": cid, "dm": dm,
-            "channels": list(channels), "names": list(names),
-            "guild_id": guild_id, "text": text}
+            "channels": list(channels),
+            "post_channels": list(post_channels)}
 
 
+# The server command "post this to dev updates, and in <#NAMED_ID> and
+# #announcements".
 ITEMS = {ITEM: entry(NONCE, OWNER_DM, dm=True),
-         SRV_ITEM: entry(SRV_NONCE, GEN_CH, channels=[NAMED_ID],
-                         names=["announcements"], guild_id="5",
-                         text="post this in dev updates, then in "
-                              "announcements")}
+         SRV_ITEM: entry(SRV_NONCE, GEN_CH, channels=[NAMED_ID, ANNOUNCE],
+                         post_channels=[BARE_CH])}
 
 
 def write_owner_items(data):
@@ -272,13 +272,15 @@ class OwnerCommandsOnly(_Tool):
         self.assertNotEqual(self.run_tool(*SERVER, "read", GEN_CH), 0)
         self.assertEqual(CALLS, [])
 
-    def test_a_channel_named_bare_in_the_owners_own_words(self):
-        """"post this in dev updates": the channel of the command's own
-        server named that ("-" and " " alike) is fine; the same name in
-        another server, and a channel the history names ("random" is
-        in no owner's words here), are not."""
+    def test_a_channel_named_bare_is_for_post_only(self):
+        """"post this to dev updates": that channel (its id, resolved by
+        the monitor) takes a post, and nothing else; other channels,
+        whatever their names, take nothing."""
+        self.assertEqual(self.run_tool(*SERVER, "post", BARE_CH, "hi"), 0)
         for args in self.every_subcommand(BARE_CH, SERVER):
-            self.assertEqual(self.run_tool(*args), 0, args)
+            if args[len(SERVER)] != "post":
+                self.assertNotEqual(self.run_tool(*args), 0, args)
+                self.assertEqual(writes(), [], args)
         for cid in (BARE_ELSEWHERE, OTHER_CH):
             for args in self.every_subcommand(cid, SERVER):
                 self.assertNotEqual(self.run_tool(*args), 0, args)
@@ -337,6 +339,7 @@ class OwnerCommandsOnly(_Tool):
         sys.stdout = out
         try:
             D.main(["discord-api.py", *SERVER, "read", GEN_CH])
+            D.main(["discord-api.py", *SERVER, "read", GEN_CH])
             D.main(["discord-api.py", *SERVER, "post", GEN_CH,
                     "leak " + "ab" * 16])
         finally:
@@ -345,7 +348,12 @@ class OwnerCommandsOnly(_Tool):
         self.assertTrue(lines[0].startswith("<<<untrusted"), lines)
         self.assertIn("secret plans", lines[1])
         self.assertTrue(lines[2].startswith("<<<end of untrusted"), lines)
-        self.assertEqual(CALLS[-1][2]["content"], "leak (redacted)")
+        # A marker random to each call, closing only its own block.
+        mark = lines[0].split()[3].rstrip(":")
+        self.assertTrue(lines[2].endswith(f" {mark}>>>"), lines)
+        self.assertNotEqual(mark, lines[3].split()[3].rstrip(":"))
+        # Text goes out as written (no blanking): a secret is refused.
+        self.assertEqual(CALLS[-1][2]["content"], "leak " + "ab" * 16)
 
 
 if __name__ == "__main__":

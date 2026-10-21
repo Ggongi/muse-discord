@@ -135,9 +135,10 @@ crash. This one was hardened in production against each of them.
   stranger can't answer, silence or act on anyone else's message, and only
   your own commands can use the bot's Discord tools, where your own words
   point.
-- **Secret filter:** nothing the bot sends may contain its token, any of its
-  private codes, or anything shaped like a Discord token. Such a message is
-  dropped, and you get a DM about it (at most once a day).
+- **Secret filter:** nothing the bot sends may contain its token (even lightly
+  disguised), any of its private codes, or anything shaped like a Discord
+  token. Such a reply is dropped, and you get a DM about it (at most once a
+  day); everything else goes out exactly as written.
 - **Token:** stored in one private file outside the repo by default. Your Muse
   never gets it in a reply session's prompt.
 - **Limits:** on Muse, every session (your main chat, the reply sessions,

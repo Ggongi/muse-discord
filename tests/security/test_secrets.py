@@ -35,7 +35,7 @@ TOKEN = token_like("111000000000000099")
 def alerts(mod):
     """The owner DMs about a blocked send."""
     return [d for p, d in mod.api.posts
-            if p.startswith("/channels/4") and "I blocked a message"
+            if p.startswith("/channels/4") and "I blocked a reply"
             in (d.get("content") or "")]
 
 
@@ -60,10 +60,11 @@ class Outbox(tb.Base):
             self.assertEqual(self.ledger(m["id"])["status"], "skipped")
         # Each owner told once, not once per blocked reply.
         self.assertEqual(len(alerts(self.mod)), 2)
-        # Anything else goes out, a nonce-shaped string blanked.
-        self.outbox(self.reply(other, "fine, " + "cd" * 16))
-        self.assertEqual([x["content"] for x in self.sends(CH)],
-                         ["fine, (redacted)"])
+        # Anything else goes out exactly as written (a 32-hex id in a
+        # link included: nothing is ever blanked).
+        text = "fine: https://www.notion.so/Plan-" + "cd" * 16
+        self.outbox(self.reply(other, text))
+        self.assertEqual([x["content"] for x in self.sends(CH)], [text])
 
     def test_multi_part_sends_nothing(self):
         s = self.stranger_mention()
@@ -85,6 +86,8 @@ class Outbox(tb.Base):
             lambda: m.api_patch(f"/channels/{CH}/messages/1",
                                 {"content": TOKEN}),
             lambda: m.send_reply_with_files(CH, TOKEN, []),
+            lambda: m.send_reply_with_files(CH, "ok",          # file name
+                                            [("/x", TOKEN + ".png")]),
             lambda: m.interaction_callback(
                 {"id": "1", "token": "t"},
                 {"type": 4, "data": {"content": TOKEN}}),
@@ -95,6 +98,33 @@ class Outbox(tb.Base):
                 with self.assertRaises(m.SecretBlocked):
                     call()
         self.assertEqual(opened, [])
+
+
+class Disguises(unittest.TestCase):
+    """secret_scan.find: the simple disguises, and nothing more."""
+
+    def test_disguised_token_and_nonce(self):
+        sys.path.insert(0, tb.MUT_DIR)
+        import secret_scan as S
+        nonce = "9f" * 16
+        raw = TOKEN.encode()
+        for text in (
+                TOKEN[:12] + "\u200b" + TOKEN[12:],          # zero-width
+                " ".join(TOKEN.split(".")),                   # no dots
+                TOKEN[::-1],                                  # reversed
+                *(base64.b64encode(b"x" * i + raw).decode()   # base64
+                  for i in range(3)),
+                base64.urlsafe_b64encode(b"ab" + raw).decode(),
+                raw.hex(), raw.hex().upper()):                # hex
+            self.assertEqual(S.find(f"look: {text} !", TOKEN, ()),
+                             "the bot token", text)
+        for text in (nonce, nonce[::-1], "-".join(nonce)):
+            self.assertEqual(S.find(f"x {text} y", None, {nonce}),
+                             "a live nonce", text)
+        # Ordinary text, hashes and links pass, unaltered.
+        for text in ("an md5: " + "0f" * 16, "https://notion.so/x-" + "ab"
+                     * 16, "see you at 5.30.2026"):
+            self.assertIsNone(S.find(text, TOKEN, {nonce}), text)
 
 
 class Fires(unittest.TestCase):

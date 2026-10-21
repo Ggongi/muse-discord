@@ -31,9 +31,12 @@ Fixed (security):
   channel. Now every subcommand needs `--for <your item> --nonce <its
   owner_command_nonce>` (`resolve-channel` and `list-threads` accept an
   owner DM's nonce too), and acts only in the command's own channel or
-  one your message itself names (`<#channel>`, `#name`, or just the
-  name of a channel or thread in that server: "post this in
-  announcements"), never in a DM other than its own. `read` output comes marked as untrusted data,
+  one your message itself names (`<#channel>`, the only way to name a
+  thread; `#name` in that server; or, for a post only, a channel of
+  that server named after "in", "to" or "into": "post this in
+  announcements"), resolved when your message arrives, never from
+  quotes, code, history or what the bot reads, and never in a DM
+  other than its own. `read` output comes marked as untrusted data,
   and a channel lookup that misses no longer lists the server's
   channels.
 - An owner's command wakes alone, one per run, as owner DMs already
@@ -43,12 +46,13 @@ Fixed (security):
   yours gets its web watch capability in that same run.
 - Nothing the bot sends carries a secret. Every send (replies, reminders,
   owner DMs and notices, edits, uploads, button responses, and the
-  Discord tool's posts) is checked first: the bot token, any of the
+  Discord tool's posts) is checked first, all parts together: the bot
+  token (also squashed, reversed, or in base64 or hex), any of the
   bot's live private codes, or anything shaped like a Discord token
-  drops the message, and you get a DM about it, at most once a day. Any
-  other 32-hex-digit string is blanked. On Muse every session runs as
-  the same user, so a reply session tricked into using its shell could
-  read those files; this keeps it from posting them. README's Security
+  drops that message, and you get a DM about it, at most once a day.
+  Nothing else is ever changed in what the bot sends. On Muse every
+  session runs as the same user, so a reply session tricked into using
+  its shell could read those files; this keeps it from posting them. README's Security
   section and PROTOCOL.md's security note now say plainly what the bot
   enforces and what is up to the reply session's instructions.
 
