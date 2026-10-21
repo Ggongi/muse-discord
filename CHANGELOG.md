@@ -15,6 +15,8 @@ New:
   breaks. **It is on by default.** It goes only to the project's own
   Cloudflare Worker (`telemetry/worker`, which stores no IP
   addresses), at most once a day, a few hours after the day ends.
+  Only released versions (a `vX.Y.Z` tag) send; a checkout of
+  unreleased code never does.
 - A report holds: a random install id, the day, the muse-discord,
   Python and OS versions (like 3.12, linux), how many servers the bot
   is in and their total members rounded down to a power of 2, and

@@ -278,7 +278,7 @@ class SUT:
         env["PYTHONUNBUFFERED"] = "1"
         # Never send usage stats from a test run (telemetry.py).
         env["MUSE_DISCORD_TELEMETRY"] = "off"
-        env.pop("MUSE_DISCORD_TELEMETRY_URL", None)
+        env["MUSE_DISCORD_TELEMETRY_URL"] = ""   # "" = no endpoint at all
         if not gateway:
             env["PYTHONPATH"] = os.pathsep.join(
                 p for p in (self._stub_dir, env.get("PYTHONPATH")) if p)

@@ -12,7 +12,7 @@ binding = "DB"
 database_name = "muse-telemetry"
 # Paste the database_id that `npx wrangler d1 create muse-telemetry`
 # prints:
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "bce642bc-f6ae-4ee5-affc-988db1ccc3ff"
 
 # Daily: forget rate-limit counts older than yesterday.
 [triggers]

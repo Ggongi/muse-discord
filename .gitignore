@@ -38,3 +38,6 @@ media/
 generated/
 
 __pycache__/
+
+# Cloudflare's wrangler CLI (telemetry/worker)
+.wrangler/
