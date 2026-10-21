@@ -6806,27 +6806,20 @@ def watch_can_set(uid, from_bot, here, matches):
         return False
 
 
-def watch_can_web(uid, from_bot, here, matches):
-    """abilities.web_watches allows uid here (owners always; bots never;
-    default: owners only)."""
-    if from_bot:
-        return False
-    if str(uid) in OWNER_USER_IDS:
-        return True
-    try:
-        return bool(matches(here["abilities.web_watches"]))
-    except Exception:
-        return False
+def watch_can_web(uid, from_bot, here=None, matches=None):
+    """Web watches are the owners' only (no setting: each check is a turn
+    of the owner's Muse reading the web); never a bot."""
+    return not from_bot and str(uid) in OWNER_USER_IDS
 
 
-# Web watch capability. Anyone's message can share a wake with other
-# people's, so a fooled worker could put a stranger's condition on the
-# item of someone who may set web watches (an owner in a server). Each
-# such item (not an owner's DM: its owner_dm_nonce does this already)
-# gets a random web_nonce, kept in state and web_nonces.json (mode 600,
-# read by the wake hook only), which the hook hands only to a wake that
-# holds nothing but that item; a schedule action adding a web watch must
-# echo it. Spent when the item settles.
+# Web watch capability. Web watches are the owners' only, and a fooled
+# worker could put a stranger's condition on an owner's item (an owner's
+# message in a server shares a channel, and its history, with everyone).
+# Each owner's server item (an owner's DM: its owner_dm_nonce does this
+# already) gets a random web_nonce, kept in state and web_nonces.json
+# (mode 600, read by the wake hook only), which the hook hands only to a
+# wake that holds nothing but that item; a schedule action adding a web
+# watch must echo it. Spent when the item settles.
 WEB_NONCES_FILE = os.path.join(BASE_DIR, "web_nonces.json")
 _WEB_NONCES_WRITTEN = {"body": None, "path": None}
 
@@ -6885,6 +6878,7 @@ def watch_web_nonce_upkeep(state):
     for q in queue:
         if not isinstance(q, dict) or q.get("kind") not in ("mention", "dm") \
                 or not (q.get("watches") or {}).get("can_web") \
+                or str(q.get("author_id")) not in OWNER_USER_IDS \
                 or _queued_owner_dm(state, q):
             continue
         mid = str(q.get("message_id"))

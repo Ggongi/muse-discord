@@ -517,9 +517,9 @@ class Worker:
         or an owner command whose nonce the monitor has not written yet
         waits, unleased (the reply and command ones for at most
         NONCE_WAIT_SECS after it was queued). Owner DMs wake alone (real
-        DMs before notices); else one item holding a capability (an
-        owner command, owners' first, or a web watch nonce) wakes alone;
-        the rest wait for the next poll. Refreshes the leases (kept only
+        DMs before notices); else one owner's server item holding a
+        capability (a command, or a web watch nonce) wakes alone; the
+        rest wait for the next poll. Refreshes the leases (kept only
         for items still queued, like the hook's state)."""
         now = time.time()
         items, nonces = open_items(self.pkg, self.answered)
@@ -565,13 +565,13 @@ class Worker:
                 due = owner
                 caps.update(dm=nonces, cmd=cmds)
             else:
-                # One item holding a capability beyond answering itself
-                # wakes alone, owners' first (the hook's rule).
-                held = [i for i in due if is_owner_command(i)
-                        or str(i["message_id"]) in web]
-                held = [i for i in held if is_owner_command(i) or (
-                    i.get("settings") or {}).get("speaker") == "owner"] \
-                    + held
+                # An owner's server item holding a capability beyond
+                # answering itself (a command, or a web watch nonce: web
+                # watches are the owners' only) wakes alone (the hook's
+                # rule).
+                held = [i for i in due if is_owner_command(i) or (
+                    (i.get("settings") or {}).get("speaker") == "owner"
+                    and str(i["message_id"]) in web)]
                 if held:
                     due = held[:1]
                     caps.update(cmd=cmds, web=web)

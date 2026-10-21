@@ -104,7 +104,6 @@ What the owner says, and the key and values to use:
 | Status line, update notices (`defaults`) | `presence.status`, `updates.notify` | text up to 128; on/off |
 | Anonymous usage stats (`defaults`; README, Privacy and usage stats) | `telemetry.usage_stats` | on/off |
 | Who can set reminders and watches | `abilities.reminders` | `everyone`, `owners`, or ids / `role:<id>` |
-| Who can set web watches | `abilities.web_watches` | `owners`, `everyone`, or ids / `role:<id>` |
 
 A channel takes only When it answers, Instructions, and on/off for
 images and video (`media.enabled`) and for an installed plugin

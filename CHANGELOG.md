@@ -39,8 +39,7 @@ Fixed (security):
   did, so no other message (a stranger's, or another command's
   history) shares the run that can act for you. Other messages that
   arrive with it wait a few seconds for the next run. A command of
-  yours that may also set web watches gets both capabilities in its
-  one run.
+  yours gets its web watch capability in that same run.
 - Nothing the bot sends carries a secret. Every send (replies, reminders,
   owner DMs and notices, edits, uploads, button responses, and the
   Discord tool's posts) is checked first: the bot token, any of the
@@ -54,6 +53,14 @@ Fixed (security):
 
 Changed:
 
+- **Web watches are for owners only**, with no setting to change it
+  (each check is a turn of your Muse reading the web). The
+  `abilities.web_watches` setting is gone: a config or a Discord-side
+  change that still sets it loads fine, the value is ignored, and the
+  log says so once. A web watch someone else set earlier ends at its
+  next check, and they are told once. The per-server check budget for
+  other people's web watches is gone with it; the daily total still
+  paces your checks.
 - An outbox item that names no open queue item (neither `item` nor
   `reply_to`, or an item answered already, however long ago) is
   refused instead of posted.

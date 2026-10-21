@@ -414,15 +414,15 @@ class ClaudeWorker(ClaudeBase):
                    {"1005": "cd" * 16, "1006": "ef" * 16,
                     "1002": "01" * 16})
         seen = []
-        for _ in range(4):
+        for _ in range(3):
             items, caps = w.due()
             p = claude_worker.build_payload(items, None, caps)
             seen.append([(i["message_id"], i.get("owner_command_nonce"),
                           i.get("web_nonce")) for i in p["items"]])
+        # 1002 (no owner's) never gets a web nonce, even if listed.
         self.assertEqual(seen, [[("1005", NONCE, "cd" * 16)],
                                 [("1006", None, "ef" * 16)],
-                                [("1002", None, "01" * 16)],
-                                [("1001", None, None)]])
+                                [("1001", None, None), ("1002", None, None)]])
 
     def test_answers_each_item_once(self):
         self.use_fake("append")

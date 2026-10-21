@@ -47,12 +47,12 @@
 # owner_dm_nonce, which every outbox item for an owner DM must carry
 # (PROTOCOL.md, Owner DMs); an outbox entry for an owner DM without its
 # nonce (one the monitor will refuse) does not count as answering it.
-# Then an item holding a capability beyond answering itself wakes
-# alone, one per wake, owners' first: an owner's command (owner_command:
-# true; its owner_command_nonce, which bin/discord-api.py needs for
-# everything) or an item holding a web watch capability (its
-# web_nonce). Only that wake gets those nonces, so no other item's text
-# (its history included) ever shares the run that holds them.
+# Then an owner's server item holding a capability beyond answering
+# itself wakes alone, one per wake: a command (owner_command: true; its
+# owner_command_nonce, which bin/discord-api.py needs for everything) or
+# a web watch capability (its web_nonce; web watches are the owners'
+# only). Only that wake gets those nonces, so no other item's text (its
+# history included) ever shares the run that holds them.
 # Every item's reply_nonce (item_nonces.json) goes only to the wake
 # holding the item's lease; every outbox item must carry its item's, and
 # an outbox entry without it does not count as answering the item, so a
@@ -360,22 +360,22 @@ if [ "$nowner" -gt 0 ] && [ "$nowner" -lt "$ndue" ]; then
     due=$owner_dms
     ndue=$nowner
 fi
-# Then, one at a time, an item that holds a capability beyond answering
-# itself: an owner's command (owner_command_nonce: bin/discord-api.py)
-# or an item holding a web watch capability (web_nonce). Each wakes
-# alone, owners' first, so no other item's text (another item's history
-# included, even the same owner's) shares the run that holds it. The
-# rest wait for the next run, a few seconds later.
+# Then, one at a time, an owner's server item that holds a capability
+# beyond answering itself: a command (owner_command_nonce:
+# bin/discord-api.py) or a web watch capability (web_nonce; web watches
+# are the owners' only). Each wakes alone, so no other item's text
+# (another item's history included, even the same owner's) shares the
+# run that holds it. The rest wait for the next run, a few seconds
+# later.
 ncmd=0
 if [ "$nowner" -eq 0 ]; then
     owner_cmds=$(printf '%s' "$due" | jq -c --argjson wn "$web_nonces" \
         '[.[] | select(.owner_command == true
-            or $wn[.message_id | tostring] != null)]
-        | (map(select(.owner_command == true
-            or (.settings.speaker? // "") == "owner")) + .)[:1]')
+            or ((.settings.speaker? // "") == "owner"
+                and $wn[.message_id | tostring] != null))][:1]')
     ncmd=$(printf '%s' "$owner_cmds" | jq 'length')
     if [ "$ncmd" -gt 0 ] && [ "$ncmd" -lt "$ndue" ]; then
-        log "an item with a capability wakes alone; the rest wait for the next run" \
+        log "an owner's command wakes alone; the rest wait for the next run" \
             '{"held":"'"$((ndue - ncmd))"'"}'
     fi
     if [ "$ncmd" -gt 0 ]; then
@@ -393,9 +393,9 @@ if [ "$nowner" -gt 0 ] && [ "$nowner" -eq "$ndue" ]; then
     nonces=$all_nonces
 fi
 # Each owner command's owner_command_nonce, only in a wake that holds
-# nothing but owner items (owner DMs, or that one command); a web_nonce
-# only in the wake of its own item alone. (An owner DM's owner_dm_nonce
-# does the web nonce's job already.)
+# nothing but owner items (owner DMs, or that one item); a web_nonce only
+# in the wake of its own (owner's) item alone. (An owner DM's
+# owner_dm_nonce does the web nonce's job already.)
 cmds='{}'
 wnonces='{}'
 if [ "$nowner" -eq "$ndue" ] || [ "$ncmd" -eq "$ndue" ]; then

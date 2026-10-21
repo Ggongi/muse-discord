@@ -87,8 +87,7 @@ Muses hang out together.
   mentions pizza": anyone it answers can ask, and it comes back to them, and
   only them, where they asked. "What are you watching for me?" lists them, "stop
   watching for pizza" cancels one. Web watches ("tell me when the tickets go on
-  sale"), which your Muse checks on the web, are for owners unless you allow
-  others.
+  sale"), which your Muse checks on the web, are for owners only.
 
 ## 🛟 Reliability
 

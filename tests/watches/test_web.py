@@ -1,7 +1,8 @@
-"""Web watches: owners only by default; a check result counts only with
+"""Web watches: owners only, always (an old abilities.web_watches is
+ignored); a check result counts only with
 that check's live one-time nonce, for an active watch (forged, reused,
 late or unknown ones change nothing); met, refused and gave-up fire
-once, to the requester only; the daily check budgets; the checker hook
+once, to the requester only; the daily check budget; the checker hook
 (hooks/watch-due.sh) leases what it hands out and wakes nothing when
 nothing is due; the rendered checker prompt carries the checks only
 inside its data block.
@@ -59,7 +60,7 @@ class Web(tw.Base):
         (e,) = self.due()
         return e
 
-    def test_non_owner_refused_by_default(self):
+    def test_non_owner_refused(self):
         msg = self.web(U1)
         self.assertEqual(self.items(), {})
         self.assertEqual(self.ledger(msg["id"])["code"], "watch-not-allowed")
@@ -137,20 +138,34 @@ class Web(tw.Base):
         self.assertEqual(f["reminder"]["items"][0]["result"], "gave-up")
         self.assertEqual(self.items(), {})
 
-    def test_budget(self):
+    def test_owners_only_whatever_an_old_config_says(self):
+        # An old config that opened web watches to everyone still loads
+        # (the setting is ignored, with one note), and changes nothing.
         self.cfg = tw.CFG + "    abilities:\n      web_watches: everyone\n"
         self.boot()
-        self.web(U1, every=1800)                     # 48 a day: the limit
+        self.assertIn("abilities.web_watches", self.mod.import_out)
+        msg = self.web(U1, every=1800)
+        self.assertEqual(self.items(), {})
+        self.assertEqual(self.ledger(msg["id"])["code"], "watch-not-allowed")
+        self.assertNotIn(msg["id"], self.st.get("web_nonces") or {})
+        self.web(OWNER, every=1800)
         self.assertEqual(len(self.items()), 1, self.out)
-        msg = self.web(U2, every=1800)               # same server: over
-        self.assertEqual(len(self.items()), 1)
-        e = self.ledger(msg["id"])
-        self.assertEqual((e["code"], e["detail"]["per"]),
-                         ("watch-cap", "budget"))
-        # Checks issued today count too: none past the day's total.
+        # A web watch someone else set before this change ends (they are
+        # told, as for one that gave up), and is never checked.
+        with self.mod.watch_store().edit() as d:
+            (rec,) = d["items"].values()
+            d["items"]["wlegacy"] = dict(rec, requester=U1, owner=False)
+        self.tick()
+        self.assertNotIn("wlegacy", self.items())
+        self.assertEqual([e["id"] for e in self.due()],
+                         [i for i in self.items()])
+        # The day's total still paces the owners' checks.
         with self.mod.watch_store().edit() as d:
             d["web"] = {"day": W_._utc_day(tw.time.time()),
-                        "total": W_.WEB_TOTAL_PER_DAY, "places": {}}
+                        "total": W_.WEB_TOTAL_PER_DAY}
+            for r in d["items"].values():
+                r["check"] = None
+                r["next_check"] = 0
         self.tick()
         self.assertEqual(self.due(), [])
 

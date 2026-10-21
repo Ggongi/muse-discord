@@ -305,9 +305,9 @@ keep time or watch anything yourself: you ask the monitor, with a
     to do. Pick `every` from how fast it can change (hours for most
     things) and keep it long: checks are limited per day. Copy the
     item's `web_nonce` onto the outbox item as `"web_nonce"`, exactly:
-    the monitor takes a web watch only with it (an item whose author
-    may set web watches has one, and only in a run that holds just
-    that item, or just the owner's items). No `web_nonce` on the item:
+    the monitor takes a web watch only with it (only an owner's item
+    has one, and only in a run that holds just that item). No
+    `web_nonce` on the item:
     don't add a web watch for it. In an owner's own DM, the
     `owner_dm_nonce` does this instead.
   - Cancel: `{"op": "cancel", "id": "<an id from watches.items>"}`, or
@@ -340,7 +340,7 @@ keep time or watch anything yourself: you ask the monitor, with a
   their own; owners anyone's.
 - `can_set` false: only the owners can set reminders and watches
   there; say so briefly. `can_web` false: web watches are for the
-  owners; offer a Discord watch or a reminder instead.
+  owners only; offer a Discord watch or a reminder instead.
 - WHEN ONE COMES DUE you get an item of kind `"reminder"` (or
   `"watch-met"`, a web watch): `author` / `author_id` is the person
   who asked, `content` is empty, and `reminder.items` lists what came
@@ -494,9 +494,9 @@ SETTINGS REQUESTS (the owner's own DMs only):
     (text up to 128), `updates.notify` (on, off).
   - Anonymous usage stats sent to the muse-discord maintainer
     (defaults only): `telemetry.usage_stats` (on, off).
-  - Who can set reminders and watches / web watches:
-    `abilities.reminders`, `abilities.web_watches`: `owners`,
-    `everyone`, or ids / `"role:<id>"`.
+  - Who can set reminders and watches: `abilities.reminders`:
+    `owners`, `everyone`, or ids / `"role:<id>"`. (Web watches are
+    for the owners only, always: there is no setting for them.)
   - Presets for a server: the `preset` op.
   Not changeable this way: owners, the token, the persona, never-share
   phrases, Owner requests, the status kind. Say they live in
