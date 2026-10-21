@@ -96,7 +96,12 @@ class Base(unittest.TestCase):
         self.clock = Clock()
         self.tm = self.m.TM
         self.tm.clock = self.clock
-        self.tm.environ = {}       # on, unless a test says otherwise
+        # On, with no endpoint unless a test serves a local fake one;
+        # any post to a non-local URL fails the test.
+        self.tm.environ = {T.ENV_URL: ""}
+        self.tm.post = self.local_only
+        self.tm.version = "v1.0.0"   # only releases send
+        self.tm._find_version = lambda: None   # start() keeps it
         self.ep = None
         self.notices = []          # owner notices "sent"
         self.notice_ok = True
@@ -105,10 +110,15 @@ class Base(unittest.TestCase):
         if self.ep:
             self.ep.close()
 
+    def local_only(self, url, obj):
+        if not url.startswith("http://127.0.0.1:"):
+            raise AssertionError(f"a test tried to send to {url}")
+        return T.post_json(url, obj, timeout=1)
+
     def serve(self, mode="ok", **kw):
         self.ep = Endpoint(mode, **kw)
         self.tm.environ = {T.ENV_URL: self.ep.url}
-        self.tm.post = lambda url, obj: T.post_json(url, obj, timeout=1)
+        self.tm.post = self.local_only
         return self.ep
 
     def notify(self, text):
@@ -295,6 +305,19 @@ class OffByEnv(Base):
         self.assertEqual(ep.reports, [])
         self.assertEqual(self.pending(), [])
 
+    def test_only_releases_tell_owners_or_send(self):
+        for version in ("unreleased", "unknown", None):
+            ep = self.serve()
+            self.tm.version = version
+            self.tm.count("replies_sent")
+            self.tick()
+            self.next_day()
+            self.next_day()
+            time.sleep(0.2)
+            self.assertEqual((ep.reports, self.notices), ([], []), version)
+            ep.close()
+            self.ep = None
+
     def test_tests_and_e2e_run_with_it_off(self):
         # The suites (tests/_lib/common.py) and the e2e harness set it.
         self.assertTrue(T.env_off())
@@ -340,7 +363,7 @@ class BadEndpoint(Base):
 
     def test_unreachable_endpoint_and_bad_files(self):
         self.tm.environ = {T.ENV_URL: "http://127.0.0.1:9"}
-        self.tm.post = lambda url, obj: T.post_json(url, obj, timeout=1)
+        self.tm.post = self.local_only
         with open(self.m.TELEMETRY_FILE, "w") as f:
             f.write("{not json")
         self.tm.data = None
@@ -359,7 +382,7 @@ class BadEndpoint(Base):
             self.tm.tick(lambda: 1 / 0, None, None, force=True)
 
     def test_unsent_days_are_kept_a_week_at_most(self):
-        self.tm.environ = {}   # no endpoint: kept, never sent
+        self.tm.environ = {T.ENV_URL: ""}   # no endpoint: kept, never sent
         self.tick()
         for _ in range(10):
             self.next_day()

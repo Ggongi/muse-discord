@@ -127,7 +127,8 @@ project's own Cloudflare Worker ([telemetry/worker](telemetry/worker),
 which keeps no IP addresses), at most once a day, after the day is over.
 Before the first report, the bot DMs you once about it and then waits
 at least 24 hours, so you can turn it off before anything is sent; if
-it cannot reach you, it sends nothing.
+it cannot reach you, it sends nothing. Only released versions (a
+`vX.Y.Z` tag) send; a checkout of unreleased code never does.
 
 What a report holds, for one UTC day:
 

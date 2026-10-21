@@ -54,10 +54,9 @@ import uuid
 from datetime import datetime, timezone
 
 SCHEMA = 1
-# TODO(maintainer): after deploying telemetry/worker (see its README), put
-# the Worker's URL here, e.g. "https://muse-telemetry.<you>.workers.dev".
-# Empty = nothing is ever sent (counts are still kept locally).
-TELEMETRY_URL = ""
+# The maintainer's Worker (telemetry/worker). Empty = nothing is ever
+# sent (counts are still kept locally).
+TELEMETRY_URL = "https://muse-telemetry.clono.workers.dev"
 REPORT_PATH = "/v1/report"
 ENV_SWITCH = "MUSE_DISCORD_TELEMETRY"       # "off" turns it off
 ENV_URL = "MUSE_DISCORD_TELEMETRY_URL"      # overrides TELEMETRY_URL
@@ -131,8 +130,11 @@ def env_off(environ=None):
 
 
 def endpoint(environ=None):
+    """The report URL. MUSE_DISCORD_TELEMETRY_URL, when set at all,
+    replaces TELEMETRY_URL; set to "" it means no endpoint (the tests
+    rely on this, so they can never reach the real Worker)."""
     env = os.environ if environ is None else environ
-    url = (env.get(ENV_URL) or TELEMETRY_URL or "").strip()
+    url = (env[ENV_URL] if ENV_URL in env else TELEMETRY_URL or "").strip()
     return url.rstrip("/") if url.startswith(("https://", "http://")) \
         else ""
 
@@ -720,15 +722,22 @@ class Recorder:
                     "version"),
                 "python": python_minor(), "os": os_family()}
             self._take_result(d, now)
-            if on and endpoint(self.environ) and d["pending"] \
-                    and self._sending is None and self._send_due(d, now):
+            if on and self.released() and endpoint(self.environ) \
+                    and d["pending"] and self._sending is None \
+                    and self._send_due(d, now):
                 self._start_send(d, now)
             if force or now - self._last_flush >= FLUSH_SECS \
                     or self._flushed_day != rec["day"]:
                 self._flushed_day = rec["day"]
                 self._flush_locked()
-        if notify is not None and on and endpoint(self.environ):
+        if notify is not None and on and self.released() \
+                and endpoint(self.environ):
             self._notice(notify, now)
+
+    def released(self):
+        """Only a release (a vX.Y.Z tag) tells owners and sends: a dev
+        checkout, an unreleased main or an unknown version never does."""
+        return bool(self.version and _SEMVER_RE.match(self.version))
 
     def _notice(self, notify, now):
         """DM the owners NOTICE once per install (telemetry.json keeps

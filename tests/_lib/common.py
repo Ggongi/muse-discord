@@ -22,7 +22,7 @@ os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 # Usage stats (telemetry.py) are never sent from a test, whatever the
 # endpoint; the telemetry suite turns them on per Recorder, at a fake.
 os.environ["MUSE_DISCORD_TELEMETRY"] = "off"
-os.environ.pop("MUSE_DISCORD_TELEMETRY_URL", None)
+os.environ["MUSE_DISCORD_TELEMETRY_URL"] = ""   # "" = no endpoint at all
 
 LIB = os.path.dirname(os.path.abspath(__file__))
 TESTS = os.path.dirname(LIB)
