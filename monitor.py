@@ -6212,6 +6212,16 @@ def hold_released_ok(state, item):
         and str(rec["qid"]) == str(_answered_id(state, item))
 
 
+def bound_elsewhere(state, item):
+    """True for an outbox item whose own binder has checked it in full,
+    so own_channel_problem leaves it alone: a held reply an owner chose
+    to send (hold_released_ok). The one place to add another such
+    binder (a proactive slot with its slot nonce, say). A reminder or
+    watch firing is not one: watch_bind checks its place, and its
+    reply_nonce still binds it to the run that was handed it."""
+    return hold_released_ok(state, item)
+
+
 def own_channel_problem(state, item, index):
     """None when this outbox item answers an open queue item, in that
     item's own channel (a thread, for a message in a thread), and
@@ -6221,8 +6231,8 @@ def own_channel_problem(state, item, index):
     on an item it was not handed (its id may be in the history it read).
     An owner's command to post elsewhere goes through bin/discord-api.py
     with the item's owner_command_nonce. A held reply an owner chose to
-    send was checked when it was first drafted."""
-    if hold_released_ok(state, item):
+    send was checked when it was first drafted (bound_elsewhere)."""
+    if bound_elsewhere(state, item):
         return None
     qid = _answered_id(state, item)
     if not qid:
