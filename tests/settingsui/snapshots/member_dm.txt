@@ -1,4 +1,0 @@
-=== member_dm
-type 4 · 2 components · 85 chars
-C none
-  TD | Only the bot's owners can use /settings in DMs. Server admins: run it in your server.

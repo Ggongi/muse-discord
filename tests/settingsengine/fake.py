@@ -1,8 +1,7 @@
 """Small offline helpers for the settings engine tests: temp configs,
-a fake /settings Ctx, and monitor.py imported with Discord stubbed.
+and monitor.py imported with Discord stubbed.
 MUT_DIR = the package tree under test (default: this repo)."""
 import contextlib
-import copy
 import importlib.util
 import io
 import os
@@ -81,86 +80,6 @@ def load(cfg):
 
 def doc(cfg):
     return MS._read_overlay_doc(MS.overlay_path_for(cfg))
-
-
-class FakeCtx:
-    """What monitor.py gives settings_ui.handle (reads/writes the real
-    files through muse_settings)."""
-
-    def __init__(self, cfg):
-        self.cfg = cfg
-        self.owners = {OWNER, OWNER2}
-        self.bot_id = BOT
-        self.now = 0.0
-        self.logs, self.notified = [], []
-
-    @property
-    def settings(self):
-        return MS.load(self.cfg, PLUGINS)
-
-    def reload(self):
-        return MS.load(self.cfg, PLUGINS)
-
-    def guilds(self):
-        return copy.deepcopy(GUILDS)
-
-    def channels(self, gid):
-        return copy.deepcopy(CHANNELS.get(str(gid), []))
-
-    def write(self, key, value, by):
-        MS.set_value(self.cfg, key, value, by, PLUGINS)
-
-    def reset(self, key, by):
-        MS.reset(self.cfg, key, by, PLUGINS)
-
-    def undo(self, prefix, by, **kw):
-        if kw.get("admin_gid"):
-            kw.setdefault("info", self)
-        return MS.undo(self.cfg, prefix, by, PLUGINS, **kw)
-
-    def apply(self, changes, by, role, group=None, admin_gid=None):
-        return MS.apply(self.cfg, changes, by, group, PLUGINS, role=role,
-                        admin_gid=admin_gid, info=self)
-
-    def names(self, some_id):
-        for g in GUILDS:
-            if g["id"] == str(some_id):
-                return g["name"]
-        for chans in CHANNELS.values():
-            for c in chans:
-                if c["id"] == str(some_id):
-                    return c["name"]
-        return None
-
-    def display_name(self, uid):
-        return NAMES.get(str(uid))
-
-    def recent_outcomes(self, place, limit=20):
-        return []
-
-    def outcome(self, message_id):
-        return None
-
-    def stash_put(self, uid, payload, ttl=900):
-        self.stash = getattr(self, "stash", {})
-        tok = f"t{len(self.stash):09d}"
-        self.stash[tok] = (str(uid), payload)
-        return tok
-
-    def stash_take(self, uid, tok):
-        e = getattr(self, "stash", {}).get(tok)
-        if e is None:
-            return None
-        if e[0] != str(uid):
-            raise PermissionError("not yours")
-        del self.stash[tok]
-        return e[1]
-
-    def notify_owners_admin_change(self, *a):
-        self.notified.append(a)
-
-    def log(self, msg):
-        self.logs.append(msg)
 
 
 class FakeAPI:

@@ -42,6 +42,19 @@ def scratch(prefix="muse-test-"):
     return d
 
 
+def copy_watchdog(dst_dir):
+    """Copy the tree's watchdog.sh into dst_dir with its 5 s health poll
+    (wait_healthy) shortened to 0.2 s: the fakes are healthy at once, so
+    only the waiting changes, not what is checked. Returns the path."""
+    with open(os.path.join(MUT_DIR, "watchdog.sh")) as f:
+        text = f.read()
+    dst = os.path.join(dst_dir, "watchdog.sh")
+    with open(dst, "w") as f:
+        f.write(text.replace("    sleep 5\n", "    sleep 0.2\n"))
+    shutil.copymode(os.path.join(MUT_DIR, "watchdog.sh"), dst)
+    return dst
+
+
 def redirect_files(mod, tmp):
     """Point every *_FILE path the module keeps under its own dir
     (BASE_DIR) at tmp instead, so a test never writes into the tree under

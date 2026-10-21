@@ -27,7 +27,7 @@ One suite, or one test, directly:
 
 ```bash
 python3 tests/settings/test_settings.py
-python3 tests/settings/test_settings.py -k never_share
+python3 tests/settings/test_settings.py -k NeverShare
 MUT_DIR=/path/to/tree python3 tests/locking/test_locking.py
 ```
 
@@ -45,35 +45,60 @@ kernel.apparmor_restrict_unprivileged_userns=0`). The security suite's
 two video tests need `ffmpeg` and `ffprobe` and are skipped without
 them.
 
+## What we test
+
+A test earns its place by catching a regression that would do real
+harm. Keep (or add) a test for:
+
+- wrong bot behaviour someone would notice: replying when it should
+  not, not replying, the wrong place or scope, caps, ignore rules;
+- security: prompt-injection paths, owner-DM nonce binding, permission
+  checks (one test per distinct attack; most came from adversarial
+  reviews);
+- data loss or corruption: the config overlay, locking, crash recovery,
+  atomic writes;
+- crashes, hangs and wedged loops;
+- Discord rejecting a payload: component and character limits,
+  custom_id length (the `settingsui` crawler checks every page).
+
+Do not add tests of styling, wording, copy, formatting, emoji, labels
+or the order of text (assert what happened, not how it was said: a
+refusal is "nothing was written", not its sentence); snapshot or golden
+tests of UI copy; near-duplicates of a path already tested (extend a
+table-driven test instead); what another suite already covers; trivial
+helpers, getters and argument parsing; or log lines, unless the line is
+the behaviour (an owner alert, the watchdog's markers). Prefer shortened
+intervals or a fast clock over real sleeps.
+
 ## The suites
 
 | Suite | Covers |
 | --- | --- |
-| `config` | Config resolution: defaults for missing keys and explicit nulls, zeros honored or clamped, out-of-range and garbage values and their warnings; `plugin.yaml` defaults, overrides and `per_guild` merges; the welcome plugin's daily cap and stale joins. |
+| `config` | Config resolution: defaults, nulls, zeros honored or clamped, out-of-range values; `plugin.yaml` defaults and overrides; the welcome plugin's daily cap and stale joins; the removed bare-name trigger never firing (`test_name_trigger.py`). |
 | `security` | Generated files bound to their queue item (no attachment leaks across channels), `bin/discord-api.py` file and id gating, safe media fetches (host allowlist, redirects, private addresses), injection quarantine for documents and reply context, `allowed_mentions`, ffmpeg input whitelists, generated-file housekeeping. |
-| `locking` | Worker appends during a slow send, concurrent appends sent once, no queue resurrection, the reply lock, typing, burst coalescing and early flush, the latency line, `bin/outbox-append.py` validation; the wake hook's item leases (`test_hook.py`). |
-| `reliability` (slow) | Token rejection, the burst ledger, gateway gap repair, discovery, outbox sends and nonces, the presence gateway loop (`test_units.py`); `main()` boot and REST 401/429 runs (`test_main.py`); `watchdog.sh` liveness, restarts and alerts (`test_watchdog.py`). |
-| `nametrigger` | The removed bare-name trigger: one removal warning for an old config, a bare name never triggers, leftover `name_drop` bursts are dropped. |
-| `fastloop` (slow) | REST work (polls, sweeps, discovery, slow sends, hung reads) never blocks the main loop; DM and server burst timing; an outbox written mid-wait is sent promptly. |
-| `updatedm` (slow) | Update notices: watchdog version fields from release tags (a local bare upstream), the owner DM with buttons, `INTERACTION_CREATE` handling, `hooks/update-watch.sh`, the `UPDATING.md` commands. |
+| `locking` | Worker appends during a slow send, concurrent appends sent once, no queue resurrection, atomic writes, malformed and corrupt outboxes, crash leftovers, typing, burst windows; the wake hook's item leases (`test_hook.py`); `bin/outbox-append.py` (`test_outbox_append.py`). |
+| `reliability` | Token rejection, the burst ledger, gateway gap repair, discovery, reply references and send nonces, the gateway loops (`test_units.py`); `main()` boot and REST 401/429 runs (`test_main.py`); `watchdog.sh` liveness, restarts and alerts (`test_watchdog.py`). |
+| `fastloop` (slow) | REST work (polls, sweeps, discovery, hung reads) never blocks the main loop; an outbox written mid-wait is sent promptly. |
+| `updatedm` (slow) | Update notices: watchdog version fields from release tags (a local bare upstream), the owner DM with buttons, the clicks, `hooks/update-watch.sh`, the `UPDATING.md` commands. |
 | `fastrestart` (slow) | The wake hook restarting a dead monitor (fast, silent, once, with backoff; never after a token rejection) and the `watchdog.sh` run lock, against fake processes. |
-| `settings` | `muse_settings`: schema validation, scopes, the Discord overlay and its conflict rule, old-layout migration, live reload, the per-message card, the `never_share` backstop, who-rules, per-scope caps, follow-ups, plugins, the shell and presence integration. |
-| `settingsui` | `settings_ui.py`, the `/settings` pages (Components V2): each screen and rule of the redesign for owners, server admins and members, in DMs and servers, writes through `muse_settings` (`test_settings_ui.py`); a crawl from every entry point checking every response against Discord's limits, the copy rules and each screen's component count, diffed against text goldens in `snapshots/` (`crawl.py`, `test_crawl.py`; `python3 tests/settingsui/crawl.py --update` rewrites them); forged custom ids, stash tokens and a fuzz (`test_security.py`); the task walkthroughs, click by click (`test_acceptance.py`). |
-| `settingsplumb` | The `/settings` plumbing in `monitor.py`: registering `/settings` and the **Why no reply?** message command (with its name fallback), interaction routing (Components V2 bodies passed through), the 3 s deadline under a slow main loop, `SettingsCtx` writes, reset, undo, reload, stash, ledger outcomes and names, the directory (system channel, read and send flags), the ledger's author ids and reason codes, the admin-change digest, the join notice's Configure button, a missing `settings_ui.py`. |
-| `presencelive` | `presence.py` following settings changes live on the open gateway session: one Presence Update per change, clearing, rate limiting, invalid edits, disabling, resumes, heartbeats. |
-| `settingsnl` | Settings requests (`settings_nl.py`): who may change settings by DM (owners' own DMs only, from the monitor's own records; forged, replayed, forwarded and stale actions refused), meaning failures (all or nothing), apply / confirm / Apply / Cancel / expiry / stale cards / Undo, the lockout guard, retries and restarts, notices for `bin/settings.py` changes, the owner alert, the card's places and `directory.json`; the wake hook's owner-DM isolation, `bin/outbox-append.py`'s shape checks and `bin/settings.py places`. |
-| `ownerdm` | Owner DMs bound to their wake: a worker woken by someone else's message cannot answer, silence (`silent`, reactions, a reply under a fragment, a forged `_retry`) or post into an owner's DM without its `owner_dm_nonce`; wrong, borrowed, spent and missing nonces refused and redacted; the legit path (parts, silent, reactions, bursts, retries, a crash mid-send); nonce lifetime (kept while queued, minted again after a lost state.json); the wake hook ignoring forged answers, handing the nonce only to an owner-DM-only wake and never handing out an owner DM before its nonce exists (with the monitor, a mixed queue end to end); `bin/discord-api.py` in an owner's DM channel; the review regressions (`test_review.py`: burst fragments after the aliases are evicted or state.json is lost, non-canonical ids, channels the monitor forgot, scrubbed rejected copies). |
-| `monitorfixes` | Daily-cap refusals dropped at once; declined direct messages ledgered as skipped; new threads seeded at their own id; Discord system notices (pins, thread starts) never trigger. |
-| `settingspreview` | `dev/settings-preview/serve.py`, the local `/settings` design preview: serves its page, answers `/settings`, clicks, selects (with resolved users), modals and their submits, **Why no reply?** and the join notice's Configure as `settings_ui` would in Discord, for owners, server admins, members and in DMs; local requests only; picks up edits to `settings_ui.py` without a restart and reports one that doesn't import. |
+| `settings` | `muse_settings`: invalid files refused, scopes, the Discord overlay and its conflict rule, old-layout loading and migration, live reload, what the per-message card allows, the `never_share` backstop, who-rules, `testing.treat_as_human`, per-scope caps, follow-ups, plugins, the shell shim. |
+| `settingsengine` | The settings engine: where writes land, what is risky (asks first), grouped writes and Undo, the no-op guard, the server-admin rule (quieter only, never past the owners; with a fuzz), `who.dms_from` and the monitor's DM gate, presets, pause, `bin/settings.py`, the review findings. |
+| `settingsplumb` | The `/settings` plumbing in `monitor.py`: registering the commands within Discord's limits, interaction routing, the 3 s deadline under a slow main loop, `SettingsCtx` writes under the lock, thread safety, the stash, outcomes kept to their place, the admin-change digest, the join notice's Configure button, a missing `settings_ui.py`. |
+| `presencelive` | `presence.py` following settings changes live on the open gateway session: one Presence Update per change, rate limiting, invalid edits, disabling, heartbeats. |
+| `settingsnl` | Settings requests (`settings_nl.py`): who may change settings by DM (owners' own DMs only; forged, replayed, forwarded and stale actions refused), meaning failures (all or nothing), apply / confirm / cancel / expiry / stale cards / Undo, the lockout guard, retries and restarts, notices for `bin/settings.py` changes, the owner alert, the card's places; `bin/settings.py places`. |
+| `ownerdm` | Owner DMs bound to their wake: a worker woken by someone else's message cannot answer, silence or post into an owner's DM without its `owner_dm_nonce` (one test per attack); the legit path, retries and crash resends; nonce lifetime; the wake hook; `bin/discord-api.py` in an owner's DM channel; the review regressions. |
+| `monitorfixes` | Daily-cap refusals dropped at once; declined messages never answered later by the sweep; new threads read from their start; Discord system notices never trigger. |
+| `settingsui` (slow) | `settings_ui.py`, the `/settings` pages: a crawl from every entry point checking every response against Discord's limits and for names that ping, mention or link (`crawl.py`, `test_crawl.py`, `test_crawl_hostile.py`); forged custom ids, stash tokens and a fuzz (`test_security.py`); the review findings (`test_review.py`); walkthroughs found by custom_id, never by label (`test_walkthroughs.py`). No test reads the pages' words. |
+| `settingspreview` | `dev/settings-preview/serve.py`, the local `/settings` design preview: serves its page, answers `/settings` and a click, local requests only, picks up edits to `settings_ui.py` without a restart. |
 
 To see the `/settings` pages as Discord draws them and click through
 them without a bot, run `python3 dev/settings-preview/serve.py` (see
 `dev/settings-preview/README.md`); it uses the `settingsui` fixtures.
 
 The slow suites are marked by a `SLOW` file in their directory (its
-text says why). They take 50 s to 2 min each, the rest a few seconds;
+text says why). They take 10 to 15 s each, the rest a few seconds;
 `run_all.sh` starts the slow ones first, and the whole run takes about
-2 minutes at 4 suites at a time.
+35 s at 4 suites at a time.
 
 ## Layout
 
@@ -113,7 +138,8 @@ tests/
    (`monitor_harness.load_monitor` and `settings_harness.load_monitor`
    already do). No network: stub `api_get` / `api_post`, and use
    `_lib/fakews` for the gateway.
-5. If the suite takes more than about 30 s, add a `SLOW` file saying
-   why, and keep the whole run under 5 minutes in CI.
+5. Follow "What we test" above. If the suite takes more than about
+   10 s, add a `SLOW` file saying why; keep the whole run under a
+   minute.
 6. Check it: `bash tests/run_all.sh <name>`, `uvx ruff check --select
    E9,F tests`, and `shellcheck` on any shell scripts.

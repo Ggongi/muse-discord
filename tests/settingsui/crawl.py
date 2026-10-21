@@ -1,20 +1,19 @@
-"""The /settings snapshot crawler: from every entry point (spec §1), click
-every control a page renders, check every response against Discord's
-limits and the copy rules (spec §7), and render each page as text.
+"""The /settings crawler: from every entry point, click every control a
+page renders and check every response against Discord's limits (types,
+flags, component counts and nesting, labels, options, custom_id length
+and uniqueness, modal shapes, the text budget) and against names that
+could ping, mention or link (hostile server, channel and user names).
+A response that crashes or calls its own control out of date is a
+problem too. Nothing here reads the pages' words: the redesign may
+change any copy.
 
-    python3 tests/settingsui/crawl.py            # check against goldens
-    python3 tests/settingsui/crawl.py --update   # rewrite the goldens
+    python3 tests/settingsui/crawl.py     # print the problems, if any
 
-The goldens are tests/settingsui/snapshots/<entry>.txt; test_crawl.py
-runs the same crawl and diffs them. Navigation is followed breadth
-first; every write control is clicked on a copy of the settings (and
-the controls on its answer, one level deeper: confirm, Undo, Try
-again), then the settings are put back. The 60 filler servers and 74
-filler channels count as one each.
+Navigation is followed breadth first; every write control is clicked on
+a copy of the settings (and the controls on its answer, one level
+deeper: confirm, Undo, Try again), then the settings are put back. The
+60 filler servers and 74 filler channels count as one each.
 MUT_DIR = the package tree under test."""
-import argparse
-import difflib
-import json
 import os
 import re
 import sys
@@ -24,34 +23,22 @@ sys.path.insert(0, HERE)
 import harness as H  # noqa: E402
 from harness import UI  # noqa: E402
 
-SNAPSHOTS = os.path.join(HERE, "snapshots")
+# Discord's own limits for a Components V2 message (not the page's
+# tighter budgets in settings_ui.py, which may change).
+DISCORD_MAX_COMPONENTS = 40
+DISCORD_MAX_TEXT = 4000         # all Text Displays together
 SELECT_TYPES = (3, 5, 6, 7, 8)
 NAV_VERBS = ("pg", "go", "gc")
-RAW_KEYS = re.compile(r"\b(who|style|privacy|limits|plugins)\.")
-RAW_VALUES = re.compile(r"\b(conversational|when-addressed|none|"
-                        r"public-only)\b")
-BARE_ID = re.compile(r"\d{15,25}")
 # Text Displays: the only links are ours (messages), names never ping or
 # mention anyone (spec §7, review B #4).
 FOREIGN_LINK = re.compile(r"(?<!\\)\]\((?!https://discord\.com/channels/)")
 MASS_PING = re.compile(r"@(everyone|here)\b")
 RAW_MENTION = re.compile(r"<(@|@&|#)(?!\d{15,25}>)")
-STRIP = re.compile(r"<(@|@&|#)\d+>|\]\(https://discord\.com/[^)]*\)")
-NAMES = {H.OWNER: "OWNER", H.OWNER2: "OWNER2", H.ADMIN: "ADMIN",
-         H.MEMBER: "MEMBER", H.SAM: "SAM", H.KAI: "KAI", H.ANA: "ANA",
-         H.SPAM: "SPAM", H.BOB: "BOB", H.OTHERBOT: "OTHERBOT", H.BOT: "BOT",
-         H.ROLE: "ROLE", H.G1: "G1", H.G2: "G2", H.G3: "G3", H.CAT: "CAT",
-         H.GENERAL: "GENERAL", H.MUSECHAT: "MUSECHAT",
-         H.WELCOME: "WELCOME", H.LOBBY: "LOBBY", H.HIDDEN: "HIDDEN",
-         H.THREAD: "THREAD", H.HOMEWORK: "HOMEWORK", H.ART: "ART"}
 FILLER = re.compile(r"(6[12]000000000000000\d{3}|7[12]000000000000000\d{3})")
-COLOURS = {UI.BLURPLE: "blurple", UI.GREY: "grey", UI.AMBER: "amber",
-           UI.RED: "red"}
-STYLES = {1: "primary", 2: "", 3: "success", 4: "danger"}
 
 
 # ---------------------------------------------------------------------------
-# Checks (spec §7)
+# Checks
 # ---------------------------------------------------------------------------
 def visible(resp):
     """Every piece of text a person sees: text displays, labels, option
@@ -116,9 +103,12 @@ def check(resp, where):
                         "max_length", 4000), "prefill too long")
                     no(str(inner.get("value", "")).lower() == "none",
                        "prefilled none")
-    total = UI.count_components(data.get("components"))
-    no(total > UI.MAX_COMPONENTS, f"{total} components")
-    no(budget(resp) > UI.TEXT_BUDGET, f"{budget(resp)} characters")
+    total = len(list(H.walk(data.get("components"))))
+    no(total > DISCORD_MAX_COMPONENTS, f"{total} components")
+    shown = sum(len(c.get("content") or "")
+                for c in H.walk(data.get("components"))
+                if c.get("type") == 10)
+    no(shown > DISCORD_MAX_TEXT, f"{shown} characters of text")
     ids = []
     for c in H.walk(data.get("components")):
         ct = c.get("type")
@@ -170,163 +160,16 @@ def check(resp, where):
         no(bool(FOREIGN_LINK.search(t)), f"a link a name made in {t!r}")
         no(bool(MASS_PING.search(t)), f"@everyone / @here in {t!r}")
         no(bool(RAW_MENTION.search(t)), f"a mention a name made in {t!r}")
-    for line in visible(resp):
-        no(bool(RAW_KEYS.search(line)), f"raw key in {line!r}")
-        no(bool(RAW_VALUES.search(line)), f"raw value in {line!r}")
-        no(bool(BARE_ID.search(STRIP.sub("", line))),
-           f"bare id in {line!r}")
     return bad
-
-
-# The spec's component counts (§2), banner or last-change slot included.
-# (S4's own breakdown adds up to 30, not the 29 it states.)
-SPEC_COUNTS = {"S1 channel": 25, "S2 server": 35, "S3 server more": 30,
-               "S3 defaults more": 31, "S3 dms more": 22, "S4 extras": 30,
-               "S5 defaults": 34, "S6 dms": 30, "S6 dms fallback": 33,
-               "S7 bot-wide": 14, "S8a why": 21, "S8b card": 9,
-               "S9 confirm": 6, "S10 preset": 9, "S12 quiet": 37,
-               "S13 refusal": 2, "S14 notice": 2, "S14 expired": 4,
-               "S15 servers": 7}
-
-
-def screen(resp):
-    """Which screen of the spec a response is (None: a modal)."""
-    if resp.get("type") == 9:
-        return None
-    comps = (resp.get("data") or {}).get("components") or []
-    cont = next((c for c in comps if c.get("type") == 17), None)
-    if cont is None:
-        return None
-    first = next((c.get("content", "") for c in H.walk(cont["components"])
-                  if c.get("type") == 10), "")
-    ids = " ".join(c.get("custom_id", "") for c in H.walk(comps))
-    if first.startswith("## Quiet the bot"):
-        return "S12 quiet"
-    if first.startswith("## Why no reply? ·"):
-        return "S8a why"
-    if first.startswith("## Why no reply?"):
-        return "S8b card"
-    if first.startswith("## Check before"):
-        return "S9 confirm"
-    if first.startswith(("## Apply the", "## ")) and " preset" in \
-            first.split("\n")[0]:
-        return "S10 preset"
-    if "› More settings" in first:
-        return ("S3 defaults more" if first.startswith("## Defaults")
-                else "S3 dms more" if first.startswith("## DMs")
-                else "S3 server more")
-    if "› Extras" in first:
-        return "S4 extras"
-    if first.startswith("## Other servers"):
-        return "S15 servers"
-    if first.startswith("## Bot-wide"):
-        return "S7 bot-wide"
-    if first.startswith("## DMs"):
-        return "S6 dms fallback" if ":rm:d:df" in ids or \
-            ":mod:d:id.df" in ids else "S6 dms"
-    if first.startswith("## Defaults"):
-        return "S5 defaults"
-    if first.startswith("## #"):
-        return "S1 channel"
-    if first.startswith("## "):
-        return "S2 server"
-    if first == UI.EXPIRED:
-        return "S14 expired"
-    if first.startswith("Only the bot's owners"):
-        return "S13 refusal"
-    return "S14 notice"
 
 
 def out_of_date(resp):
     return UI.OUT_OF_DATE in "\n".join(H.texts(resp))
 
 
-# ---------------------------------------------------------------------------
-# Text renders
-# ---------------------------------------------------------------------------
-def sym(s):
-    s = str(s)
-    for k in sorted(NAMES, key=len, reverse=True):
-        s = s.replace(k, f"<{NAMES[k]}>")
-    s = FILLER.sub("<FILLER>", s)
-    return re.sub(r"\d{17,20}", "<ID>", s)
-
-
-def render(resp):
-    data = resp.get("data") or {}
-    head = (f"type {resp.get('type')} · "
-            f"{UI.count_components(data.get('components'))} components · "
-            f"{budget(resp)} chars")
-    lines = [head]
-    if resp.get("type") == 9:
-        lines.append(f"MODAL {sym(data.get('custom_id'))} "
-                     f"“{data.get('title')}”")
-
-    def text_lines(t, pad):
-        for i, ln in enumerate(str(t).split("\n")):
-            lines.append(pad + ("| " if i == 0 else "| ") + sym(ln))
-
-    def ctl(c, pad):
-        ct = c.get("type")
-        if ct == 2:
-            st = STYLES.get(c.get("style"), "")
-            lines.append(f"{pad}[{c.get('label')}]"
-                         + (f"({st})" if st else "")
-                         + f" {sym(c.get('custom_id'))}")
-        elif ct in SELECT_TYPES:
-            kind = {3: "SELECT", 5: "USERS", 6: "ROLES", 7: "MENTIONABLE",
-                    8: "CHANNELS"}[ct]
-            extra = ""
-            if c.get("default_values"):
-                extra = " defaults=" + ",".join(
-                    sym(d["id"]) for d in c["default_values"])
-            lines.append(f"{pad}{kind} {sym(c.get('custom_id'))} "
-                         f"“{c.get('placeholder', '')}” "
-                         f"{c.get('min_values', 1)}-{c.get('max_values', 1)}"
-                         + extra)
-            for o in c.get("options") or []:
-                lines.append(f"{pad}  {'*' if o.get('default') else '-'} "
-                             f"{o['label']}"
-                             + (f" — {o['description']}"
-                                if o.get("description") else "")
-                             + f"  ({sym(o['value'])})")
-        elif ct == 4:
-            lines.append(f"{pad}INPUT {c.get('custom_id')} style "
-                         f"{c.get('style')} max {c.get('max_length')}"
-                         + (f" value=“{sym(c['value'])}”" if c.get("value")
-                            else "")
-                         + (f" placeholder=“{c['placeholder']}”"
-                            if c.get("placeholder") else ""))
-
-    def comp(c, pad):
-        ct = c.get("type")
-        if ct == 17:
-            col = COLOURS.get(c.get("accent_color"), "none")
-            lines.append(f"{pad}C {col}")
-            for x in c.get("components") or []:
-                comp(x, pad + "  ")
-        elif ct == 10:
-            text_lines(c.get("content"), pad + "TD ")
-        elif ct == 14:
-            lines.append(f"{pad}SEP")
-        elif ct == 9:
-            for x in c.get("components") or []:
-                text_lines(x.get("content"), pad + "SEC ")
-            ctl(c.get("accessory") or {}, pad + "    ")
-        elif ct == 1:
-            lines.append(f"{pad}ROW")
-            for x in c.get("components") or []:
-                ctl(x, pad + "  ")
-        elif ct == 18:
-            lines.append(f"{pad}LABEL “{c.get('label')}”"
-                         + (f" — {c['description']}"
-                            if c.get("description") else ""))
-            ctl(c.get("component") or {}, pad + "  ")
-        else:
-            lines.append(f"{pad}? {json.dumps(c)[:80]}")
-    for c in data.get("components") or []:
-        comp(c, "")
-    return "\n".join(lines)
+def crashed(ctx):
+    """settings_ui.handle logs a traceback for an exception it caught."""
+    return any("Traceback" in str(m) for m in ctx.logs)
 
 
 # ---------------------------------------------------------------------------
@@ -407,35 +250,27 @@ class Crawl:
     def __init__(self, ctx, actor, max_pages=5000, seen=None):
         self.ctx, self.actor = ctx, actor
         self.problems = []
-        self.pages = []          # (path, render)
+        self.count = 0           # responses checked
+        self.ids = set()         # every custom_id a response rendered
         self.seen = set() if seen is None else seen
-        self.full = True         # render the next note in full
-        self.screens = []        # (screen, components, path)
         self.max_pages = max_pages
-        self.count = 0
 
     def note(self, path, resp):
         self.count += 1
-        self.screens.append((screen(resp), UI.count_components(
-            (resp.get("data") or {}).get("components")), path))
         for p in check(resp, path):
             self.problems.append(p)
         if out_of_date(resp):
             self.problems.append(f"{path}: answered out of date")
-        if "went wrong" in "\n".join(H.texts(resp)):
+        if crashed(self.ctx):
             self.problems.append(f"{path}: crashed: {self.ctx.logs[-1:]}")
-        text = render(resp)
-        if not self.full and resp.get("type") != 9:
-            # A write's answer: its banner and heading are enough for the
-            # golden (every check above ran on the whole page).
-            text = "\n".join(text.splitlines()[:4]) + "\n  …"
-        self.pages.append((path, text))
+            self.ctx.logs.clear()
+        self.ids.update(c["custom_id"] for c in H.controls(resp))
 
     def do(self, path, c, values, resolved, message):
         cid = c["custom_id"]
         r = self.actor.click(self.ctx, cid, values, resolved, message)
-        step = f"{path} > {sym(cid)}" + (f"={sym(','.join(values))}"
-                                         if values else "")
+        step = f"{path} > {cid}" + (f"={','.join(values)}" if values
+                                    else "")
         self.note(step, r)
         if r.get("type") == 9:
             fields = modal_fields(r)
@@ -447,7 +282,7 @@ class Crawl:
     def run(self, path, first):
         self.note(path, first)
         queue = [(path, first)]
-        while queue and len(self.pages) < self.max_pages:
+        while queue and self.count < self.max_pages:
             path, resp = queue.pop(0)
             if resp.get("type") not in (4, 7):
                 continue
@@ -465,12 +300,10 @@ class Crawl:
                         queue.append((step, r))
                         continue
                     snap = self.ctx.snapshot()
-                    self.full = False
                     try:
                         step, r = self.do(path, c, values, resolved, msg)
                         self.second(step, r)
                     finally:
-                        self.full = True
                         self.ctx.restore(snap)
         return self
 
@@ -493,7 +326,7 @@ class Crawl:
 
 
 # ---------------------------------------------------------------------------
-# Entry points (spec §1)
+# Entry points
 # ---------------------------------------------------------------------------
 def entries():
     """[(name, ctx factory, actor, first interaction)]."""
@@ -531,10 +364,11 @@ def entries():
     return out
 
 
-def crawl_all(names=None):
+def crawl_all(names=None, max_pages=5000):
     """{entry name: Crawl}. Entries clicking as the same person in the
     same place share what they have clicked already (the later one
-    records only what is new)."""
+    records only what is new). max_pages caps each entry's crawl
+    (breadth first: the nearest pages come first)."""
     out = {}
     seen = {}
     for name, factory, actor, first in entries():
@@ -545,8 +379,8 @@ def crawl_all(names=None):
         ctx.refresh()
         resp = UI.handle(first, ctx)
         key = (actor.user, actor.guild, factory)
-        out[name] = Crawl(ctx, actor, seen=seen.setdefault(key, set())
-                          ).run(name, resp)
+        out[name] = Crawl(ctx, actor, max_pages,
+                          seen.setdefault(key, set())).run(name, resp)
         if name == "old_id":
             # Out of date is the right answer here.
             out[name].problems = [p for p in out[name].problems
@@ -554,44 +388,13 @@ def crawl_all(names=None):
     return out
 
 
-def golden_text(crawl):
-    return "\n\n".join(f"=== {path}\n{text}" for path, text in crawl.pages)
-
-
-def main(argv=None):
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--update", action="store_true")
-    ap.add_argument("entries", nargs="*")
-    a = ap.parse_args(argv)
-    res = crawl_all(a.entries or None)
+def main():
     rc = 0
-    for name, c in res.items():
-        path = os.path.join(SNAPSHOTS, f"{name}.txt")
-        text = golden_text(c) + "\n"
-        print(f"{name}: {len(c.pages)} responses, {len(c.problems)} "
-              f"problems")
+    for name, c in crawl_all().items():
+        print(f"{name}: {c.count} responses, {len(c.problems)} problems")
         for p in c.problems[:40]:
             print("  " + p)
-        if c.problems:
-            rc = 1
-        if a.update:
-            os.makedirs(SNAPSHOTS, exist_ok=True)
-            with open(path, "w") as f:
-                f.write(text)
-        else:
-            try:
-                with open(path) as f:
-                    want = f.read()
-            except OSError:
-                print(f"  no golden {path}")
-                rc = 1
-                continue
-            if want != text:
-                rc = 1
-                diff = difflib.unified_diff(want.splitlines(),
-                                            text.splitlines(), "golden",
-                                            "now", lineterm="", n=1)
-                print("\n".join(list(diff)[:80]))
+        rc = rc or bool(c.problems)
     return rc
 
 

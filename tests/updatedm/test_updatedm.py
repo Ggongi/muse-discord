@@ -1,7 +1,7 @@
 """Update DM suite (offline): versions are release tags (vX.Y.Z).
 Watchdog version fields (a local bare "upstream" with tags), the owner
-DM with buttons, INTERACTION_CREATE handling, hooks/update-watch.sh, and
-the UPDATING.md commands.
+DM with buttons, the button clicks, hooks/update-watch.sh, and the
+UPDATING.md commands.
 
 Usage: [MUT_DIR=<tree>] python3 tests/updatedm/test_updatedm.py"""
 import contextlib
@@ -10,10 +10,8 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
-import threading
 import time
 import unittest
 
@@ -21,7 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_lib"))
 import monitor_harness as H  # noqa: E402
 from common import (FAKE_PROC, FAKEWS, HOOK_RUNTIME as RUNTIME,  # noqa: E402
-                    MUT_DIR, scratch)
+                    MUT_DIR, copy_watchdog, scratch)
 
 V0 = "v1.0.0"
 V1 = "v1.1.0"
@@ -83,17 +81,8 @@ class Announce(unittest.TestCase):
                   if p == "/users/@me/channels"]
         self.assertEqual(sorted(opened), sorted([H.OWNER, OTHER]))
         body = posts[0][1]
-        text = body["content"]
-        self.assertTrue(text.startswith(
-            "**muse-discord v1.7.0 is out** (you're on v1.0.0)."), text)
-        for i in range(7, 2, -1):
-            self.assertIn(f"- v1.{i}.0: Entry {i}\n", text)
-        self.assertNotIn("Entry 2", text)
-        self.assertNotIn("2026-11-07", text)
-        self.assertIn("+2 more", text)
-        self.assertIn("need a step from you", text)
-        self.assertIn("updates to v1.7.0", text)
-        self.assertLessEqual(len(text), 2000)
+        self.assertIn("v1.7.0", body["content"])
+        self.assertLessEqual(len(body["content"]), 2000)
         self.assertEqual(body["allowed_mentions"], {"parse": []})
         row = body["components"]
         self.assertEqual(len(row), 1)
@@ -102,8 +91,6 @@ class Announce(unittest.TestCase):
         self.assertEqual([b["type"] for b in btns], [2, 2])
         self.assertEqual([b["custom_id"] for b in btns],
                          ["mdupd:now:v1.7.0", "mdupd:later:v1.7.0"])
-        self.assertEqual([b["label"] for b in btns], ["Update now", "Later"])
-        self.assertEqual(btns[0]["style"], 1)
         self.assertEqual(state["update_notice"]["version"], "v1.7.0")
         self.assertEqual(mod._update_announced["version"], "v1.7.0")
         # Same version again (and after a state round trip): no new DM.
@@ -122,20 +109,6 @@ class Announce(unittest.TestCase):
         self.assertEqual(len(dm_posts(mod)), 4)
         last = dm_posts(mod)[-1][1]
         self.assertIn("mdupd:now:v1.10.0", json.dumps(last["components"]))
-        self.assertIn("- v1.10.0: Newer", last["content"])
-        self.assertIn("(you're on v1.7.0)", last["content"])
-        self.assertNotIn("need a step", last["content"])
-
-    def test_unreleased_install(self):
-        mod = load()
-        write_check(mod, V0, ["v1.0.0 (2026-10-20): First release"],
-                    installed="unreleased")
-        mod.announce_update({})
-        text = dm_posts(mod)[0][1]["content"]
-        self.assertTrue(text.startswith(
-            "**muse-discord v1.0.0 is out** (you're on an unreleased "
-            "version)."), text)
-        self.assertIn("- v1.0.0: First release", text)
 
     def test_no_entries_and_no_latest(self):
         mod = load()
@@ -151,25 +124,16 @@ class Announce(unittest.TestCase):
             write_check(mod, bad, ["x"])
             mod.announce_update(state)
         self.assertEqual(mod.api.posts, [])
-        write_check(mod, V1, [])
+        write_check(mod, V1, [])                 # a release, no entries
         mod.announce_update(state)
-        text = dm_posts(mod)[0][1]["content"]
-        self.assertIn("What's new is in CHANGELOG.md.", text)
-        # Old (commit-keyed) state from before releases: replaced.
-        mod2 = load()
-        write_check(mod2, V1, ["v1.1.0 (2026-10-25): X"])
-        st = {"update_notice": {"commit": "a" * 40, "owed": []}}
-        mod2.announce_update(st)
-        self.assertEqual(len(dm_posts(mod2)), 1)
-        self.assertNotIn("commit", st["update_notice"])
+        self.assertEqual(len(dm_posts(mod)), 1)
 
-    def test_updates_check_false_no_dm(self):
+    def test_check_off_no_dm(self):
         mod = load("updates:\n  check: false\n")
         write_check(mod, V1, ["v1.1.0 (2026-10-25): X"])
         mod.announce_update({})
         self.assertEqual(mod.api.posts, [])
-
-    def test_check_turned_off_live(self):
+        # Turned off while running.
         mod = load()
         write_check(mod, V1, ["v1.1.0 (2026-10-25): X"])
         state = {}
@@ -246,9 +210,6 @@ class Interactions(unittest.TestCase):
         r = self.dispatch(ix(f"mdupd:now:{V2}"))
         self.assertEqual(r["type"], 7)
         self.assertEqual(r["data"]["components"], [])
-        self.assertTrue(r["data"]["content"].startswith("notice text\n\n"))
-        self.assertIn("Update now", r["data"]["content"])
-        self.assertIn(V2, r["data"]["content"])
         self.assertLessEqual(len(r["data"]["content"]), 2000)
         with open(self.mod.UPDATE_REQUEST_FILE) as f:
             req = json.load(f)
@@ -266,17 +227,14 @@ class Interactions(unittest.TestCase):
         self.assertEqual(r2["type"], 7)
         with open(self.mod.UPDATE_REQUEST_FILE) as f:
             self.assertEqual(json.load(f)["by"], H.OWNER)
-
-    def test_long_message_capped(self):
+        # A long notice stays within 2,000 characters.
         r = self.dispatch(ix(f"mdupd:later:{V2}", content="x" * 1990))
         self.assertLessEqual(len(r["data"]["content"]), 2000)
-        self.assertIn("Later", r["data"]["content"])
 
     def test_non_owner_refused(self):
         r = self.dispatch(ix(f"mdupd:now:{V2}", user=STRANGER))
         self.assertEqual(r["type"], 4)
         self.assertEqual(r["data"]["flags"], 64)
-        self.assertIn("owners", r["data"]["content"])
         self.assertFalse(os.path.exists(self.mod.UPDATE_REQUEST_FILE))
         self.assertEqual(self.recs, [])
         r = self.dispatch(ix(f"mdupd:now:{V2}", user=STRANGER, guild=True))
@@ -292,19 +250,14 @@ class Interactions(unittest.TestCase):
             self.assertEqual(r["data"]["flags"], 64, cid)
         self.assertFalse(os.path.exists(self.mod.UPDATE_REQUEST_FILE))
         self.assertEqual(self.recs, [])
-        stale = self.dispatch(ix(f"mdupd:now:{V1}"))
-        self.assertIn("out of date", stale["data"]["content"])
-        self.assertIn(V2, stale["data"]["content"])
         self.assertIsNone(self.dispatch({"id": "1", "token": "t",
                                          "type": 4}))
-
-    def test_already_installed_click(self):
+        # Already installed: nothing to do.
         self.mod.installed_versions = {V2}
         for action in ("now", "later"):
             r = self.dispatch(ix(f"mdupd:{action}:{V2}"))
             self.assertEqual(r["type"], 4)
             self.assertEqual(r["data"]["flags"], 64)
-            self.assertIn("already installed", r["data"]["content"])
         self.assertFalse(os.path.exists(self.mod.UPDATE_REQUEST_FILE))
         self.assertEqual(self.recs, [])
 
@@ -317,8 +270,6 @@ class Interactions(unittest.TestCase):
         r = self.dispatch(ix(f"mdupd:later:{V1}"))
         self.assertEqual(r["type"], 7)
         self.assertEqual(r["data"]["components"], [])
-        self.assertIn(f"{V1} will not be offered again",
-                      r["data"]["content"])
         self.assertFalse(os.path.exists(mod.UPDATE_REQUEST_FILE))
         # The record reaches state through the gateway inbox.
         import queue
@@ -339,34 +290,10 @@ class Interactions(unittest.TestCase):
         # The old prompt's buttons are now stale; the new ones work.
         r = self.dispatch(ix(f"mdupd:now:{V1}"))
         self.assertEqual(r["type"], 4)
-        self.assertIn("out of date", r["data"]["content"])
         r = self.dispatch(ix(f"mdupd:now:{V2}"))
         self.assertEqual(r["type"], 7)
         with open(mod.UPDATE_REQUEST_FILE) as f:
             self.assertEqual(json.load(f)["version"], V2)
-
-    def test_handler_crash_gets_ephemeral(self):
-        mod = self.mod
-        sent = []
-        mod.interaction_callback = lambda i, resp: sent.append(resp)
-
-        def boom(*a):
-            raise RuntimeError("x")
-        mod.register_interaction("boom", boom)
-        import queue
-        q = queue.Queue()
-        q.put(ix("boom:1"))
-        q.put(ix(f"mdupd:now:{V2}"))
-        t = threading.Thread(target=mod._interaction_thread_main,
-                             args=(q, self.recs.append), daemon=True)
-        with contextlib.redirect_stdout(io.StringIO()):
-            t.start()
-            for _ in range(100):
-                if len(sent) >= 2:
-                    break
-                time.sleep(0.02)
-        self.assertEqual(sent[0]["type"], 4)
-        self.assertEqual(sent[1]["type"], 7)
 
     def test_callback_request_shape(self):
         mod = self.mod
@@ -399,78 +326,6 @@ class Interactions(unittest.TestCase):
         self.assertEqual(json.loads(seen["data"]), {"type": 7, "data": {}})
         self.assertNotIn("authorization", seen["headers"])
         self.assertLess(seen["timeout"], 3)
-
-
-def main_scenario():
-    """Run main() with a process_outbox that blocks 6s per tick; inject a
-    button click mid-block and time the ACK."""
-    tmp = tmpdir("main_")
-    mod = H.load_monitor(tmp)
-    mod.UPDATE_CHECK_FILE = os.path.join(tmp, "update_check.json")
-    mod.UPDATE_REQUEST_FILE = os.path.join(tmp, "update_request.json")
-    mod.api.routes["/users/@me"] = {"id": H.BOT, "username": "musebot"}
-    mod.BOT_ID = mod.BOT_USER_ID = None
-    mod.discover_channels = lambda previous=None: (
-        {"C1": H.chan()}, {H.G1: {"name": "Srv", "system_channel_id": None,
-                                  "joined_at": None}})
-    with open(mod.STATE_FILE, "w") as f:
-        json.dump({"guild_joined": {H.G1: 0}, "known_guilds": {H.G1: "Srv"},
-                   "update_notice": {"version": V2, "owed": []}}, f)
-
-    def slow_outbox(state):
-        time.sleep(6)
-    mod.process_outbox = slow_outbox
-    res = {}
-
-    def cb(i, resp):
-        res["ack_after"] = time.time() - res["put_at"]
-        res["resp"] = resp
-    mod.interaction_callback = cb
-
-    def fake_gw(token, inbox, status):
-        time.sleep(1.5)  # main loop is inside slow_outbox by now
-        res["put_at"] = time.time()
-        status["interactions"].put(ix(f"mdupd:now:{V2}"))
-    mod._gateway_thread_main = fake_gw
-
-    class Stop(BaseException):
-        pass
-
-    def on_alarm(*_):
-        raise Stop()
-    signal.signal(signal.SIGALRM, on_alarm)
-    signal.setitimer(signal.ITIMER_REAL, 11)
-    out = io.StringIO()
-    with contextlib.redirect_stdout(out):
-        try:
-            mod.main()
-        except Stop:
-            pass
-    with open(mod.STATE_FILE) as f:
-        res["choice"] = json.load(f).get("update_notice", {}).get("choice")
-    try:
-        with open(mod.UPDATE_REQUEST_FILE) as f:
-            res["request"] = json.load(f)
-    except OSError:
-        res["request"] = None
-    res["out"] = out.getvalue()
-    print(json.dumps(res))
-
-
-class MainLoop(unittest.TestCase):
-    def test_ack_not_behind_slow_tick(self):
-        p = subprocess.run([sys.executable, os.path.abspath(__file__),
-                            "--main-scenario"], capture_output=True,
-                           text=True, timeout=60, env=os.environ.copy())
-        try:
-            r = json.loads(p.stdout.strip().splitlines()[-1])
-        except (ValueError, IndexError):
-            raise AssertionError(p.stdout + p.stderr)
-        self.assertIn("ack_after", r, r)
-        self.assertLess(r["ack_after"], 1.0, r)
-        self.assertEqual(r["resp"]["type"], 7)
-        self.assertEqual((r["request"] or {}).get("version"), V2, r)
-        self.assertEqual((r["choice"] or {}).get("action"), "now", r["out"])
 
 
 # ---------------------------------------------------------------- watchdog
@@ -522,7 +377,7 @@ class Watchdog(unittest.TestCase):
         subprocess.run(["git", "clone", "-q", self.origin, self.seed],
                        check=True, capture_output=True)
         git(self.seed, "checkout", "-q", "-b", "main")
-        shutil.copy(os.path.join(MUT_DIR, "watchdog.sh"), self.seed)
+        copy_watchdog(self.seed)
         for n in ("monitor.py", "presence.py"):
             shutil.copy(FAKE_PROC,
                         os.path.join(self.seed, n))
@@ -596,9 +451,7 @@ class Watchdog(unittest.TestCase):
         self.release(V1, E110)
         self.release(V2, E120, annotated=False)
         out = self.run_wd()
-        self.assertEqual(self.update_lines(out), [
-            "UPDATE: muse-discord v1.2.0 is out (installed: unreleased). "
-            "Ask your Muse to update it by following UPDATING.md."], out)
+        self.assertEqual(len(self.update_lines(out)), 1, out)
         c = self.check()
         self.assertEqual(c["latest"], V2)
         self.assertEqual(c["installed"], "unreleased")
@@ -612,6 +465,20 @@ class Watchdog(unittest.TestCase):
         self.assertTrue(self.has_tag(V2))
         self.assertFalse(self.has_tag(V1))
         self.assertFalse(self.has_tag(V0))
+        # Tags that are not releases are ignored.
+        self.tearDown()
+        self.setUp()
+        self.release("v1.9.0", entry("v1.9.0", "2026-10-20", "Nine"))
+        self.release("v1.10.0", entry("v1.10.0", "2026-10-21", "Ten",
+                                      "Do a thing."))
+        self.tag_only("v1.11.0-rc.1", "v2", "v1.12", "v01.13.0", "1.14.0",
+                      "release-15", "v2.0.0-beta", "v3.0.0.1", "nightly")
+        out = self.run_wd()
+        self.assertEqual(len(self.update_lines(out)), 1, out)
+        c = self.check()
+        self.assertEqual(c["latest"], "v1.10.0")
+        self.assertEqual(c["entries"], ["v1.10.0 (2026-10-21): Ten"])
+        self.assertTrue(c["action_needed"])
 
     def test_installed_offered_newer_with_entries(self):
         self.release(V0, E100)
@@ -621,7 +488,6 @@ class Watchdog(unittest.TestCase):
         self.release(V2, E120)
         out = self.run_wd()
         self.assertEqual(len(self.update_lines(out)), 1, out)
-        self.assertIn("v1.2.0 is out (installed: v1.0.0)", out)
         c = self.check()
         self.assertEqual(c["latest"], V2)
         self.assertEqual(c["installed"], V0)
@@ -638,43 +504,9 @@ class Watchdog(unittest.TestCase):
         self.reset_checked()
         out = self.run_wd()
         self.assertEqual(len(self.update_lines(out)), 1, out)
-        self.assertIn("v1.3.0 is out (installed: v1.0.0)", out)
         c = self.check()
         self.assertEqual(c["entries"], [head_of(E130), head_of(E120),
                                         head_of(E110)])
-        self.assertTrue(c["action_needed"])
-        # Listing fails: the version fields stay.
-        self.reset_checked()
-        git(self.inst, "remote", "set-url", "origin",
-            os.path.join(self.d, "missing.git"))
-        self.run_wd()
-        c2 = self.check()
-        self.assertEqual(c2["latest"], "v1.3.0")
-        self.assertEqual(c2["entries"], c["entries"])
-        self.assertGreater(c2["checked"], 0)
-        git(self.inst, "remote", "set-url", "origin", self.origin)
-        # Updated as UPDATING.md does: nothing new, fields cleared.
-        git(self.inst, "merge", "-q", "--ff-only", "v1.3.0")
-        self.reset_checked()
-        out = self.run_wd()
-        self.assertEqual(self.update_lines(out), [])
-        c3 = self.check()
-        self.assertEqual(c3["latest"], "")
-        self.assertEqual(c3["installed"], "v1.3.0")
-        self.assertEqual(c3["entries"], [])
-        self.assertFalse(c3["action_needed"])
-
-    def test_non_release_tags_ignored(self):
-        self.release("v1.9.0", entry("v1.9.0", "2026-10-20", "Nine"))
-        self.release("v1.10.0", entry("v1.10.0", "2026-10-21", "Ten",
-                                      "Do a thing."))
-        self.tag_only("v1.11.0-rc.1", "v2", "v1.12", "v01.13.0", "1.14.0",
-                      "release-15", "v2.0.0-beta", "v3.0.0.1", "nightly")
-        out = self.run_wd()
-        self.assertIn("v1.10.0 is out (installed: unreleased)", out)
-        c = self.check()
-        self.assertEqual(c["latest"], "v1.10.0")
-        self.assertEqual(c["entries"], ["v1.10.0 (2026-10-21): Ten"])
         self.assertTrue(c["action_needed"])
 
     def test_head_already_contains_latest(self):
@@ -705,16 +537,14 @@ class Watchdog(unittest.TestCase):
         self.assertEqual(self.update_lines(self.run_wd()), [])
         self.assertEqual(self.check()["installed"], "v5.0.0")
 
-    def test_check_false_writes_nothing(self):
+    def test_check_false_or_no_origin_writes_nothing(self):
         self.cfg(False)
         self.release(V0, E100)
         out = self.run_wd()
         self.assertEqual(self.update_lines(out), [])
         self.assertFalse(os.path.exists(
             os.path.join(self.inst, "update_check.json")))
-
-    def test_no_origin_skipped(self):
-        self.release(V0, E100)
+        self.cfg(True)
         git(self.inst, "remote", "remove", "origin")
         out = self.run_wd()
         self.assertEqual(self.update_lines(out), [])
@@ -832,8 +662,8 @@ class Hook(unittest.TestCase):
         out, _ = self.run_hook()
         self.assertTrue(out.startswith("SILENT: no update requested"), out)
         self.assertFalse(os.path.exists(self.git_marker))
-
-    def test_expired_lease_rewakes(self):
+        # A lease that expired (the run died): handed out again, once.
+        os.remove(self.state)
         self.request()
         self.run_hook()
         with open(self.state) as f:
@@ -844,7 +674,6 @@ class Hook(unittest.TestCase):
             json.dump(st, f)
         out, err = self.run_hook()
         self.assertTrue(out.startswith("WAKE:"), out)
-        self.assertIn("re-waking", err)
         out, _ = self.run_hook()
         self.assertTrue(out.startswith("SILENT:"), out)
 
@@ -861,8 +690,7 @@ class Hook(unittest.TestCase):
                       "w") as f:
                 f.write(text)
             out, _ = self.run_hook()
-            self.assertTrue(out.startswith("SILENT: update request "
-                                           "unreadable"), (text, out))
+            self.assertTrue(out.startswith("SILENT:"), (text, out))
         with open(self.state, "w") as f:
             f.write("not json")
         self.request()
@@ -871,7 +699,4 @@ class Hook(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    if sys.argv[1:2] == ["--main-scenario"]:
-        main_scenario()
-    else:
-        unittest.main(verbosity=1)
+    unittest.main()

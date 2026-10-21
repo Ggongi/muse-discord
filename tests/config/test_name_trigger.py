@@ -1,10 +1,10 @@
-"""The bare-name trigger is gone, offline: an old config that still
-lists `name` in respond_to and call_names loads with exactly one removal
-warning, a bare name no longer triggers (classify_message and
-trigger_kind), an @mention still does, and load_state drops a leftover
-name_drop burst. Each case imports monitor.py in a fresh subprocess with
-its own config.yaml (settings resolve at import), no network.
-MUT_DIR = the package tree under test (default: this checkout)."""
+"""The bare-name trigger is gone, offline: an old config that still lists
+`name` in respond_to and call_names loads, a bare name never triggers
+(classify_message and trigger_kind), an @mention still does, and
+load_state drops a leftover name_drop burst. Each case imports
+monitor.py in a fresh subprocess with its own config.yaml (settings
+resolve at import), no network. MUT_DIR = the package tree under test
+(default: this checkout)."""
 import json
 import os
 import subprocess
@@ -20,12 +20,6 @@ OLD_CFG = """bot:
 behavior:
   respond_to: [mention, reply_to_bot, name]
   call_names: [Pip]
-  active_guild_ids: ["G"]
-"""
-NEW_CFG = """bot:
-  token_file: /nonexistent
-behavior:
-  respond_to: [mention, reply_to_bot]
   active_guild_ids: ["G"]
 """
 PROBE = r"""
@@ -80,39 +74,12 @@ def run(cfg_text):
 
 
 class OldConfig(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.r = run(OLD_CFG)
-
-    def test_loads_with_exactly_one_removal_warning(self):
-        warns = [line for line in self.r["import_out"].splitlines()
-                 if "name trigger was removed" in line
-                 or "bare-name trigger was removed" in line]
-        self.assertEqual(len(warns), 1, self.r["import_out"])
-
-    def test_bare_name_is_not_a_trigger_classify_message(self):
-        self.assertIsNone(self.r["bare"])
-
-    def test_bare_name_is_not_a_trigger_trigger_kind(self):
-        self.assertIsNone(self.r["trigger_kind"])
-
-    def test_mention_still_triggers(self):
-        self.assertEqual(self.r["direct"], "mention")
-
-    def test_load_state_drops_leftover_name_drop_bursts(self):
-        self.assertEqual(self.r["pending"], ["101:U2"])
-
-
-class CurrentConfig(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.r = run(NEW_CFG)
-
-    def test_no_removal_warning(self):
-        self.assertNotIn("trigger was removed", self.r["import_out"])
-
-    def test_bare_name_is_not_a_trigger(self):
-        self.assertIsNone(self.r["bare"])
+    def test_old_config_bare_name_never_triggers(self):
+        r = run(OLD_CFG)
+        self.assertIsNone(r["bare"])
+        self.assertIsNone(r["trigger_kind"])
+        self.assertEqual(r["direct"], "mention")
+        self.assertEqual(r["pending"], ["101:U2"])
 
 
 if __name__ == "__main__":

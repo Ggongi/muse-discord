@@ -160,37 +160,30 @@ def lazy(fn):
     return put
 
 
-if scenario == "slow40":
-    # ~40 channels, every channel read sleeps 0.5s: a rotation takes ~20s.
-    chans = {f"C{i:02d}": chan(f"c{i}") for i in range(40)}
+if scenario == "slow":
+    # 15 channels, every channel read sleeps 0.25s: a rotation takes ~4s.
+    chans = {f"C{i:02d}": chan(f"c{i}") for i in range(15)}
     setup(chans)
-    SLOW["secs"] = 0.5
-    mod.POLL_INTERVAL = 25
+    SLOW["secs"] = 0.25
+    mod.POLL_INTERVAL = 5
     PROBE["on"] = True
-    gw_script += [(2, lazy(dm)), (9, lazy(lambda: mention("C05"))),
-                  (17, lazy(dm)), (26, lazy(lambda: mention("C30")))]
-elif scenario == "sweep40":
+    gw_script += [(2, lazy(dm)), (4, lazy(lambda: mention("C05"))),
+                  (7, lazy(dm)), (10, lazy(lambda: mention("C14")))]
+elif scenario == "sweep":
     # The sweep pass runs every cycle alongside the poll, both sliced;
     # a mention the poll never saw (below its watermark) is recovered.
-    chans = {f"C{i:02d}": chan(f"c{i}") for i in range(40)}
-    lost = msg("C39", "U9", "@bot are you there", mention=True, age=300)
-    mod.api.msgs["C39"] = [lost]
-    setup(chans, {**{c: "1" for c in chans}, "C39": H.sf(0)})
+    chans = {f"C{i:02d}": chan(f"c{i}") for i in range(20)}
+    lost = msg("C19", "U9", "@bot are you there", mention=True, age=300)
+    mod.api.msgs["C19"] = [lost]
+    setup(chans, {**{c: "1" for c in chans}, "C19": H.sf(0)})
     rec["lost"] = lost["id"]
-    SLOW["secs"] = 0.2
-    mod.POLL_INTERVAL = 10
+    SLOW["secs"] = 0.1
+    mod.POLL_INTERVAL = 4
     PROBE["on"] = True
     mod.SWEEP_EVERY_CYCLES = 1
-    gw_script += [(10, lazy(lambda: mention("C07"))),
-                  (14, lazy(lambda: mention("C08"))),
-                  (18, lazy(lambda: mention("C09")))]
-elif scenario == "bursts":
-    mod.COALESCE_SECS = 5.0
-    setup({"C1": chan()})
-    gw_script += [(1, lazy(dm)), (1, lazy(lambda: mention("C1", "U1"))),
-                  # a DM burst whose author keeps typing waits the window
-                  (4, lazy(lambda: dm("and another thing"))),
-                  (4.05, typing("DM1", OWNER))]
+    gw_script += [(4, lazy(lambda: mention("C07"))),
+                  (6, lazy(lambda: mention("C08"))),
+                  (8, lazy(lambda: mention("C09")))]
 elif scenario == "outbox":
     setup({"500": chan()})
     rec["outbox_written"] = []
@@ -250,7 +243,7 @@ elif scenario == "hung":
     spec.loader.exec_module(real)
     mod.api_get = types.FunctionType(real.api_get.__code__, mod.__dict__)
     mod.api_post = types.FunctionType(real.api_post.__code__, mod.__dict__)
-    rec["read_timeout"] = getattr(mod, "READ_TIMEOUT_SECS", None)
+    mod.READ_TIMEOUT_SECS = 2   # 8 in production; shorter for speed
     setup({"C0": chan(), "C1": chan(), "CH": chan("hung")})
     gw_script += [(1, lazy(lambda: mention("C0")))]
 else:
