@@ -187,9 +187,9 @@ def _join_notice():
         "at": H.NOW - 3 * 3600,
         "content": (f"I just joined **{g['name']}** (server ID {g['id']}).\n"
                     "I'll answer when someone @mentions me or replies to "
-                    "me. Plugins on there: none.\nChannels I can see (1): "
-                    "#homework\nTo change what I do there (welcomes, for "
-                    "one), press **Configure** (or use /settings), or set "
+                    "me. Extras on there: none.\nChannels I can see (1): "
+                    "#homework\nTo change what I do there, press "
+                    "**Configure** (or use /settings), or set "
                     f"servers.\"{g['id']}\" in config.yaml (no restart "
                     "needed)."),
         "components": [{"type": 1, "components": [

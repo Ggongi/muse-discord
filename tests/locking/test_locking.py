@@ -223,43 +223,43 @@ def test_atomic_write_unique_temps():
 def test_monitor_removes_answered_items():
     fresh_pkg()
     st = new_state()
-    mention, welcome, trig, frag1, frag2, silent_id, gone = (
+    mention, plain, trig, frag1, frag2, silent_id, gone = (
         snowflake() for _ in range(7))
-    old_welcome = snowflake()
+    unnamed = snowflake()
     st["reply_aliases"] = {frag1: trig, frag2: trig}
     write(m.QUEUE_FILE, [
         qitem(mention),
-        qitem(welcome, kind="welcome", welcome=True),
+        qitem(plain),
         qitem(trig, burst=True, burst_fragments=[
             {"message_id": frag1}, {"message_id": frag2}]),
         qitem(silent_id),
-        qitem(old_welcome, kind="welcome", welcome=True),
+        qitem(unnamed),
     ])
     write(m.OUTBOX_FILE, [
         {"item": mention, "channel_id": "101", "reply_to": mention,
          "text": "hello"},
-        {"item": welcome, "channel_id": "101", "text": "welcome!"},
+        # answered by its item alone (no reply_to)
+        {"item": plain, "channel_id": "101", "text": "a post"},
         # old worker: no item, reply under the LAST fragment
         {"channel_id": "101", "reply_to": frag2, "text": "burst reply"},
         {"item": silent_id, "channel_id": "101", "reply_to": silent_id,
          "silent": True},
         # old worker already removed its queue item: nothing breaks
         {"channel_id": "101", "reply_to": gone, "text": "late"},
-        # old worker welcome without item: left for the worker to remove
-        {"channel_id": "101", "text": "old-style welcome"},
+        # neither item nor reply_to: posted, the queue item is left for
+        # the worker to remove
+        {"channel_id": "101", "text": "a loose post"},
     ])
     with capture():
         m.process_outbox(st)
-    assert read(m.QUEUE_FILE) == [qitem(old_welcome, kind="welcome",
-                                        welcome=True)] or \
-        [q["message_id"] for q in read(m.QUEUE_FILE)] == [old_welcome], \
+    assert [q["message_id"] for q in read(m.QUEUE_FILE)] == [unnamed], \
         read(m.QUEUE_FILE)
     assert len(sent_texts()) == 5, sent_texts()
-    for mid in (mention, welcome, trig, frag2, silent_id):
+    for mid in (mention, plain, trig, frag2, silent_id):
         assert mid in st["replied_to"], mid
-    # a second worker drafts the same welcome: suppressed
-    write(m.OUTBOX_FILE, [{"item": welcome, "channel_id": "101",
-                           "text": "welcome again"}])
+    # a second worker drafts the same item: suppressed
+    write(m.OUTBOX_FILE, [{"item": plain, "channel_id": "101",
+                           "text": "a post again"}])
     with capture():
         m.process_outbox(st)
     assert len(sent_texts()) == 5
@@ -430,7 +430,7 @@ def _drain(st, inbox_items):
         q.put(it)
     chans = {"101": {"name": "c", "guild_id": "G", "guild_name": "S"}}
     with capture():
-        mentions, joins, dms = m.drain_gateway(st, q, chans)
+        mentions, dms = m.drain_gateway(st, q, chans)
         for mm, cname, gid, kind in mentions:
             m.stage_trigger(st, mm, cname, gid, kind)
     return mentions

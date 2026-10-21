@@ -175,7 +175,8 @@ config:
 ```
 
 A channel block is flat, as in `config.example.yaml`: it may set only
-`replies`, `notes` and `plugins.<plugin>.enabled` (plus `name`), not
+`replies`, `notes`, `media.enabled` and `plugins.<plugin>.enabled`
+(plus `name`), not
 `who:` / `style:` groups; anything else (limits, privacy, ...) is set
 on the server. Threads follow their parent channel.
 
@@ -497,7 +498,7 @@ channel ones: `replies_to`, `no_sut_reply_to`, `sut_reply_count`,
 `reset` or `undo` on `<pkg>/config.yaml` with driver A (the owner) as
 `by`, so `config.discord.yaml` gets the same entry and history line a
 click would write. The key is the canonical one (`who.replies`,
-`style.notes`, `limits.per_person_per_day`,
+`style.notes`, `limits.per_person_per_day`, `media.enabled`,
 `plugins.<plugin>.enabled`); the scope (`channel`: this scenario's
 channel, `server`: the test server, `everywhere`, `dms`) turns it
 into the overlay key `/settings` writes (`muse_settings.format_key`),
@@ -505,8 +506,8 @@ e.g. `servers."<guild>".channels."<channel>".replies` or
 `servers."<guild>".who.replies`; `undo` reverts the newest change at
 that scope (`muse_settings.scope_prefix`). The loader rejects a key,
 scope or value `/settings` could not write (who.replies cannot be set
-at `everywhere`; a channel takes only replies, notes and plugin
-on/off).
+at `everywhere`; a channel takes only replies, notes, and media or
+plugin on/off).
 
 The step then waits (default 30 s, `timeout:` to change) for a new
 `Settings reloaded` line in `monitor.log`. The monitor's main loop

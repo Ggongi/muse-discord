@@ -5,8 +5,8 @@
    each owner-DM item has a capability nonce, never in the queue file;
    a missing or wrong nonce, or a wrong channel, is refused WITHOUT
    settling the item, so the owner's real reply still goes out.
-2. Free-text settings (Instructions, the status line, welcome notes)
-   always need Apply.
+2. Free-text settings (Instructions, the status line) always need
+   Apply.
 3. Every bin/settings.py group (cli-*) reaches the owners, whatever its
    --by; changes made while the monitor was down are noticed at its
    start (and the first run does not flood).
@@ -122,9 +122,7 @@ class FreeText(Base):
     def test_free_text_always_asks(self):
         for changes in ([ch("set", GEN, "style.notes", "Be brief.")],
                         [ch("add", "defaults", "style.notes", "Be kind.")],
-                        [ch("set", "defaults", "presence.status", "hi")],
-                        [ch("set", f"server:{G1}", "plugins.welcome.notes",
-                            "Say hi")]):
+                        [ch("set", "defaults", "presence.status", "hi")]):
             self.ask(changes)
             self.assert_unchanged()
             self.assertTrue(self.custom_ids(self.last())[0].startswith(
@@ -318,10 +316,8 @@ class LockAndCrashes(Base):
                 "style.notes": ["x"], "style.length": ["brief"],
                 "limits.per_day": [0, "none"],
                 "privacy.memory": ["everything"],
-                "plugins.welcome.channel": [CH, "system", T.CH_G2],
-                "plugins.welcome.enabled": [True],
-                "plugins.media.who": ["everyone", [U1]],
-                "plugins.media.enabled": [True],
+                "media.who": ["everyone", [U1]],
+                "media.enabled": [True], "media.per_day": [0, "none"],
                 "presence.status": ["hi"],
                 "who.bot_exchange_limit": ["none", 50]}
         acts = [[ch("undo")]]
@@ -330,7 +326,7 @@ class LockAndCrashes(Base):
                 acts.append([ch("reset", p, k)])
                 acts += [[ch("set", p, k, v)] for v in vs]
                 if k in ("who.dms_from", "who.allow", "who.ignore",
-                         "plugins.media.who"):
+                         "media.who"):
                     acts += [[ch("add", p, k, [U1])],
                              [ch("remove", p, k, [U1])]]
                 if k == "style.notes":

@@ -46,8 +46,7 @@ class Places(unittest.TestCase):
         st = load(config(self))
         pp = MS.place_path
         self.assertEqual(pp(st, DEF, "who.replies"), ("all_servers",))
-        self.assertEqual(pp(st, DEF, "plugins.welcome.enabled"),
-                         ("all_servers",))
+        self.assertEqual(pp(st, DEF, "media.enabled"), ("all_servers",))
         self.assertEqual(pp(st, DEF, "privacy.memory"), ("everywhere",))
         self.assertEqual(pp(st, DEF, "who.dms_from"), ("dms",))
         self.assertEqual(pp(st, DEF, "presence.status"), ("top",))
@@ -63,11 +62,10 @@ class Places(unittest.TestCase):
                 pp(st, place, key)
 
     def test_hidden_keys_stay_valid_and_overlay_keeps_them(self):
-        """The compat trap: hiding is UI-only; presence.kind and welcome
-        at everywhere keep working from the overlay."""
+        """The compat trap: hiding is UI-only; presence.kind keeps
+        working from the overlay."""
         ov = ("version: 1\nvalues:\n  presence.kind: {value: playing, by: "
-              f"'{OWNER}', at: x}}\n  everywhere.plugins.welcome.enabled: "
-              f"{{value: 'on', by: '{OWNER}', at: x}}\n")
+              f"'{OWNER}', at: x}}\n")
         st = load(config(self, overlay=ov))
         self.assertEqual(st.retire, [])
         self.assertEqual(st.top("presence.kind"), "playing")
@@ -94,7 +92,7 @@ class Risk(unittest.TestCase):
         pp = BASE.replace("servers:", "everywhere:\n  limits:\n"
                           "    per_person_per_day: 5\nservers:")
         pause_cfg = BASE + "    who:\n      replies: when-addressed\n"
-        media = [C(S1, "plugins.media.enabled", True)]
+        media = [C(S1, "media.enabled", True)]
         cases = [
             # (config, applied first, changes, info, risky)
             (BASE, [], [C(DMS, "who.dms_from", "anyone")], INFO, True),
@@ -116,13 +114,13 @@ class Risk(unittest.TestCase):
              [C(DMS, "privacy.memory", "everything")], INFO, True),
             (BASE, [], [C(S2, "privacy.memory", "nothing")], INFO, False),
             (BASE, [], media, INFO, False),
-            (BASE, [], media + [C(S1, "plugins.media.who", "everyone")],
+            (BASE, [], media + [C(S1, "media.who", "everyone")],
              INFO, True),
-            (BASE, [], media + [C(S1, "plugins.media.who", [SAM]),
-                                C(S1, "plugins.media.per_day", 5)], INFO,
+            (BASE, [], media + [C(S1, "media.who", [SAM]),
+                                C(S1, "media.per_day", 5)], INFO,
              False),
-            (BASE, [], media + [C(S1, "plugins.media.who", [SAM]),
-                                C(S1, "plugins.media.per_day", 21)], INFO,
+            (BASE, [], media + [C(S1, "media.who", [SAM]),
+                                C(S1, "media.per_day", 21)], INFO,
              True),
             (BASE, [], [C(DEF, "who.allow", [SAM])], INFO, True),
             (BASE, [C(S2, "who.allow", [SAM])],
@@ -520,7 +518,7 @@ class Admin(unittest.TestCase):
         self.refused([C(S1, "who.allow", [SAM])])
         self.refused([C(S1, "privacy.memory", "nothing")])
         self.refused([C(GEN, "who.ignore", [SAM])])
-        self.refused([C(S1, "plugins.media.enabled", True)])
+        self.refused([C(S1, "media.enabled", True)])
         self.refused([C(S1, "who.replies", "conversational")])
         # a forged layer path on an innocent-looking change
         self.refused([C(S1, "who.replies", "off", path=("all_servers",))])
@@ -530,7 +528,7 @@ class Admin(unittest.TestCase):
         st = load(self.cfg)
         self.refused(MS.preset_changes(st, "work", S1, INFO))
         # a mixed batch is refused whole
-        self.refused([C(S1, "plugins.welcome.enabled", False),
+        self.refused([C(S1, "media.enabled", False),
                       C(S1, "who.replies", "conversational")])
 
     def test_admin_undo_sees_only_admin_changes(self):
@@ -775,14 +773,14 @@ class ReviewHigh(unittest.TestCase):
                 admin_apply(cfg, [C(S1, "who.ignore", v)])
         self.assertEqual(value(cfg, S1, "who.ignore"), [SPAM])
         # an Extra
-        cfg = config(self, BASE + "all_servers:\n  plugins:\n    media:\n"
-                     "      enabled: on\n")
-        admin_apply(cfg, [C(S1, "plugins.media.enabled", False)])
-        self.assertTrue(apply(cfg, [C(S1, "plugins.media.enabled",
+        cfg = config(self, BASE + "all_servers:\n  media:\n"
+                     "    enabled: on\n")
+        admin_apply(cfg, [C(S1, "media.enabled", False)])
+        self.assertTrue(apply(cfg, [C(S1, "media.enabled",
                                       False)]).changed)
         with self.assertRaises(MS.SettingsError):
-            admin_apply(cfg, [C(S1, "plugins.media.enabled", "inherit")])
-        self.assertIs(value(cfg, S1, "plugins.media.enabled"), False)
+            admin_apply(cfg, [C(S1, "media.enabled", "inherit")])
+        self.assertIs(value(cfg, S1, "media.enabled"), False)
         # the legacy set_value path (today's /settings)
         cfg = config(self, BASE + "all_servers:\n  who:\n    replies: "
                      "conversational\n")
@@ -902,15 +900,14 @@ class ReviewMedium(unittest.TestCase):
         self.assertEqual(value(cfg, S1, "who.replies"), "off")
         # lists join; Extras need both on
         cfg = config(self, BASE + f'    who:\n      ignore: ["{SPAM}"]\n'
-                     "all_servers:\n  plugins:\n    media:\n      enabled: "
-                     "on\n")
+                     "all_servers:\n  media:\n    enabled: on\n")
         admin_apply(cfg, [C(S1, "who.ignore", [SPAM, SAM])])
         apply(cfg, [C(S1, "who.ignore", [SPAM, ANN])])
         self.assertEqual(value(cfg, S1, "who.ignore"), [SPAM, ANN])
-        admin_apply(cfg, [C(GEN, "plugins.media.enabled", False)])
-        apply(cfg, [C(DEF, "plugins.media.enabled", False)])
-        apply(cfg, [C(DEF, "plugins.media.enabled", True)])
-        self.assertIs(value(cfg, GEN, "plugins.media.enabled"), False)
+        admin_apply(cfg, [C(GEN, "media.enabled", False)])
+        apply(cfg, [C(DEF, "media.enabled", False)])
+        apply(cfg, [C(DEF, "media.enabled", True)])
+        self.assertIs(value(cfg, GEN, "media.enabled"), False)
 
     def test_m7_listed_people_are_polled_and_swept(self):
         text = BASE.replace("servers:", "everywhere:\n  privacy:\n    "

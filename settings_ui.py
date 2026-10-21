@@ -25,7 +25,7 @@ custom_id grammar ("mdset:2:" + colon-separated parts, <= 100 chars):
     val:<place>:<k>:<v>[:<page>]   a button with an absolute value
     ppl:<place>:<k>          a user / mentionable select
     rm:<place>:<k>           a "Remove someone..." select
-    mod:<place>:<form>[:<page>]    open a modal (i c bx mpd wn st fc fs
+    mod:<place>:<form>[:<page>]    open a modal (i c bx mpd st fc fs
                                    id.<k>)
     sub:<place>:<form>[:<page>]    its submit
     re:<place>:<form>:<tok>  reopen a modal from a stashed draft
@@ -121,7 +121,7 @@ class Ctx(Protocol):
     now: float
 
     def guilds(self) -> list: ...
-    # [{"id", "name", "member_count", "system_channel_id"}]
+    # [{"id", "name", "member_count"}]
     def channels(self, guild_id) -> list: ...
     # [{"id", "name", "type", "parent_id", "readable", "can_send"}]
     def apply(self, changes, by, role, group=None, admin_gid=None): ...
@@ -157,13 +157,15 @@ _PLACE = re.compile(r"x|d|s(\d{1,25})|c(\d{1,25})\.(\d{1,25})")
 _ID = re.compile(r"\d{1,25}")
 _SNOWFLAKE = re.compile(r"\d{15,25}")
 _PART = re.compile(r"[^:]{1,100}")
-FORMS = ("i", "c", "bx", "mpd", "wn", "st", "fc", "fs")
+FORMS = ("i", "c", "bx", "mpd", "st", "fc", "fs")
 PAGES = ("b", "m", "e", "w", "y", "q", "o")
 
 
 def kcode(key):
     if key in CORE_CODES:
         return CORE_CODES[key]
+    if key.startswith("media."):
+        return "~" + key  # the media plugin's code: ids stay valid
     if key.startswith("plugins."):
         code = "~" + key[len("plugins."):]
         if _PLUGIN_CODE.fullmatch(code):
@@ -175,7 +177,7 @@ def kdecode(code):
     if code in CODE_KEYS:
         return CODE_KEYS[code]
     if _PLUGIN_CODE.fullmatch(code or ""):
-        return "plugins." + code[1:]
+        return ms.moved_key("plugins." + code[1:])
     return None
 
 
@@ -712,10 +714,6 @@ def vl(R, key, v):
     if v is None and R.st.spec(key) is not None \
             and R.st.spec(key).type == "number":
         return "No cap"
-    if key == "plugins.welcome.channel" and isinstance(v, str) \
-            and _ID.fullmatch(v):
-        n = R.look(v)
-        return f"#{n}" if n else "a channel"
     return ms.value_label(key, v, R.look)
 
 
@@ -824,7 +822,7 @@ def option_help(R, place, key, v):
                                   "that person's follow-ups for 2 minutes",
                 "when-addressed": "Answers only @mentions and replies to "
                                   "its messages"}.get(v)
-    if key == "plugins.media.who" and v == "everyone":
+    if key == "media.who" and v == "everyone":
         return (f"Anyone in {where}; generation can cost real money"
                 if place.kind != "defaults" else
                 "Anyone; generation can cost real money")
@@ -854,8 +852,8 @@ OPTION_HELP = {
                                         "the bot",
     ("who.dms_from", "anyone"): "Anyone on Discord, strangers included",
     ("who.dms_from", "nobody"): "No DM gets an answer, not even yours",
-    ("plugins.media.who", "owners"): "Only the bot's owners",
-    ("plugins.media.who", "list"): "Owners plus the people below",
+    ("media.who", "owners"): "Only the bot's owners",
+    ("media.who", "list"): "Owners plus the people below",
 }
 
 
@@ -869,9 +867,9 @@ ORDER = {"who.replies": ("conversational", "when-addressed", "off"),
 def value_name(R, key, v):
     if key == "who.dms_from" and v == "owners" and len(R.ctx.owners) > 1:
         return "Only you and the other owners"
-    if key == "plugins.media.who" and v == "list":
+    if key == "media.who" and v == "list":
         return "You and people you pick"
-    if key == "plugins.media.who" and v == "everyone":
+    if key == "media.who" and v == "everyone":
         return "Everyone here"
     return ms.VALUE_LABELS.get((key, v)) or vl(R, key, v)
 
@@ -892,12 +890,12 @@ def choice_select(R, place, key, custom_id, values=None, placeholder=None):
         parent = parent_name(R, place, key)
         inh = v.inherited
         shown = value_name(R, key, "list") if isinstance(inh, list) \
-            and key == "plugins.media.who" else value_name(R, key, inh)
+            and key == "media.who" else value_name(R, key, inh)
         opts.append(opt(f"Same as {parent}: {shown}", "=",
                         f"Follows {parent} and changes when it does",
                         default=not v.set))
     cur = v.here if same else v.value
-    if key == "plugins.media.who" and isinstance(cur, list):
+    if key == "media.who" and isinstance(cur, list):
         cur = "list"
     vals = list(values or ORDER.get(key) or spec.values)
     for x in vals:
@@ -1144,7 +1142,7 @@ def _strip(c):
 # Shared pieces of pages
 # ---------------------------------------------------------------------------
 def toggle_button(R, place, key, page):
-    """[Welcome: Off · Turn on] style button with an absolute value."""
+    """[Image and video: Off · Turn on] style button, absolute value."""
     on = bool(value(R, place, key))
     name = EXTRA_SHORT.get(key) or ms.label(key)
     return btn(f"{name}: {'On · Turn off' if on else 'Off · Turn on'}",
@@ -1152,15 +1150,13 @@ def toggle_button(R, place, key, page):
                    page), SUCCESS if on else SECONDARY)
 
 
-EXTRA_SHORT = {"plugins.welcome.enabled": "Welcome",
-               "plugins.media.enabled": "Image and video"}
+EXTRA_SHORT = {"media.enabled": "Image and video"}
 
 
 def extra_keys(keys):
-    """The Extras' on/off keys, welcome first."""
-    out = [k for k in keys if k.startswith("plugins.")
-           and k.endswith(".enabled")]
-    return sorted(out, key=lambda k: (k != "plugins.welcome.enabled", k))
+    """The Extras' on/off keys, image and video first."""
+    out = [k for k in keys if ms._is_enabled_key(k)]
+    return sorted(out, key=lambda k: (k != "media.enabled", k))
 
 
 def toggle_section(R, place, key, page):
@@ -1335,7 +1331,7 @@ def page_channel(R, place):
                              btn("Edit", cid("mod", tok, "i", "b"),
                                  PRIMARY)))
     for k in keys:
-        if k.startswith("plugins.") and k.endswith(".enabled"):
+        if ms._is_enabled_key(k):
             inner.append(toggle_section(R, place, k, "b"))
     chan_row, _pages = channel_row(R, place, gid,
                                   f"Go to another channel in {gname}…")
@@ -1507,106 +1503,38 @@ def page_more(R, place):
     return finish(R, place, inner, [row(*footer)])
 
 
-def welcome_where(R, place):
-    """The "Where welcomes go" text."""
-    v = value(R, place, "plugins.welcome.channel")
-    if place.kind == "defaults":
-        if v == "off":
-            return "Nowhere: welcomes are off unless a server picks one."
-        if v == "system":
-            return "Each server's system channel"
-        return "A channel set for every server"
-    gid = place.guild_id
-    gname = R.gname(gid)
-    if v == "off":
-        return "Nowhere: welcomes are skipped. Pick a channel."
-    if v == "system":
-        g = R.guilds().get(gid) or {}
-        if "system_channel_id" not in g:
-            return "The server's system channel"
-        sys_id = g.get("system_channel_id")
-        if not sys_id:
-            return (f"⚠ {gname} has no system channel, so welcomes are "
-                    f"skipped. Pick a channel.")
-        n = R.look(sys_id)
-        text = "The server's system channel, " + (f"#{n}" if n
-                                                   else "<#" + sys_id + ">")
-        if (R.chan(gid, sys_id) or {}).get("can_send") is False:
-            text += "\n-# The bot can't post there; welcomes are skipped."
-        return text
-    if _ID.fullmatch(str(v)):
-        text = f"<#{v}>"
-        if (R.chan(gid, v) or {}).get("can_send") is False:
-            text += "\n-# The bot can't post there; welcomes are skipped."
-        return text
-    return f"#{esc(v)}"
-
-
 def page_extras(R, place):
     """S4: Extras details (a server or Defaults)."""
     tok = ptok(place)
     where = R.name(place)
     inner = [td(f"## {where} › Extras"), sep()]
-    st = R.st
-    if "welcome" in st.manifests:
-        inner.append(toggle_section(R, place, "plugins.welcome.enabled",
-                                    "e"))
-        inner.append(td(f"**Where welcomes go**\n{welcome_where(R, place)}"))
-        cur = value(R, place, "plugins.welcome.channel")
-        if place.kind == "server":
-            s, _pages = channel_select_or_fallback(
-                R, place.guild_id, cid("set", tok, "~welcome.channel"), tok,
-                "Pick a channel…", TEXT_CHANNEL_TYPES, cur)
-            if s:
-                inner.append(row(s))
-            inner.append(row(
-                btn("Use the system channel",
-                    cid("val", tok, "~welcome.channel", "system", "e")),
-                btn("Edit welcome notes", cid("mod", tok, "wn", "e"))))
-        else:
-            inner.append(row(
-                btn("Use each server's system channel",
-                    cid("val", tok, "~welcome.channel", "system", "e")),
-                btn("Off", cid("val", tok, "~welcome.channel", "off", "e")),
-                btn("Edit welcome notes", cid("mod", tok, "wn", "e"))))
-        sc = _scope_at(place, "plugins.welcome.daily_cap")
-        cap = st.get("plugins.welcome.daily_cap", sc)
-        age = st.get("plugins.welcome.max_age_hours", sc)
-        line = ("-# " + (f"At most {cap:,} welcomes a day" if cap is not None
-                         else "No daily limit on welcomes")
-                + "; " + (f"joins older than {age:,} hours are skipped"
-                          if age is not None else "old joins are welcomed "
-                          "too") + ". Change these in config.yaml.")
-        prompt = st.get("plugins.welcome.prompt", sc)
-        spec = st.spec("plugins.welcome.prompt")
-        if spec is not None and prompt != spec.default:
-            line += (" A custom welcome prompt is set in config.yaml; your "
-                     "notes are added to it.")
-        inner.append(td(line))
-    if "media" in st.manifests:
-        if len(inner) > 2:
-            inner.append(sep())
-        inner.append(toggle_section(R, place, "plugins.media.enabled", "e"))
-        v = Val(R, place, "plugins.media.who")
-        pend = ("\nPick people below; nothing changes until you do."
-                if R.pending == "plugins.media.who" else "")
-        inner.append(td(f"**Who can ask for images and video**{tag(R, v)}"
-                        f"{pend}"))
-        inner.append(row(choice_select(
-            R, place, "plugins.media.who", cid("set", tok, "~media.who"),
-            values=["owners", "everyone", "list"])))
-        if isinstance(v.value, list) or R.pending == "plugins.media.who":
-            picked = [p for p in (v.value if isinstance(v.value, list)
-                                  else []) if p not in R.ctx.owners]
-            inner.append(people_select(R, place, "plugins.media.who",
-                                       MENTIONABLE_SELECT, "Pick people…",
-                                       value_=picked))
-        vp = Val(R, place, "plugins.media.per_day")
-        cur = "No cap" if vp.value is None else f"{vp.value:,} a day"
-        if not vp.set and place.kind != "defaults":
-            cur = f"Same as Defaults: {cur}"
-        inner.append(section(f"**Generations per day**{tag(R, vp)}\n{cur}",
-                             btn("Change", cid("mod", tok, "mpd", "e"))))
+    inner.append(toggle_section(R, place, "media.enabled", "e"))
+    v = Val(R, place, "media.who")
+    pend = ("\nPick people below; nothing changes until you do."
+            if R.pending == "media.who" else "")
+    inner.append(td(f"**Who can ask for images and video**{tag(R, v)}"
+                    f"{pend}"))
+    inner.append(row(choice_select(
+        R, place, "media.who", cid("set", tok, "~media.who"),
+        values=["owners", "everyone", "list"])))
+    if isinstance(v.value, list) or R.pending == "media.who":
+        picked = [p for p in (v.value if isinstance(v.value, list)
+                              else []) if p not in R.ctx.owners]
+        inner.append(people_select(R, place, "media.who",
+                                   MENTIONABLE_SELECT, "Pick people…",
+                                   value_=picked))
+    vp = Val(R, place, "media.per_day")
+    cur = "No cap" if vp.value is None else f"{vp.value:,} a day"
+    if not vp.set and place.kind != "defaults":
+        cur = f"Same as Defaults: {cur}"
+    inner.append(section(f"**Generations per day**{tag(R, vp)}\n{cur}",
+                         btn("Change", cid("mod", tok, "mpd", "e"))))
+    plugins = [k for k in extra_keys(ms.place_keys(R.st, place, "basics"))
+               if k != "media.enabled"]
+    if plugins:
+        inner.append(sep())
+    for k in plugins:
+        inner.append(toggle_section(R, place, k, "e"))
     return finish(R, place, inner,
                   [row(btn(f"Back to {where}", cid("pg", tok, "b")))])
 
@@ -1749,7 +1677,7 @@ def page_dms(R):
         inner.append(cap_section(R, place, "limits.per_person_per_day",
                                  "c", "b"))
     for k in keys:
-        if k.startswith("plugins.") and k.endswith(".enabled"):
+        if ms._is_enabled_key(k):
             inner.append(toggle_section(R, place, k, "b"))
     footer = [row(btn("More settings", cid("pg", "d", "m")),
                   btn("Why no reply?", cid("pg", "d", "y"))),
@@ -2320,9 +2248,7 @@ def page_quiet(R, gid):
             for p in added[:25]], "Remove someone admins added…", 1,
             min(25, len(added)))))
     offs = []
-    for key, label in (("plugins.welcome.enabled", "Turn off welcome"),
-                       ("plugins.media.enabled",
-                        "Turn off image and video")):
+    for key, label in (("media.enabled", "Turn off image and video"),):
         if st.spec(key) is not None and value(R, server, key):
             offs.append(btn(label, cid("val", f"s{gid}", kcode(key), "off",
                                        "q"), DANGER))
@@ -2396,7 +2322,7 @@ def page_confirm(R, origin, lines, warnings, tok, undo=False):
 
 
 PRESET_SKIP_WORDS = {
-    "plugins.media.per_day": "{label} (image and video is off here)",
+    "media.per_day": "{label} (image and video is off here)",
     "style.notes": "{label} ({where} has its own)",
 }
 
@@ -2442,7 +2368,7 @@ def page_preset(R, place, name):
         if isinstance(v, tuple):
             cond, _val = v
             if cond == "if-media-on" and not R.st.get(
-                    "plugins.media.enabled", sc):
+                    "media.enabled", sc):
                 skipped.append(PRESET_SKIP_WORDS[key].format(
                     label=ms.label(key), where=gname))
                 continue
@@ -2490,18 +2416,17 @@ def page_preset(R, place, name):
 # Modals
 # ---------------------------------------------------------------------------
 CAP_FIELDS = {"pp": "limits.per_person_per_day", "pd": "limits.per_day",
-              "bx": "who.bot_exchange_limit", "mpd": "plugins.media.per_day"}
+              "bx": "who.bot_exchange_limit", "mpd": "media.per_day"}
 CAP_WORDS = {"limits.per_person_per_day": "Replies per person per day",
              "limits.per_day": "Replies per day",
              "who.bot_exchange_limit": "Replies in a row to other bots",
-             "plugins.media.per_day": "Generations per day"}
+             "media.per_day": "Generations per day"}
 NO_CAP = ("", "none", "no cap", "nocap", "unlimited", "-", "no limit",
           "nolimit")
 FORM_KEYS = {"i": ("style.notes",), "c": ("limits.per_person_per_day",
                                           "limits.per_day"),
              "bx": ("who.bot_exchange_limit",),
-             "mpd": ("plugins.media.per_day",),
-             "wn": ("plugins.welcome.notes",), "st": ("presence.status",)}
+             "mpd": ("media.per_day",), "st": ("presence.status",)}
 
 
 def form_ok(R, place, form):
@@ -2633,17 +2558,6 @@ def open_modal(R, place, form, page, draft=None):
             td(intro),
             labelled(CAP_WORDS[key], text_input(
                 "v", 1, 7, draft_value(draft, "v", cur), "No cap"), desc)])
-    if form == "wn":
-        v = Val(R, place, "plugins.welcome.notes")
-        blank = "nothing extra" if place.kind == "defaults" \
-            else "same as Defaults"
-        return modal(sub, f"Welcome notes · {where}", [
-            td("What to mention to newcomers; added to the welcome prompt."),
-            labelled("Welcome notes", text_input(
-                "v", 2, 500, draft_value(draft, "v", v.here if v.set
-                                         else ""),
-                "Example: Point them to #rules and #introductions."),
-                f"Up to 500 characters. Blank = {blank}.")])
     if form == "st":
         cur = st.top("presence.status") or ""
         return modal(sub, "Status line", [
@@ -2795,11 +2709,6 @@ def done_notes(R, res):
     out = []
     for p in res.written:
         place, key = p.change.place, p.key
-        if key == "plugins.welcome.enabled" and p.new is True \
-                and place.kind == "server":
-            w = welcome_where(R, place)
-            out.append(w if w.startswith("⚠") else
-                       f"Welcomes go to: {w.splitlines()[0]}.")
         if key in ("limits.per_day", "limits.per_person_per_day") \
                 and p.new == 0 and place.kind != "defaults":
             out.append(f"0 means only the owners get replies in "
@@ -3097,7 +3006,7 @@ def changes_for_people(R, place, key, picked, add_only=False):
             new = list(dict.fromkeys(pin + adds + kept))
             return [ms.Change(place, key, new)], notes, ()
         return [list_change(R, place, key, kept)], notes, ()
-    if key == "plugins.media.who":
+    if key == "media.who":
         if not picked:
             return [ms.Change(place, key, "owners")], notes, ()
         full = list(dict.fromkeys(sorted(owners) + picked))
@@ -3367,19 +3276,12 @@ def v_set(R, place, args, values):
             return notice(OUT_OF_DATE)
         return do_changes(R, (place, page),
                           ms.dms_from_changes(R.st, v))
-    if key == "plugins.media.who" and v == "list":
+    if key == "media.who" and v == "list":
         if isinstance(value(R, place, key), list):
             R.banner = [td("**No change:** pick people below.")]
             return show(R, place, page)
         R.pending = key
         return show(R, place, page)
-    if key == "plugins.welcome.channel":
-        m = re.fullmatch(r"p(\d{1,4})", v)
-        if m:
-            R.chan_page = int(m[1])
-            return show(R, place, page)
-        if not _ID.fullmatch(v):
-            return notice(OUT_OF_DATE)
     write = "inherit" if v == "=" else v
     spec = R.st.spec(key)
     if spec.type == "choice" and write != "inherit" \
@@ -3582,13 +3484,6 @@ def v_sub(R, place, args, values):
         if err:
             return fail(err)
         changes.append(ms.Change(place, key, v))
-    elif form == "wn":
-        text = (fields.get("v") or "").strip()
-        if len(text) > 500:
-            return fail(f"Welcome notes take up to 500 characters; that was "
-                        f"{len(text):,}.")
-        changes.append(ms.Change(place, "plugins.welcome.notes",
-                                 text or "inherit"))
     elif form == "st":
         text = (fields.get("v") or "").strip()
         if len(text) > 128:

@@ -42,11 +42,8 @@ everywhere:
   limits:
     per_day: none
     per_person_per_day: none
-  plugins:
-    welcome:
-      enabled: "off"
-    media:
-      enabled: "off"
+  media:
+    enabled: "off"
 
 dms:
   who:

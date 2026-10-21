@@ -139,6 +139,7 @@ def known_spec(key, plugins_dir=None):
     manifests alone (config.yaml is not read), else None."""
     if not isinstance(key, str):
         return None
+    key = MS.moved_key(key)  # an older worker's plugins.media.*
     if key in MS.CORE:
         return MS.CORE[key]
     if key in MS.TOP:
@@ -194,7 +195,7 @@ def _change_problems(c, where, plugins_dir):
     spec = known_spec(key, plugins_dir)
     if spec is None:
         out.append(f"{where}.key {json.dumps(key)} is not a setting (e.g. "
-                   f"who.replies, style.length, plugins.media.enabled)")
+                   f"who.replies, style.length, media.enabled)")
         return out
     if op == "set":
         ok, why = MS.normalize(spec, c["value"])
@@ -214,7 +215,7 @@ def _change_problems(c, where, plugins_dir):
         elif not _list_key(key, spec):
             out.append(f'{where}: "{op}" works on lists of people '
                        f'(who.allow, who.ignore, who.dms_from, '
-                       f'plugins.media.who); use "set" for {key}')
+                       f'media.who); use "set" for {key}')
         else:
             pat = _USER_RE if spec.ids else _PERSON_RE
             if not (isinstance(v, list) and 1 <= len(v) <= MAX_IDS
@@ -478,7 +479,7 @@ def build_change(ctx, st, inf, c, names):
     SettingsError in plain words)."""
     place = MS.parse_place(c["place"], inf)
     check_place(ctx, st, inf, place, names)
-    key = c["key"]
+    key = MS.moved_key(c["key"])
     check_key(st, place, key, names)
     op = c["op"]
     if op == "reset":
@@ -650,7 +651,7 @@ def plan_action(ctx, st, inf, action, uid, names, people):
     if errors:
         raise MS.SettingsError("; ".join(errors))
     p = plan_apply(st, inf, built, names, people)
-    # Free text (Instructions, the status line, welcome notes) always
+    # Free text (Instructions, the status line) always
     # needs Apply: words in it steer the Muse or show publicly, and an
     # owner-DM run may have read other people's text.
     p.free_text = any(

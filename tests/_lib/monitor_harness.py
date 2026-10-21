@@ -97,7 +97,6 @@ behavior:
 engine:
   rest_poll_seconds: 1
 plugins:
-  welcome: {{enabled: false}}
   media_generation: {{enabled: false}}
 """ + extra)
     return path

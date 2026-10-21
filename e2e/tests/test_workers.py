@@ -98,7 +98,6 @@ class FakeWorker(unittest.TestCase):
             queue_item("105", "shh [[silent]]"),
             queue_item("106", "[[long]] [[mention_a]] [[everyone]] go"),
             queue_item("107", "hi", [("108", "[[silent]]")]),
-            queue_item("109", "welcome!", kind="welcome"),
             queue_item("110", "[[say:the Blue Pelican]] hi"),
             queue_item("111", "[[settings:set who.replies=off @here]]"),
             queue_item("112", "plain", owner_dm_nonce=NONCE),
@@ -141,7 +140,6 @@ class FakeWorker(unittest.TestCase):
         for frag in (f"<@{A_ID}>", "@everyone", f"<@&{GID}>"):
             self.assertIn(frag, text[:100])  # survives the 1800 cap
         self.assertTrue(got["107"]["silent"])  # directive in a fragment
-        self.assertNotIn("reply_to", got["109"])  # welcomes: no reply_to
         self.assertEqual(got["110"]["text"], "ack 1 the Blue Pelican")
         self.assertEqual(got["111"]["settings"]["changes"], [
             {"op": "set", "place": f"channel:{GID}:{CID}",
