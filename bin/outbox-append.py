@@ -18,7 +18,8 @@ Nothing is appended if any item has an obvious mistake (the monitor
 would set it aside unsent); the errors are printed so the worker can fix
 them and run it again. An item with a `settings` action (a settings
 request from an owner's DM; PROTOCOL.md) gets the monitor's own shape
-checks (settings_nl.shape_problems). An item for an owner's DM
+checks (settings_nl.shape_problems); a `proactive` opt-out / opt-in
+is "opt-out" or "opt-in" on an item with `item`. An item for an owner's DM
 carries that DM's `owner_dm_nonce` from the wake payload, passed
 through as is (checked here only for its shape: the monitor holds the
 real one). The monitor re-validates every item on its side. Never
@@ -84,6 +85,11 @@ def problems(item):
                 isinstance(value, list)
                 and all(isinstance(v, str) for v in value)):
             out.append(f"{field} is not a list of strings")
+    if "proactive" in item and (item["proactive"] not in ("opt-out",
+                                                          "opt-in")
+                                or not item.get("item")):
+        out.append('proactive is "opt-out" or "opt-in", on the reply to the '
+                   'person\'s own message (with its "item")')
     nonce = item.get("owner_dm_nonce")
     if nonce is not None:
         if not (isinstance(nonce, str) and NONCE_RE.fullmatch(nonce)):

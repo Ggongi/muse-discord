@@ -268,6 +268,10 @@ class Worker:
                 continue
             self.answered.add(mid)
             seen.append(item)
+            if item.get("kind") == "proactive":
+                # A heartbeat slot: its nonce is never in the queue file
+                # this worker reads, so it lets the slot expire.
+                continue
             out, delay = build_reply(item, self.a_id)
             print(f"item {mid}: {sorted(directives(item)) or 'ack'}"
                   f"{f' (in {delay:.0f}s)' if delay else ''}", flush=True)

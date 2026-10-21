@@ -44,6 +44,10 @@
 # owner_dm_nonce, which every outbox item for an owner DM must carry
 # (PROTOCOL.md, Owner DMs); an outbox entry for an owner DM without its
 # nonce (one the monitor will refuse) does not count as answering it.
+# A heartbeat slot (kind "proactive": the bot may reach out on its own;
+# PROTOCOL.md, Unprompted messages) is handed out the same way: alone,
+# never with an owner's DM or anyone's message, and only its wake gets
+# its nonce.
 #
 # This script targets Muse's hook runtime (it sources
 # $HATCH_HOOK_RUNTIME for the silent/wake/log/hook_state helpers and is
@@ -207,6 +211,10 @@ done
 # unless the monitor has yet to mint it (then it waits, below). Read to
 # tell a real answer to an owner DM from a forged one; they reach a
 # payload only in an owner-DM-only wake.
+# An owner's own DM, or a heartbeat slot, as jq: prefixed to the
+# filters below that hand them out alone and with their nonce.
+OWNER_DM='def owner_dm: (.kind == "dm" and (.settings.speaker? // "")
+    == "owner") or .kind == "proactive";'
 queue=$(jq -c 'if type == "array" then . else [] end' "$QUEUE" \
     2>/dev/null) || queue='[]'
 [ -n "$queue" ] || queue='[]'
@@ -224,9 +232,9 @@ fi
 # wake.
 open=$(printf '%s' "$queue" | jq -c --argjson answered "$answered" \
     --argjson nonces "$all_nonces" \
-    '[.[]? | objects | select(.message_id != null)
+    "$OWNER_DM"'[.[]? | objects | select(.message_id != null)
     | ($nonces[.message_id | tostring]) as $n
-    | (.kind == "dm" and (.settings.speaker? // "") == "owner") as $owner
+    | owner_dm as $owner
     | select(([.message_id] + [(.burst_fragments // [])[]? | .message_id])
         as $ids | [$answered[] | select(.ids as $a
             | any($ids[]; . as $i | any($a[]; . == $i)))
@@ -247,13 +255,12 @@ due=$(printf '%s' "$open" | jq -c --argjson w "$woken" --argjson now "$now" \
 # An owner DM without its nonce yet (the monitor mints one within
 # seconds) waits, unleased: a run handed it could not answer it.
 nonceless=$(printf '%s' "$due" | jq --argjson nonces "$all_nonces" \
-    '[.[] | select(.kind == "dm" and (.settings.speaker? // "") == "owner"
+    "$OWNER_DM"'[.[] | select(owner_dm
         and $nonces[.message_id | tostring] == null)] | length')
 if [ "$nonceless" -gt 0 ]; then
     log "owner DMs wait for their nonce" '{"items":"'"$nonceless"'"}'
     due=$(printf '%s' "$due" | jq -c --argjson nonces "$all_nonces" \
-        '[.[] | select((.kind == "dm"
-            and (.settings.speaker? // "") == "owner"
+        "$OWNER_DM"'[.[] | select((owner_dm
             and $nonces[.message_id | tostring] == null) | not)]')
 fi
 ndue=$(printf '%s' "$due" | jq 'length')
@@ -265,9 +272,11 @@ fi
 # to change settings) never also reads a server message or anyone
 # else's, so text written by someone else can never share a context
 # with an owner's settings request. The rest are handed out on the
-# next run, a few seconds later (they keep no lease meanwhile).
-owner_dms=$(printf '%s' "$due" | jq -c '[.[] | select(.kind == "dm"
-    and (.settings.speaker // "") == "owner")]')
+# next run, a few seconds later (they keep no lease meanwhile). A
+# heartbeat slot never shares a run with an owner's DM: DMs first.
+owner_dms=$(printf '%s' "$due" | jq -c "$OWNER_DM"'[.[] | select(owner_dm)]
+    | if any(.[]; .kind == "dm") then map(select(.kind == "dm"))
+      else .[:1] end')
 nowner=$(printf '%s' "$owner_dms" | jq 'length')
 if [ "$nowner" -gt 0 ] && [ "$nowner" -lt "$ndue" ]; then
     log "owner DMs wake alone; the rest wait for the next run" \
@@ -335,5 +344,5 @@ else
     persona_args=(--argjson persona null)
 fi
 
-payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" --argjson nonces "$nonces" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings} + (if $nonces[.message_id] then {owner_dm_nonce: $nonces[.message_id]} else {} end)]}')
+payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" --argjson nonces "$nonces" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings, proactive} + (if $nonces[.message_id] then {owner_dm_nonce: $nonces[.message_id]} else {} end)]}')
 wake "muse-discord mentions pending" "$payload"

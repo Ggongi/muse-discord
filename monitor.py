@@ -185,6 +185,33 @@ def _import_telemetry():
 
 
 TM = _import_telemetry()
+
+
+# Reaching out on its own, unprompted (proactive.py; PROTOCOL.md,
+# "Unprompted messages"). Off by default; when proactive.py cannot be
+# loaded the bot only replies.
+PROACTIVE_FILE = os.path.join(BASE_DIR, "proactive.json")
+
+
+class _NoProactive:
+    def __getattr__(self, name):
+        return lambda *a, **kw: None
+
+
+def _import_proactive():
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "muse_proactive", os.path.join(BASE_DIR, "proactive.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.Proactive(globals())
+    except Exception as e:
+        print(f"proactive.py not loaded ({type(e).__name__}); the bot only "
+              f"replies.", flush=True)
+        return _NoProactive()
+
+
+PRO = _import_proactive()
 # The raw file (test-only keys such as testing: live here).
 CFG = _S0.raw
 if _S0.notice:
@@ -2999,6 +3026,7 @@ def nl_write_nonces(state):
               > NL.MAX_AGE]:
         del n[k]
     body = {k: v["nonce"] for k, v in n.items()}
+    body.update(PRO.hook_nonces() or {})  # a live heartbeat slot's
     if body == _NL_NONCES_WRITTEN["body"]:
         return
     try:
@@ -5331,6 +5359,7 @@ def note_item_meta(state, mid, **meta):
     follow-up windows and applies the never_share backstop from it."""
     m = state.setdefault("item_meta", {})
     m[mid] = meta
+    PRO.note_item(mid, meta)  # who talked to the bot (proactive.py)
     for old in list(m)[:-300]:
         del m[old]
 
@@ -5816,6 +5845,20 @@ def process_outbox(state):
                   f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
             rejects.append((redact_nonces(item), problem))
             continue
+        # An unprompted message (proactive.py): bound to its heartbeat
+        # slot's targets, nonce and caps, and sent there; never below.
+        pro = PRO.outbox_item(state, item)
+        if pro is not None:
+            if pro.reject:
+                print(f"Refused outbox item: {pro.reject} (set aside in "
+                      f"{os.path.basename(OUTBOX_REJECTED_FILE)})",
+                      flush=True)
+                rejects.append((redact_nonces(item), pro.reject))
+            if pro.retry:
+                remaining.append(item)
+            if pro.spent:
+                settled.append({"item": pro.spent})
+            continue
         # Owner DMs first, before dedup, holds or anything that settles:
         # only the owner-DM-only wake holding the DM's nonce may touch it.
         refused = owner_dm_gate(state, item, index)
@@ -5835,6 +5878,15 @@ def process_outbox(state):
                   f"{reply_to or item.get('item')}", flush=True)
             _settle(state, item, "replied", "duplicate suppressed")
             settled.append(item)
+            continue
+        # "Stop messaging me": recorded for the author of the message
+        # this item answers (proactive.py); the reply goes out as usual.
+        bad = PRO.opt_action(state, item)
+        if bad:
+            print(f"Rejected outbox item for {item.get('channel_name') or '?'}"
+                  f": {bad} (set aside in "
+                  f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
+            rejects.append((redact_nonces(item), bad))
             continue
         if "settings" in item:
             # A settings request: the monitor decides and answers it
@@ -7174,6 +7226,11 @@ def main():
             nl_upkeep(state)  # settings requests: expiry, notices
         except Exception as e:
             print(f"Settings request upkeep error: {e}", flush=True)
+
+        try:
+            PRO.tick(state)  # the heartbeat: reaching out on its own
+        except Exception as e:
+            print(f"Proactive error: {e}", flush=True)
 
         # One REST slice per tick (see "Sliced REST work"): the poll's,
         # or the background job's, alternating when both are due.

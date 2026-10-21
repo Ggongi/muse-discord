@@ -90,7 +90,8 @@ class Spec:
     def __init__(self, type, default, scopes, values=(), hidden_values=(),
                  min=None, max=None, none=False, maxlen=None, steers=False,
                  risky=False, discord_editable=True, allow_names=False,
-                 hidden=False, legacy=None, description=None, ids=False):
+                 hidden=False, legacy=None, description=None, ids=False,
+                 check=None):
         self.type = type
         self.default = default
         self.scopes = _scopes(scopes)
@@ -107,6 +108,9 @@ class Spec:
         # A choice that also takes a list of user ids (who.dms_from:
         # the owners plus those people).
         self.ids = ids
+        # A text setting with a format of its own: check(text) ->
+        # (ok, normalized text or reason).
+        self.check = check
 
     def valid_text(self):
         t = self.type
@@ -132,6 +136,42 @@ class Spec:
         if t == "phrases":
             return "a list of words or phrases"
         return "any value"
+
+
+_HOURS_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)\s*-\s*([01]?\d|2[0-3])"
+                       r":([0-5]\d)$")
+
+
+def check_quiet_hours(text):
+    """(ok, "HH:MM-HH:MM" or "off", or why not): proactive.quiet_hours."""
+    t = str(text).strip().lower()
+    if t in ("off", "none", ""):
+        return True, "off"
+    m = _HOURS_RE.match(t)
+    if not m:
+        return False, (f"{_show(text)} is not a time range like "
+                       f"22:00-09:00 (or off)")
+    a, b = (int(m[1]), int(m[2])), (int(m[3]), int(m[4]))
+    if a == b:
+        return False, "quiet hours need a start and an end that differ"
+    return True, "%02d:%02d-%02d:%02d" % (a + b)
+
+
+def check_timezone(text):
+    """(ok, an IANA time zone name, or why not): proactive.timezone."""
+    t = str(text).strip()
+    if t.upper() in ("UTC", "Z", "GMT", ""):
+        return True, "UTC"
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_+\-]*(/[A-Za-z0-9_+\-]+){0,2}",
+                        t) or ".." in t:
+        return False, f"{_show(text)} is not a time zone like Europe/Paris"
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(t)
+    except Exception:
+        return False, (f"{_show(text)} is not a time zone I know (a name "
+                       f"like Europe/Paris or America/New_York)")
+    return True, t
 
 
 CORE = {
@@ -176,8 +216,25 @@ CORE = {
                       risky=True, legacy="allowed_user_ids"),
     "media.per_day": Spec("number", None, "ES", min=0, max=1000,
                           none=True, legacy="daily_cap"),
+    # Reaching out on its own, unprompted (proactive.py). Off by default;
+    # the Friends preset turns it on for its server. enabled scopes like
+    # images and video (Defaults = all servers; dms = check-ins with the
+    # owners and messages to people who DMed the bot first); the rest
+    # are bot-wide. The total a day follows frequency (rarely 2,
+    # sometimes 5, often 10).
+    "proactive.enabled": Spec("on-off", False, "EDASC"),
+    "proactive.frequency": Spec("choice", "rarely", "E",
+                                values=("rarely", "sometimes", "often")),
+    "proactive.per_person_per_day": Spec("number", 1, "E", min=0, max=5),
+    "proactive.per_person_per_week": Spec("number", 3, "E", min=0, max=20),
+    "proactive.per_channel_per_day": Spec("number", 1, "E", min=0, max=5),
+    "proactive.quiet_hours": Spec("text", "22:00-09:00", "E", maxlen=20,
+                                  check=check_quiet_hours),
+    "proactive.timezone": Spec("text", "UTC", "E", maxlen=64,
+                               check=check_timezone),
 }
-CORE_GROUPS = ("who", "style", "abilities", "privacy", "limits", "media")
+CORE_GROUPS = ("who", "style", "abilities", "privacy", "limits", "media",
+               "proactive")
 # Settings that moved: the media_generation plugin (settings id media) is
 # core since 2026-10. Its keys, plugins.media.* and plugins.media_
 # generation.* (old param names too), still load from config.yaml and
@@ -410,6 +467,8 @@ def normalize(spec, value):
         if spec.maxlen and len(value) > spec.maxlen:
             return False, (f"too long ({len(value)} characters; the limit "
                            f"is {spec.maxlen})")
+        if spec.check is not None:
+            return spec.check(value)
         return True, value
     if t == "phrases":
         if value is None:
@@ -896,7 +955,8 @@ def _put_plugin(block, man, key, spec, value):
 # Parsing a new-layout dict into layer values
 # ---------------------------------------------------------------------------
 CHANNEL_ONLY = ("a channel or category may set only replies, notes, "
-                "media.enabled and plugins.<plugin>.enabled")
+                "media.enabled, proactive.enabled and "
+                "plugins.<plugin>.enabled")
 
 
 class _Parser:
@@ -1024,12 +1084,12 @@ class _Parser:
             elif kind == "channel":
                 if top in CHANNEL_SHORT:
                     self.set(path, CHANNEL_SHORT[top], sub, w)
-                elif top == "media" and isinstance(sub, dict):
+                elif top in ("media", "proactive") and isinstance(sub, dict):
                     for k, v in sub.items():
                         if k != "enabled":
                             self.err(f"{w}.{k}", CHANNEL_ONLY)
                             continue
-                        self.set(path, "media.enabled", v, f"{w}.{k}")
+                        self.set(path, f"{top}.enabled", v, f"{w}.{k}")
                 else:
                     self.err(w, CHANNEL_ONLY)
             elif top in CORE_GROUPS:
@@ -2723,9 +2783,10 @@ class Place:
 
 
 def _is_enabled_key(key):
-    """An Extras on/off key: media.enabled or a plugin's enabled."""
-    return key == "media.enabled" or (key.startswith("plugins.")
-                                      and key.endswith(".enabled"))
+    """An Extras on/off key: media.enabled, proactive.enabled or a
+    plugin's enabled."""
+    return key in ("media.enabled", "proactive.enabled") or (
+        key.startswith("plugins.") and key.endswith(".enabled"))
 
 
 def format_place(place):
@@ -2836,10 +2897,14 @@ def _scope_for(place, key, path=None):
 
 # -- what each place offers ---------------------------------------------------
 BASIC_KEYS = ("who.replies", "who.dms_from", "privacy.memory", "style.notes",
-              "style.length", "limits.per_person_per_day", "media.enabled")
+              "style.length", "limits.per_person_per_day", "media.enabled",
+              "proactive.enabled")
 MORE_KEYS = ("who.allow", "who.ignore", "who.bots", "who.bot_exchange_limit",
              "limits.per_day", "privacy.suspicious", "media.who",
-             "media.per_day")
+             "media.per_day", "proactive.frequency",
+             "proactive.per_person_per_day", "proactive.per_person_per_week",
+             "proactive.per_channel_per_day", "proactive.quiet_hours",
+             "proactive.timezone")
 BOT_WIDE_KEYS = ("presence.status", "updates.notify")
 HIDDEN_KEYS = ("abilities.owner_commands", "presence.kind",
                "privacy.never_share")
@@ -2928,6 +2993,13 @@ LABELS = {
     "media.enabled": "Image and video generation",
     "media.who": "Who can ask for images and video",
     "media.per_day": "Generations per day",
+    "proactive.enabled": "Reaching out on its own",
+    "proactive.frequency": "How often it thinks of reaching out",
+    "proactive.per_person_per_day": "Unprompted messages a person a day",
+    "proactive.per_person_per_week": "Unprompted messages a person a week",
+    "proactive.per_channel_per_day": "Unprompted messages a channel a day",
+    "proactive.quiet_hours": "Quiet hours (no unprompted messages)",
+    "proactive.timezone": "Time zone",
     "presence.status": "Status line",
     "presence.kind": "Status kind",
     "updates.notify": "Update notices",
@@ -2956,6 +3028,9 @@ VALUE_LABELS = {
     ("privacy.suspicious", "answer"): "Answer it (no check)",
     ("media.who", "owners"): "Only you",
     ("media.who", "everyone"): "Everyone",
+    ("proactive.frequency", "rarely"): "Rarely (once or twice a day)",
+    ("proactive.frequency", "sometimes"): "Sometimes (4-6 times a day)",
+    ("proactive.frequency", "often"): "Often (about hourly)",
 }
 CATEGORY_TYPE = 4
 
@@ -3972,16 +4047,17 @@ PRESETS = {
         "who.replies": "conversational", "privacy.memory": "everything",
         "limits.per_person_per_day": None, "limits.per_day": None,
         "who.bots": "when-addressed", "who.bot_exchange_limit": None,
-        "media.per_day": None}),
+        "media.per_day": None, "proactive.enabled": True}),
     "community": ("Community", {
         "who.replies": "when-addressed", "privacy.memory": "public-only",
         "limits.per_person_per_day": 20, "limits.per_day": 300,
         "who.bots": "when-addressed", "who.bot_exchange_limit": 4,
-        "media.per_day": (_IF_MEDIA, 10)}),
+        "media.per_day": (_IF_MEDIA, 10), "proactive.enabled": False}),
     "work": ("Work", {
         "who.replies": "when-addressed", "privacy.memory": "nothing",
         "limits.per_person_per_day": None, "limits.per_day": None,
         "who.bots": "ignore", "media.per_day": None,
+        "proactive.enabled": False,
         "style.notes": (_IF_EMPTY, WORK_NOTES)}),
 }
 
@@ -4037,7 +4113,8 @@ def preset_changes(st, name, place, info=None, big="refuse"):
 
 def matching_preset(st, place):
     """"Friends" / "Community" / "Work" when a server's values in force
-    match that preset, else None ("Custom"). Instructions are not
+    match that preset, else None ("Custom"). Instructions and reaching
+    out on its own (a server may keep Friends with it off) are not
     compared; the media cap only when media is on there."""
     if place.kind != "server":
         return None
@@ -4045,7 +4122,8 @@ def matching_preset(st, place):
     for title, values in PRESETS.values():
         ok = True
         for key, value in values.items():
-            if key == "style.notes" or st.spec(key) is None:
+            if key in ("style.notes", "proactive.enabled") \
+                    or st.spec(key) is None:
                 continue
             if isinstance(value, tuple):
                 cond, value = value
