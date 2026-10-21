@@ -524,6 +524,11 @@ class Runner:
             files = [fixture_path(arg["attach"])]
         target = self._thread_id(arg["in"]) if arg.get("in") \
             else channel_id
+        if arg.get("typing"):
+            # Like a person writing the next line: the SUT keeps a burst
+            # open while its author types, however long Discord takes to
+            # deliver the post itself.
+            bot.typing(target)
         try:
             msg = bot.send(target, text,
                            reply_to=self._reply_target(arg.get("reply_to"),

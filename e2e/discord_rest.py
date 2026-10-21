@@ -171,6 +171,11 @@ class Bot:
         return self.request("POST", f"/channels/{channel_id}/messages",
                             body=body, files=list(files or []))
 
+    def typing(self, channel_id):
+        """Show "typing..." in the channel, as a person does before they
+        post (the SUT holds a burst open while its author types)."""
+        return self.request("POST", f"/channels/{channel_id}/typing")
+
     def history(self, channel_id, after=None):
         """Every message in the channel newer than `after` (an id; None =
         all), oldest first. Paginates 100 at a time."""
