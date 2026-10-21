@@ -106,7 +106,7 @@ class OutboxAppend(unittest.TestCase):
         del it["settings"]["nonce"]
         rc, _out, err = append(self.pkg, [it])
         self.assertEqual(rc, 1)
-        self.assertIn('copy the item\'s "settings_nonce"', err)
+        self.assertIn('copy the item\'s "owner_dm_nonce"', err)
         for changes, extra, needle in cases:
             rc, out, err = append(self.pkg, [settings_item(changes,
                                                            **extra)])

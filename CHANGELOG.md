@@ -6,6 +6,51 @@ entries below the releases are pre-release history. **Action
 needed** lists what an existing install must do after updating;
 UPDATING.md walks a Muse through it.
 
+## 2026-10-20: Your DMs are answered only by the run that got them
+
+Security fix: a worker woken by someone else's message (and maybe
+their prompt injection) could answer your DM in the bot's name, mark
+it handled so you never got a real reply, or post into your DM with
+the bot. Only settings requests were protected.
+
+Changed:
+
+- Every reply to your DM (and every silent pass, reaction, or message
+  in your DM channel) must carry that DM's private nonce, which only a
+  run holding nothing but your DMs gets. Anything else is refused and
+  set aside in `reply_outbox.rejected.json`, and your DM stays open
+  for the run that really has it. Replies to everyone else work as
+  before.
+- `bin/discord-api.py` refuses to post, edit, delete, react, pin or
+  read in your DM with the bot unless the call names your DM and its
+  nonce (`--for <message_id> --nonce <owner_dm_nonce>`). Server
+  channels work as before.
+- The wake hook no longer counts a forged answer to your DM as an
+  answer, so it cannot keep your DM from its own run, and never hands
+  out your DM before its nonce exists.
+- Replies under the last message of a burst you sent work however long
+  ago the burst was, and no other run can settle the burst through one
+  of its messages.
+- Ids in the outbox are taken in one form only (no leading zeros or
+  other digits), and a reply to a channel the monitor cannot place is
+  checked with Discord first and refused if it is your DM.
+- A DM of yours that is still waiting keeps its nonce (and gets a new
+  one if `state.json` was lost), so it is never stuck. The nonce is
+  spent once the DM is answered, not before, so a failed send's retry
+  still goes out.
+- The wake payload calls the nonce `owner_dm_nonce` (it was
+  `settings_nonce`).
+
+**Action needed:**
+
+- Update the installed worker prompt (step 2's OWNER DMs, OWNER
+  COMMANDS and SETTINGS REQUESTS). Until you do, the worker's replies
+  to your DMs are refused and your DMs go unanswered; everyone else
+  still gets replies.
+- If your runtime registered a copy of hooks/mention-watch.sh, update
+  the copy. A runtime without the shipped hook must pass each owner
+  DM's nonce to its worker itself (PROTOCOL.md, Owner DMs).
+
 ## 2026-10-19: /settings, redesigned
 
 New:

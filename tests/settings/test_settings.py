@@ -754,6 +754,11 @@ class MonitorBase(unittest.TestCase):
         out = dict({"channel_id": item["channel_id"],
                     "reply_to": item["message_id"],
                     "item": item["message_id"], "text": text}, **extra)
+        # An owner's DM: the owner-DM-only wake echoes its nonce.
+        nonce = ((self.st.get("nl_nonces") or {}).get(item["message_id"])
+                 or {}).get("nonce")
+        if nonce:
+            out.setdefault("owner_dm_nonce", nonce)
         with open(self.m.QUEUE_FILE, "w") as f:
             json.dump([item], f)
         with open(self.m.OUTBOX_FILE, "w") as f:
@@ -972,9 +977,10 @@ class NeverShare(MonitorBase):
         self.reply(item, "Project Falcon is on track.")
         self.assertEqual(self.st.get("holds") or {}, {})
         self.assertEqual(len(m.api.channel_posts(item["channel_id"])), 1)
-        # A stranger's DM is not exempt.
+        # A stranger's DM (their own DM channel) is not exempt.
         self.rewrite(MON + "dms:\n  who:\n    dms_from: anyone\n")
-        ok, item = self.enqueue(dmsg(U1, "status?"), dm=True)
+        ok, item = self.enqueue(dmsg(U1, "status?",
+                                     channel="400000000000000079"), dm=True)
         self.reply(item, "Project Falcon is on track.")
         self.assertEqual(len(self.st["holds"]), 1)
 

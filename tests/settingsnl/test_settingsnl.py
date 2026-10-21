@@ -292,11 +292,15 @@ class Eligibility(Base):
         self.outbox(bad)
         self.assert_unchanged()
         self.assertIn('needs "item"', self.rejected()[-1]["reason"])
+        # Unknown, in an owner's DM channel: not that DM's item, so the
+        # owner-DM gate refuses it before settings_nl (nothing is posted
+        # in the owner's DM).
         unknown = self.action(m, [ch("set", GEN, "who.replies", "off")])
         unknown["item"] = unknown["reply_to"] = sf()
         self.outbox(unknown)
         self.assert_unchanged()
-        self.assertEqual(self.last()["content"], self.mod.NL.UNKNOWN)
+        self.assertEqual(self.sends(DM), [])
+        self.assertIn("names no owner DM", self.rejected()[-1]["reason"])
         # Unknown, in a channel that is no owner's DM: silence.
         other = dict(unknown, item=sf(), reply_to=None, channel_id=DM_U1)
         n = len(self.sends())
@@ -1065,14 +1069,14 @@ class Shape(Base):
         self.assertTrue(any("v must be 1" in x for x in p))
         it["settings"] = {"changes": []}
         self.assertIn('settings must be {"v": 1, "nonce": "<the item\'s '
-                      'settings_nonce>", "changes": [...]}',
+                      'owner_dm_nonce>", "changes": [...]}',
                       self.mod.NL.shape_problems(it))
         for bad in (None, "", "xyz", "AB" * 16, 7):
             it["settings"] = {"v": 1, "nonce": bad, "changes": [
                 ch("undo")]}
             if bad is None:
                 del it["settings"]["nonce"]
-            self.assertTrue(any("settings_nonce" in x for x in
+            self.assertTrue(any("owner_dm_nonce" in x for x in
                                 self.mod.NL.shape_problems(it)), bad)
 
 

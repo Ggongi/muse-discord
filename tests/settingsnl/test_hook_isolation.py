@@ -39,7 +39,16 @@ class OwnerDmWakesAlone(unittest.TestCase):
                         MUSE_DISCORD_CONFIG=os.path.join(self.pkg,
                                                          "config.yaml"))
 
-    def queue(self, items):
+    def queue(self, items, nonces=True):
+        """Queue items; the monitor mints each owner DM's nonce first
+        (an owner DM without one is not handed out yet)."""
+        if nonces:
+            with open(os.path.join(self.pkg, "owner_dm_nonces.json"),
+                      "w") as f:
+                json.dump({i["message_id"]: "%032x" % int(i["message_id"])
+                           for i in items if i.get("kind") == "dm"
+                           and (i.get("settings") or {}).get("speaker")
+                           == "owner"}, f)
         with open(os.path.join(self.pkg, "reply_queue.json"), "w") as f:
             json.dump(items, f)
 
@@ -58,23 +67,23 @@ class OwnerDmWakesAlone(unittest.TestCase):
             json.dump({"2": "a" * 32, "5": "b" * 32}, f)
         self.queue([item("1", "mention", "member"),
                     item("2", "dm", "owner"),
-                    item("5", "dm", "owner")])
+                    item("5", "dm", "owner")], nonces=False)
         ids, _ = self.wake()
         self.assertEqual(ids, ["2", "5"])
-        self.assertEqual([i.get("settings_nonce")
+        self.assertEqual([i.get("owner_dm_nonce")
                           for i in self.payload["items"]],
                          ["a" * 32, "b" * 32])
         ids, _ = self.wake()
         self.assertEqual(ids, ["1"])
-        self.assertNotIn("settings_nonce", self.payload["items"][0])
+        self.assertNotIn("owner_dm_nonce", self.payload["items"][0])
         self.assertNotIn("a" * 32, json.dumps(self.payload))
         # A nonce file naming a server item never reaches its wake.
         with open(os.path.join(self.pkg, "owner_dm_nonces.json"), "w") as f:
             json.dump({"7": "c" * 32}, f)
-        self.queue([item("7", "mention", "owner")])
+        self.queue([item("7", "mention", "owner")], nonces=False)
         ids, _ = self.wake()
         self.assertEqual(ids, ["7"])
-        self.assertNotIn("settings_nonce", self.payload["items"][0])
+        self.assertNotIn("owner_dm_nonce", self.payload["items"][0])
 
     def test_owner_dm_first_and_alone(self):
         self.queue([item("1", "mention", "member"),

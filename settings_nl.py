@@ -39,11 +39,14 @@ monitor globals. monitor.py gives a ctx with:
 
 Every owner-DM queue item gets a capability nonce (nl_nonces, never in
 reply_queue.json; the wake hook passes it only to a wake that holds
-nothing but owner DMs). A settings action must echo it as
-settings.nonce: a worker woken for anything else cannot forge an
+nothing but owner DMs, as owner_dm_nonce). A settings action must echo
+it as settings.nonce: a worker woken for anything else cannot forge an
 owner's request even if it reads the queue. A missing or wrong nonce,
 or a channel that is not the item's own, is refused without settling
-the item, so the real reply still goes out.
+the item, so the real reply still goes out. (The monitor's
+owner_dm_gate checks the nonce on every outbox item for an owner DM,
+settings or not, before this module sees it; the nonce is spent when
+the item settles.)
 
 State (state.json, main loop only): nl_outcomes {item: outcome},
 nl_pending {token: confirm}, nl_undo {token: undo button},
@@ -244,7 +247,7 @@ def shape_problems(item, plugins_dir=None):
     if bad:
         out.append(f"a settings item carries no {', '.join(bad)}; only "
                    f"item, channel_id, channel_name, author, reply_to, "
-                   f"text and settings")
+                   f"text, owner_dm_nonce and settings")
     text = item.get("text")
     if text is not None and (not isinstance(text, str)
                              or len(text) > TEXT_MAX):
@@ -254,13 +257,13 @@ def shape_problems(item, plugins_dir=None):
     if not isinstance(s, dict) or not {"v", "changes"} <= set(s) \
             or not set(s) <= {"v", "changes", "nonce"}:
         out.append('settings must be {"v": 1, "nonce": "<the item\'s '
-                   'settings_nonce>", "changes": [...]}')
+                   'owner_dm_nonce>", "changes": [...]}')
         return out
     if s["v"] != VERSION or isinstance(s["v"], bool):
         out.append("settings.v must be 1")
     if not (isinstance(s.get("nonce"), str)
             and NONCE_RE.fullmatch(s["nonce"])):
-        out.append('settings.nonce: copy the item\'s "settings_nonce" from '
+        out.append('settings.nonce: copy the item\'s "owner_dm_nonce" from '
                    'the wake payload (owner DMs only)')
     ch = s["changes"]
     if not isinstance(ch, list) or not 1 <= len(ch) <= MAX_CHANGES:
@@ -810,7 +813,10 @@ def _where(ctx, item, meta=None):
 
 
 def _raw(item):
-    return json.dumps(item.get("settings"), sort_keys=True)[:300]
+    s = item.get("settings")
+    if isinstance(s, dict) and "nonce" in s:
+        s = dict(s, nonce="(redacted)")   # never a capability in a log
+    return json.dumps(s, sort_keys=True)[:300]
 
 
 def _refuse(ctx, state, item, iid, code, text, status, channel_id,
@@ -857,7 +863,10 @@ def process(ctx, state, item):
             ctx.save(state)
         else:
             outs.pop(iid, None)
-            if rec.get("nonce"):   # not applied: the capability holds
+            if rec.get("nonce") and iid not in (state.get("nl_nonces")
+                                                or {}):
+                # Not applied: the capability holds (an older monitor
+                # spent it on use).
                 state.setdefault("nl_nonces", {})[iid] = {
                     "nonce": rec["nonce"], "at": now}
             if rec.get("undo_token"):
@@ -900,13 +909,16 @@ def process(ctx, state, item):
     if str(ctx.dm_channel_user(cid) or "") != uid:
         return _drop(ctx, item, iid, "wrong channel", meta)
     # The capability: only the wake that was handed this owner DM knows
-    # its nonce (never in reply_queue.json). Used once.
+    # its nonce (never in reply_queue.json). The monitor checked it
+    # already (owner_dm_gate); checked again here so this module stands
+    # on its own. Spent when the item settles (one action per item:
+    # nl_outcomes), not here, so a failed send's retry still holds it.
     want = ((state.get("nl_nonces") or {}).get(iid) or {}).get("nonce")
     got = (item.get("settings") or {}).get("nonce")
     if not want or not isinstance(got, str) \
-            or not hmac.compare_digest(str(want), got):
+            or not hmac.compare_digest(str(want).encode(),
+                                       got.encode("utf-8", "replace")):
         return _drop(ctx, item, iid, "bad nonce", meta)
-    state["nl_nonces"].pop(iid, None)
     if meta.get("forwarded"):
         return _refuse(ctx, state, item, iid, "forwarded", FORWARDED,
                        "replied", cid, target, now, meta=meta)
