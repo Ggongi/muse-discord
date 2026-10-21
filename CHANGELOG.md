@@ -10,50 +10,61 @@ UPDATING.md walks a Muse through it.
 
 Fixed (security):
 
-- A reply can only go where the message it answers was said. Before,
-  any worker run (woken by anyone's message, so maybe reading a
-  stranger's prompt injection) could have the bot post in any channel
-  or DM it can reach under a made-up item: in a server none of the
-  owners is in, a paused server, a place where replies are off, or
-  the DM of someone your DM settings refuse. Now every outbox item
-  must answer a message the monitor queued, in that message's channel
-  (a thread, for a message in a thread); anything else is set aside in
+- A reply can only answer a message its own run was handed, where it
+  was said. Before, any worker run (woken by anyone's message, so
+  maybe reading a stranger's prompt injection) could have the bot post
+  in any channel or DM it can reach, under a made-up item or under
+  someone else's open one (their ids are in the history it reads): in
+  a server none of the owners is in, a paused server, a place where
+  replies are off, someone's DM; and it could silence or answer your
+  command in the bot's name, or cancel or set reminders as you. Now
+  the monitor gives every queued item a secret `reply_nonce`
+  (`item_nonces.json`, mode 600) that the wake hook hands only to the
+  run holding that item, and every outbox item must carry its item's,
+  answer an open item, and post in that item's channel (a thread, for
+  a message in a thread). Anything else is set aside in
   `reply_outbox.rejected.json` and logged. Held replies you chose to
-  send still go out.
+  send still go out (bound to the hold's own item and channel).
 - `bin/discord-api.py` acts only for an owner's command, in the run
-  that holds it. Before, any run could `read` someone's private DM and
-  `post` it into a public channel. Now `read`, `post`, `thread`,
-  `react`, `pin`, `unpin`, `edit` and `delete-own` need `--for <the
-  owner's item> --nonce <its owner_command_nonce>`, a secret the
-  monitor mints for each owner's message (`owner_items.json`, mode
-  600) and the wake hook hands only to a run that holds nothing but
-  the owner's items. `resolve-channel` and `list-threads` (channel and
-  thread names, no messages) still work without it.
-- An owner's server message now wakes alone, as owner DMs already did,
-  so a stranger's message never shares the run that can act for you.
-  Other people's messages that arrive with it wait a few seconds for
-  the next run. An owner's server messages that may set web watches
-  (Reminders and watches) join that wake: one run, with both the
-  `owner_command_nonce` and the `web_nonce`.
+  that holds it, and only where your own words point. Before, any run
+  could `read` someone's private DM and `post` it into a public
+  channel. Now every subcommand needs `--for <your item> --nonce <its
+  owner_command_nonce>` (`resolve-channel` and `list-threads` accept an
+  owner DM's nonce too), and acts only in the command's own channel or
+  one your message itself names (`<#channel>` or `#name`), never in a
+  DM other than its own. `read` output comes marked as untrusted data,
+  and a channel lookup that misses no longer lists the server's
+  channels.
+- An owner's command wakes alone, one per run, as owner DMs already
+  did, so no other message (a stranger's, or another command's
+  history) shares the run that can act for you. Other messages that
+  arrive with it wait a few seconds for the next run. A command of
+  yours that may also set web watches gets both capabilities in its
+  one run.
+- Text the bot sends never carries a nonce-shaped string (32 hex
+  digits): blanked as a backstop.
 
 Changed:
 
-- An outbox item that names no queued message (neither `item` nor
-  `reply_to`), or a very late one the monitor has entirely forgotten,
-  is refused instead of posted. Workers on the shipped prompt always
-  set `item`.
+- An outbox item that names no open queue item (neither `item` nor
+  `reply_to`, or an item answered already, however long ago) is
+  refused instead of posted.
+- The worker no longer reads `reply_queue.json` (it holds other
+  people's private messages): its items always come in the wake
+  payload.
 
 **Action needed:**
 
-- Update the worker prompt (re-render it): `python3
+- **Update the worker prompt (re-render it) right away**: `python3
   bin/render-worker-prompt.py` with the options you used before.
-  Until then owner commands ("pin that", "post this in
-  #announcements", "what did X say in #dev?") get a reply but no
-  action: the old prompt calls `bin/discord-api.py` without `--for`
-  and `--nonce`, which is now refused.
+  Until then the bot answers nothing: the old prompt does not copy
+  each item's `reply_nonce`, and the monitor refuses every reply
+  without it (they wait in `reply_outbox.rejected.json`, and the
+  messages stay queued for the next run). Owner commands also need
+  the new prompt (`--for` and `--nonce` on every call).
 - Restart the monitor if your update path does not (UPDATING.md).
-  Until a monitor that writes `owner_items.json` runs, owner commands
-  get a reply but no action.
+  Until a monitor that writes `item_nonces.json` and
+  `owner_items.json` runs, owner commands get a reply but no action.
 
 ## 2026-10-21: Reminders and watches
 
