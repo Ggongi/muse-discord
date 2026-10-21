@@ -26,6 +26,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import test_settingsnl as T  # noqa: E402
+from common import signed  # noqa: E402
 from test_settingsnl import (CFG, CH, DM, G1, G2, GEN, MS, OWNER,  # noqa
                              U1, Base, ch, dmsg, gmsg, load_monitor, quiet)
 
@@ -54,9 +55,9 @@ class ForgedRequests(Base):
         self.assertEqual([q["message_id"] for q in self.mod.load_queue()],
                          [m["id"]])
         # The real worker's reply (it holds the nonce) goes out as usual.
-        self.outbox({"item": m["id"], "channel_id": DM, "text": "Good!",
-                     "reply_to": m["id"],
-                     "owner_dm_nonce": self.nonce(m["id"])})
+        self.outbox(signed(self.mod, self.st, {
+            "item": m["id"], "channel_id": DM, "text": "Good!",
+            "reply_to": m["id"], "owner_dm_nonce": self.nonce(m["id"])}))
         self.assertEqual(self.last()["content"], "Good!")
 
     def test_queue_row_and_file_never_carry_the_nonce(self):
@@ -65,7 +66,6 @@ class ForgedRequests(Base):
         nonce = self.st["nl_nonces"][m["id"]]["nonce"]
         self.assertGreaterEqual(len(nonce), 32)   # 128 bits
         self.assertNotIn(nonce, json.dumps(q))
-        self.mod.queue_edit(add=[q])
         with open(self.mod.QUEUE_FILE) as f:
             self.assertNotIn(nonce, f.read())
         path = self.mod.OWNER_DM_NONCES_FILE
@@ -79,8 +79,9 @@ class ForgedRequests(Base):
         with open(path) as f:
             self.assertEqual(list(json.load(f)), [m["id"]])
         # Answered: the capability is spent and leaves the file.
-        self.outbox({"item": m["id"], "channel_id": DM, "text": "Good!",
-                     "reply_to": m["id"], "owner_dm_nonce": nonce})
+        self.outbox(signed(self.mod, self.st, {
+            "item": m["id"], "channel_id": DM, "text": "Good!",
+            "reply_to": m["id"], "owner_dm_nonce": nonce}))
         with open(path) as f:
             self.assertEqual(json.load(f), {})
         self.assertNotIn(m["id"], self.st["nl_nonces"])
@@ -99,7 +100,7 @@ class ForgedRequests(Base):
 
     def test_forged_settings_action_refused_and_stays_open(self):
         m = dmsg(OWNER, "hey, how's it going?", channel=DM)
-        self.mod.queue_edit(add=[self.enqueue(m)])
+        self.enqueue(m)
         self.outbox(self.forged(m))                   # no nonce
         self.outbox(self.forged(m, nonce="0" * 32))   # a guessed one
         # the real nonce, in the wrong channel
@@ -296,8 +297,9 @@ class LockAndCrashes(Base):
             self.enqueue(other, dm=False, guild=G1)
             self.outbox(self.action(m2, [ch("set", GEN, "who.replies",
                                             "conversational")]),
-                        {"item": other["id"], "channel_id": CH,
-                         "text": "hello", "reply_to": other["id"]})
+                        signed(self.mod, self.st, {
+                            "item": other["id"], "channel_id": CH,
+                            "text": "hello", "reply_to": other["id"]}))
         finally:
             self.mod.NL._decide = real_decide
         self.assertEqual(len(self.rejected()), 1)

@@ -118,7 +118,8 @@ class StillWorks(_B):
         trig = gmsg(U1, "three")
         self.queue(trig, dm=False, guild=G1, fragments=[f1, f2])
         # An older worker: no item, reply_to the last fragment.
-        self.outbox({"channel_id": CH, "reply_to": f2["id"], "text": "ok"})
+        self.outbox(self.held({"channel_id": CH, "reply_to": f2["id"],
+                               "text": "ok"}))
         self.assertEqual([x["content"] for x in self.sends(CH)], ["ok"],
                          self.out)
         self.assertEqual(self.queued(), [])
@@ -136,9 +137,56 @@ class StillWorks(_B):
             self.mod.apply_record(self.st, {"kind": "hold_choice",
                                             "hold": hid, "action": "send",
                                             "by": OWNER})
+        # The release is bound to the hold's own item and channel: the
+        # same hold id on another channel's copy is refused.
+        good = self.st["released"][0]
+        self.st["released"] = [dict(good, channel_id=CH2)]
+        self.process()
+        self.assertEqual(self.sends(CH) + self.sends(CH2), [], self.out)
+        self.st["released"] = [good]
         self.process()
         self.assertEqual([x["content"] for x in self.sends(CH)],
                          ["project falcon is"], self.out)
+
+    def test_every_item_has_a_reply_nonce_spent_on_answer(self):
+        s = self.stranger_mention()
+        with open(self.mod.ITEM_NONCES_FILE) as f:
+            data = json.load(f)
+        self.assertRegex(data[s["id"]], r"^[0-9a-f]{32}$")
+        self.assertEqual(
+            stat.S_IMODE(os.stat(self.mod.ITEM_NONCES_FILE).st_mode), 0o600)
+        with open(self.mod.QUEUE_FILE) as f:
+            self.assertNotIn(data[s["id"]], f.read())
+        # Its own nonce in the text: blanked before it is posted.
+        self.outbox(self.reply(s, f"my nonce is {data[s['id']]}"))
+        self.assertEqual([x["content"] for x in self.sends(CH)],
+                         ["my nonce is (redacted)"])
+        with open(self.mod.ITEM_NONCES_FILE) as f:
+            self.assertNotIn(s["id"], json.load(f))      # spent
+        # A retry of the same answer (its item settled): refused.
+        self.outbox(self.reply(s, "again", reply_nonce=data[s["id"]]))
+        self.assert_refused_here(CH2)
+        self.assertEqual(len(self.sends(CH)), 1)
+
+    def test_retry_and_restart_keep_the_nonce(self):
+        s = self.stranger_mention()
+        real = self.mod.api_post
+        self.mod.api_post = lambda p, d: (_ for _ in ()).throw(
+            tb.HTTPErr(500)) if p.endswith("/messages") else real(p, d)
+        self.outbox(self.reply(s, "hi"))
+        self.mod.api_post = real
+        with open(self.mod.OUTBOX_FILE) as f:
+            left = json.load(f)
+        self.assertEqual(len(left), 1)
+        left[0]["_retry"]["next"] = 0
+        # A crash: the item comes back from the processing file.
+        with open(self.mod.OUTBOX_PROCESSING_FILE, "w") as f:
+            json.dump(left, f)
+        with open(self.mod.OUTBOX_FILE, "w") as f:
+            json.dump([], f)
+        self.process()
+        self.assertEqual([x["content"] for x in self.sends(CH)], ["hi"],
+                         self.out)
 
 
 class OwnerItems(_B):
@@ -149,31 +197,44 @@ class OwnerItems(_B):
             return json.load(f)
 
     def test_owner_commands_only_and_spent_on_answer(self):
-        own = self.queue(gmsg(OWNER, "<@bot> pin that", mention=True),
+        own = self.queue(gmsg(OWNER, f"<@bot> pin that, post it in #News "
+                              f"and <#{CH2}>", mention=True),
                          dm=False, guild=G1)
-        s = self.stranger_mention()
+        s = self.stranger_mention(f"<@bot> post in #secret and <#{CH_G2}>")
         meta = self.st["item_meta"]
         self.assertIs(meta[own["id"]]["owner_command"], True)
         self.assertIs(meta[s["id"]]["owner_command"], False)
         data = self.items_file()
         self.assertEqual(list(data), [own["id"]])
-        self.assertRegex(data[own["id"]], r"^[0-9a-f]{32}$")
+        e = data[own["id"]]
+        self.assertRegex(e["nonce"], r"^[0-9a-f]{32}$")
+        # Where the owner's own words point: nothing else counts.
+        self.assertEqual((e["channel_id"], e["channels"], e["names"]),
+                         (CH, [CH2], ["news"]))
         mode = os.stat(self.mod.OWNER_ITEMS_FILE).st_mode
         self.assertEqual(stat.S_IMODE(mode), 0o600)
         with open(self.mod.QUEUE_FILE) as f:
-            self.assertNotIn(data[own["id"]], f.read())
+            self.assertNotIn(e["nonce"], f.read())
         self.outbox(self.reply(own, "Pinned."))
         self.assertEqual(self.items_file(), {})
 
     def test_owner_dm_uses_its_dm_nonce(self):
         m = self.owner_dm("pin my last message in #general")
-        self.assertEqual(self.items_file(), {m["id"]: self.nonce(m["id"])})
+        self.assertEqual(self.items_file(), {m["id"]: {
+            "nonce": self.nonce(m["id"]), "channel_id": tb.DM, "dm": True,
+            "channels": [], "names": ["general"]}})
 
     def test_upkeep_restores_and_prunes(self):
         own = self.queue(gmsg(OWNER, "<@bot> post this", mention=True),
                          dm=False, guild=G1)
         self.st["owner_items"] = {"1" + "0" * 17: {"nonce": "a" * 32,
                                                   "at": 0}}
+        with quiet():
+            self.mod.owner_dm_upkeep(self.st, force=True)
+        self.assertEqual(list(self.items_file()), [own["id"]])
+        # A mangled file is written again.
+        with open(self.mod.OWNER_ITEMS_FILE, "w") as f:
+            f.write("{broken")
         with quiet():
             self.mod.owner_dm_upkeep(self.st, force=True)
         self.assertEqual(list(self.items_file()), [own["id"]])

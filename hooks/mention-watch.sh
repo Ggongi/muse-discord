@@ -47,15 +47,17 @@
 # owner_dm_nonce, which every outbox item for an owner DM must carry
 # (PROTOCOL.md, Owner DMs); an outbox entry for an owner DM without its
 # nonce (one the monitor will refuse) does not count as answering it.
-# An owner's server message that is a command (owner_command: true) or
-# holds a web watch capability (web_nonces.json) wakes alone too, apart
-# from owner DMs and from everyone else's messages; all of them are the
-# owners', so they may share that wake. Only an owner-only wake gets each
-# command's owner_command_nonce, which bin/discord-api.py needs for
-# anything but its two lookups, and each item's web_nonce. So a
-# stranger's message never shares the run that holds owner-command
-# power. Then an item of someone else holding a web watch capability
-# (abilities.web_watches) wakes on its own, with its web_nonce.
+# Then an item holding a capability beyond answering itself wakes
+# alone, one per wake, owners' first: an owner's command (owner_command:
+# true; its owner_command_nonce, which bin/discord-api.py needs for
+# everything) or an item holding a web watch capability (its
+# web_nonce). Only that wake gets those nonces, so no other item's text
+# (its history included) ever shares the run that holds them.
+# Every item's reply_nonce (item_nonces.json) goes only to the wake
+# holding the item's lease; every outbox item must carry its item's, and
+# an outbox entry without it does not count as answering the item, so a
+# run woken by someone else can neither answer nor hide an item it was
+# not handed (PROTOCOL.md, Replies stay with their run).
 #
 # This script targets Muse's hook runtime (it sources
 # $HATCH_HOOK_RUNTIME for the silent/wake/log/hook_state helpers and is
@@ -203,13 +205,15 @@ fi
 # The worker's answers so far, read BEFORE the queue: the monitor removes
 # an answered item from the queue before it drops the item's outbox
 # entry, so this order never sees one without the other. Each is the
-# ids it names and the owner-DM nonce it carries.
+# ids it names, the owner-DM nonce and the reply nonce it carries.
 answered='[]'
 for f in "$OUTBOX" "$SENDING"; do
     [ -f "$f" ] || continue
     ids=$(jq -c '[.[]? | objects | {ids: [(.item, .reply_to) | strings],
         nonce: ([.owner_dm_nonce, (.settings | objects | .nonce)]
-            | map(strings) | first)}]' "$f" 2>/dev/null) || ids='[]'
+            | map(strings) | first),
+        reply: ((.reply_nonce | strings) // null)}]' "$f" 2>/dev/null) \
+        || ids='[]'
     answered=$(jq -cn --argjson a "$answered" --argjson b "$ids" '$a + $b')
 done
 
@@ -241,9 +245,24 @@ cmd_nonces='{}'
 cmd_file=0
 if [ -f "$PKG_DIR/owner_items.json" ]; then
     cmd_file=1
-    cmd_nonces=$(jq -c 'if type == "object" then . else {} end' \
-        "$PKG_DIR/owner_items.json" 2>/dev/null) || cmd_nonces='{}'
+    cmd_nonces=$(jq -c 'if type == "object" then map_values(
+        if type == "object" then (.nonce | strings) else strings end)
+        else {} end' "$PKG_DIR/owner_items.json" 2>/dev/null) \
+        || cmd_nonces='{}'
     [ -n "$cmd_nonces" ] || cmd_nonces='{}'
+fi
+# Every item's reply_nonce (the monitor's private item_nonces.json,
+# written before the item is queued): every outbox item must echo its
+# item's, so only the wake holding an item's lease gets it, and only an
+# outbox entry carrying it counts as answering the item. No file at
+# all: a monitor from before it existed.
+reply_nonces='{}'
+reply_file=0
+if [ -f "$PKG_DIR/item_nonces.json" ]; then
+    reply_file=1
+    reply_nonces=$(jq -c 'if type == "object" then . else {} end' \
+        "$PKG_DIR/item_nonces.json" 2>/dev/null) || reply_nonces='{}'
+    [ -n "$reply_nonces" ] || reply_nonces='{}'
 fi
 # The web watch capabilities ({message_id: web_nonce}, the monitor's
 # private file): an item whose author may set web watches is handed out
@@ -256,20 +275,23 @@ if [ -f "$PKG_DIR/web_nonces.json" ]; then
 fi
 
 # Open items: queued and not answered (a burst may be answered under any
-# of its fragments). An owner DM counts as answered only by an entry
-# that carries its nonce: anything else in the outbox naming it is a
-# forgery the monitor refuses, and must not keep the DM from its own
-# wake.
+# of its fragments). An item counts as answered only by an entry that
+# carries its reply_nonce, and an owner DM only by one that also carries
+# its owner-DM nonce: anything else in the outbox naming it is a forgery
+# the monitor refuses, and must not keep the item from its own wake.
 open=$(printf '%s' "$queue" | jq -c --argjson answered "$answered" \
-    --argjson nonces "$all_nonces" \
+    --argjson nonces "$all_nonces" --argjson rn "$reply_nonces" \
     "$OWNER_DM"'[.[]? | objects | select(.message_id != null)
     | ($nonces[.message_id | tostring]) as $n
+    | ($rn[.message_id | tostring]) as $r
     | owner_dm as $owner
     | select(([.message_id] + [(.burst_fragments // [])[]? | .message_id])
         as $ids | [$answered[] | select(.ids as $a
             | any($ids[]; . as $i | any($a[]; . == $i)))
           | select(if $n != null then .nonce == $n else ($owner | not)
-              end)] | length == 0)]') || open='[]'
+              end)
+          | select($r == null or .reply == $r)] | length == 0)]') \
+    || open='[]'
 count=$(printf '%s' "$open" | jq 'length')
 if [ "$count" -eq 0 ]; then
     silent "queue empty" '{}'
@@ -293,17 +315,28 @@ if [ "$nonceless" -gt 0 ]; then
         "$OWNER_DM"'[.[] | select((owner_dm
             and $nonces[.message_id | tostring] == null) | not)]')
 fi
-# Likewise an owner's command whose owner_command_nonce is not written
-# yet.
-cmdless=0
-[ "$cmd_file" -eq 0 ] || cmdless=$(printf '%s' "$due" \
-    | jq --argjson c "$cmd_nonces" '[.[] | select(.owner_command == true
-        and $c[.message_id | tostring] == null)] | length')
-if [ "$cmdless" -gt 0 ]; then
-    log "owner commands wait for their nonce" '{"items":"'"$cmdless"'"}'
-    due=$(printf '%s' "$due" | jq -c --argjson c "$cmd_nonces" \
-        '[.[] | select((.owner_command == true
-            and $c[.message_id | tostring] == null) | not)]')
+# Likewise an item whose reply_nonce, or an owner's command whose
+# owner_command_nonce, is not written yet: for at most NONCE_WAIT_SECS
+# after it was queued (the monitor's upkeep mints a missing one within
+# seconds). Past that it is handed out anyway (an owner command without
+# owner powers), so a mangled file or an author who is no longer an
+# owner never leaves it waiting for good.
+NONCE_WAIT_SECS=60
+waiting=$(printf '%s' "$due" | jq -c --argjson c "$cmd_nonces" \
+    --argjson rn "$reply_nonces" --argjson cf "$cmd_file" \
+    --argjson rf "$reply_file" --argjson now "$now" \
+    --argjson lim "$NONCE_WAIT_SECS" '[.[] | select(
+        ($now - ((.queued_at // 0) | if type == "number" then . else 0
+            end)) < $lim
+        and (($rf == 1 and $rn[.message_id | tostring] == null)
+            or ($cf == 1 and .owner_command == true
+                and $c[.message_id | tostring] == null)))
+        | .message_id]')
+if [ "$waiting" != "[]" ]; then
+    log "items wait for their nonce" \
+        '{"items":"'"$(printf '%s' "$waiting" | jq 'length')"'"}'
+    due=$(printf '%s' "$due" | jq -c --argjson w "$waiting" \
+        '[.[] | select(.message_id as $m | $w | index($m) | not)]')
 fi
 ndue=$(printf '%s' "$due" | jq 'length')
 if [ "$ndue" -eq 0 ]; then
@@ -327,20 +360,25 @@ if [ "$nowner" -gt 0 ] && [ "$nowner" -lt "$ndue" ]; then
     due=$owner_dms
     ndue=$nowner
 fi
-# Then the owners' own server messages, apart from everyone else's:
-# their commands, and those holding a web watch capability. Every item
-# in such a wake is an owner's, so they may share it, and it holds
-# owner-command power and the web watch capability (below).
+# Then, one at a time, an item that holds a capability beyond answering
+# itself: an owner's command (owner_command_nonce: bin/discord-api.py)
+# or an item holding a web watch capability (web_nonce). Each wakes
+# alone, owners' first, so no other item's text (another item's history
+# included, even the same owner's) shares the run that holds it. The
+# rest wait for the next run, a few seconds later.
 ncmd=0
 if [ "$nowner" -eq 0 ]; then
     owner_cmds=$(printf '%s' "$due" | jq -c --argjson wn "$web_nonces" \
         '[.[] | select(.owner_command == true
-            or ((.settings.speaker? // "") == "owner"
-                and $wn[.message_id | tostring] != null))]')
+            or $wn[.message_id | tostring] != null)]
+        | (map(select(.owner_command == true
+            or (.settings.speaker? // "") == "owner")) + .)[:1]')
     ncmd=$(printf '%s' "$owner_cmds" | jq 'length')
     if [ "$ncmd" -gt 0 ] && [ "$ncmd" -lt "$ndue" ]; then
-        log "owner commands wake alone; the rest wait for the next run" \
-            '{"owner_commands":"'"$ncmd"'","held":"'"$((ndue - ncmd))"'"}'
+        log "an item with a capability wakes alone; the rest wait for the next run" \
+            '{"held":"'"$((ndue - ncmd))"'"}'
+    fi
+    if [ "$ncmd" -gt 0 ]; then
         due=$owner_cmds
         ndue=$ncmd
     fi
@@ -355,30 +393,16 @@ if [ "$nowner" -gt 0 ] && [ "$nowner" -eq "$ndue" ]; then
     nonces=$all_nonces
 fi
 # Each owner command's owner_command_nonce, only in a wake that holds
-# nothing but owner items (owner DMs, or the owners' server messages).
+# nothing but owner items (owner DMs, or that one command); a web_nonce
+# only in the wake of its own item alone. (An owner DM's owner_dm_nonce
+# does the web nonce's job already.)
 cmds='{}'
+wnonces='{}'
 if [ "$nowner" -eq "$ndue" ] || [ "$ncmd" -eq "$ndue" ]; then
     cmds=$cmd_nonces
 fi
-# Web watch capabilities: in a wake of the owners' server messages, each
-# item's own; with no owner item due, an item holding one (someone
-# abilities.web_watches allows) goes alone, first, and the rest wait
-# for the next run. (An owner DM's owner_dm_nonce does this already.)
-wnonces='{}'
 if [ "$ncmd" -gt 0 ] && [ "$ncmd" -eq "$ndue" ]; then
     wnonces=$web_nonces
-elif [ "$nowner" -eq 0 ]; then
-    solo=$(printf '%s' "$due" | jq -c --argjson wn "$web_nonces" \
-        '[.[] | select($wn[.message_id | tostring] != null)][:1]')
-    if [ "$(printf '%s' "$solo" | jq 'length')" -gt 0 ]; then
-        if [ "$ndue" -gt 1 ]; then
-            log "an item with a web watch capability wakes alone" \
-                '{"held":"'"$((ndue - 1))"'"}'
-        fi
-        due=$solo
-        ndue=1
-        wnonces=$web_nonces
-    fi
 fi
 expired=$(printf '%s' "$due" | jq --argjson w "$woken" \
     '[.[] | select($w[.message_id] != null)] | length')
@@ -431,5 +455,5 @@ else
     persona_args=(--argjson persona null)
 fi
 
-payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" --argjson nonces "$nonces" --argjson cmds "$cmds" --argjson wn "$wnonces" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings, watches, reminder} + (if $nonces[.message_id] then {owner_dm_nonce: $nonces[.message_id]} else {} end) + (if .owner_command == true and $cmds[.message_id] then {owner_command_nonce: $cmds[.message_id]} else {} end) + (if $wn[.message_id] then {web_nonce: $wn[.message_id]} else {} end)]}')
+payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" --argjson nonces "$nonces" --argjson cmds "$cmds" --argjson wn "$wnonces" --argjson rn "$reply_nonces" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings, watches, reminder} + (if $nonces[.message_id] then {owner_dm_nonce: $nonces[.message_id]} else {} end) + (if .owner_command == true and $cmds[.message_id] then {owner_command_nonce: $cmds[.message_id]} else {} end) + (if $wn[.message_id] then {web_nonce: $wn[.message_id]} else {} end) + (if $rn[.message_id] then {reply_nonce: $rn[.message_id]} else {} end)]}')
 wake "muse-discord mentions pending" "$payload"

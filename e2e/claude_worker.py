@@ -130,8 +130,13 @@ def read_json(path, default):
 
 # The monitor's private {message_id: nonce} file for open owner DMs.
 OWNER_DM_NONCES = "owner_dm_nonces.json"
-# ... and for open owner commands (bin/discord-api.py's capability).
+# ... and for open owner commands (bin/discord-api.py's capability), and
+# every open item's reply_nonce.
 OWNER_ITEMS = "owner_items.json"
+ITEM_NONCES = "item_nonces.json"
+WEB_NONCES = "web_nonces.json"
+# How long an item waits for a nonce the monitor has yet to write.
+NONCE_WAIT_SECS = 60
 
 
 def is_owner_dm(item):
@@ -149,10 +154,10 @@ def is_owner_command(item):
 
 
 def outbox_answers(pkg):
-    """[(ids, nonce)] for every outbox entry (queued for sending or
-    being sent): the message ids it names (item, reply_to) and the
-    owner-DM nonce it carries (owner_dm_nonce, else its settings
-    action's nonce)."""
+    """[(ids, nonce, reply nonce)] for every outbox entry (queued for
+    sending or being sent): the message ids it names (item, reply_to),
+    the owner-DM nonce it carries (owner_dm_nonce, else its settings
+    action's nonce) and its reply_nonce."""
     out = []
     for name in ("reply_outbox.json", "reply_outbox.processing.json"):
         data = read_json(os.path.join(pkg, name), [])
@@ -164,8 +169,10 @@ def outbox_answers(pkg):
             nonce = next((n for n in (e.get("owner_dm_nonce"),
                                       s.get("nonce"))
                           if isinstance(n, str)), None)
+            reply = e.get("reply_nonce")
             out.append(({e[k] for k in ("item", "reply_to")
-                         if isinstance(e.get(k), str)}, nonce))
+                         if isinstance(e.get(k), str)}, nonce,
+                        reply if isinstance(reply, str) else None))
     return out
 
 
@@ -184,14 +191,17 @@ def open_items(pkg, answered=None):
     removes an answered item from the queue before it drops the item's
     outbox entry, so this order never sees one without the other), the
     nonces after it (the monitor writes a DM's nonce before it queues
-    the DM). An owner's DM counts as answered only by an entry that
-    carries its nonce: anything else is a forgery the monitor refuses.
+    the DM). An item counts as answered only by an entry that carries
+    its reply_nonce, and an owner's DM only by one that also carries its
+    nonce: anything else is a forgery the monitor refuses.
     `answered` (a set) remembers the ids of items found answered, so
     they stay answered once the monitor takes the outbox."""
     entries = outbox_answers(pkg)
     queue = read_json(os.path.join(pkg, "reply_queue.json"), [])
     nonces = read_json(os.path.join(pkg, OWNER_DM_NONCES), {})
     nonces = nonces if isinstance(nonces, dict) else {}
+    replies = read_json(os.path.join(pkg, ITEM_NONCES), {})
+    replies = replies if isinstance(replies, dict) else {}
     out = []
     for item in queue if isinstance(queue, list) else []:
         if not isinstance(item, dict) or item.get("message_id") is None:
@@ -200,8 +210,10 @@ def open_items(pkg, answered=None):
         if answered is not None and any(i in answered for i in ids):
             continue
         n = nonces.get(str(item["message_id"]))
-        hits = [nonce for named, nonce in entries
-                if any(i in named for i in ids)]
+        r = replies.get(str(item["message_id"]))
+        hits = [nonce for named, nonce, reply in entries
+                if any(i in named for i in ids)
+                and (r is None or reply == r)]
         if n is not None:
             hits = [x for x in hits if x == n]
         elif is_owner_dm(item):
@@ -235,24 +247,25 @@ def persona_file(pkg, override=None):
     return os.path.join(pkg, os.path.expanduser(name or "persona.md"))
 
 
-def build_payload(items, persona, nonces=None, cmds=None, web=None):
+def build_payload(items, persona, caps=None):
     """The wake payload: {count, persona, items} with the hook's fields,
-    plus owner_dm_nonce on the items `nonces` has one for (the caller
-    passes nonces only for a wake of owner DMs alone),
-    owner_command_nonce on the owner commands `cmds` has one for (only
-    for a wake of owner items alone), and web_nonce on those `web` has
-    one for (only for a wake of the owners' server messages, or of that
-    item alone)."""
+    plus the capabilities `caps` holds for each item ({"dm", "cmd",
+    "web", "reply"}: {message_id: nonce}; the caller passes only what
+    this wake may get): owner_dm_nonce, owner_command_nonce (owner
+    commands only), web_nonce and reply_nonce."""
+    caps = caps or {}
     out = []
     for item in items:
         p = {k: item.get(k) for k in PAYLOAD_FIELDS}
         mid = str(item.get("message_id"))
-        if (nonces or {}).get(mid):
-            p["owner_dm_nonce"] = nonces[mid]
-        if is_owner_command(item) and (cmds or {}).get(mid):
-            p["owner_command_nonce"] = cmds[mid]
-        if (web or {}).get(mid):
-            p["web_nonce"] = web[mid]
+        if (caps.get("dm") or {}).get(mid):
+            p["owner_dm_nonce"] = caps["dm"][mid]
+        if is_owner_command(item) and (caps.get("cmd") or {}).get(mid):
+            p["owner_command_nonce"] = caps["cmd"][mid]
+        if (caps.get("web") or {}).get(mid):
+            p["web_nonce"] = caps["web"][mid]
+        if (caps.get("reply") or {}).get(mid):
+            p["reply_nonce"] = caps["reply"][mid]
         out.append(p)
     return {"count": len(items), "persona": persona, "items": out}
 
@@ -363,39 +376,61 @@ def bash_allowed(pkg, cmd):
         "$-expansions)." % (pkg, pkg))
 
 
-def read_allowed(pkg, path, persona=None):
-    """(allowed, reason) for a Read of `path`."""
+def wake_reads(items):
+    """What a wake of these items may Read: {"media": [the files its
+    items list], "items": [their message_ids] (their generated/ dirs)}.
+    Never the queue file: it holds every open item's text, other
+    people's DMs and the owner's included, and the payload carries this
+    wake's items already."""
+    media, ids = [], []
+    for item in items or []:
+        ids.append(str(item.get("message_id")))
+        for m in item.get("media") or []:
+            if isinstance(m, dict) and isinstance(m.get("path"), str):
+                media.append(m["path"])
+    return {"media": media, "items": ids}
+
+
+def read_allowed(pkg, path, persona=None, reads=None):
+    """(allowed, reason) for a Read of `path`: the persona file, and the
+    current wake's own media files and generated/<its items>/ (reads,
+    from wake_reads)."""
     rp = os.path.realpath(os.path.join(pkg, os.path.expanduser(path or "")))
     root = os.path.realpath(pkg)
-    for sub in ("media", "generated"):
-        if rp.startswith(os.path.join(root, sub) + os.sep):
-            return True, sub
-    allowed = {os.path.join(root, "reply_queue.json"),
-               os.path.realpath(persona_file(pkg, persona))}
-    if rp in allowed:
-        return True, "queue/persona"
-    return False, ("Read is limited to the media files listed in an item "
-                   "(and the queue/persona files when the payload lacks "
-                   "them).")
+    reads = reads or {}
+    media = {os.path.realpath(os.path.join(pkg, m))
+             for m in reads.get("media") or []}
+    if rp in media:
+        return True, "this wake's media"
+    for mid in reads.get("items") or []:
+        gen = os.path.join(root, "generated", mid)
+        if re.fullmatch(r"[0-9]+", mid) and rp.startswith(gen + os.sep):
+            return True, "this wake's generated files"
+    if rp == os.path.realpath(persona_file(pkg, persona)):
+        return True, "persona"
+    return False, ("Read is limited to the media files listed in this "
+                   "wake's items (and the persona file when the payload "
+                   "lacks it).")
 
 
-def check_tool(pkg, tool, tool_input, persona=None):
+def check_tool(pkg, tool, tool_input, persona=None, reads=None):
     """(allowed, reason) for one tool call."""
     tool_input = tool_input if isinstance(tool_input, dict) else {}
     if tool == "Bash":
         return bash_allowed(pkg, str(tool_input.get("command") or ""))
     if tool == "Read":
         return read_allowed(pkg, str(tool_input.get("file_path") or ""),
-                            persona)
+                            persona, reads)
     return False, "%s is not available to the reply worker." % tool
 
 
-def hook_main(pkg, persona=None):
+def hook_main(pkg, persona=None, reads=None):
     """PreToolUse hook: read the call from stdin, print the decision."""
     try:
         call = json.load(sys.stdin)
         ok, reason = check_tool(pkg, call.get("tool_name"),
-                                call.get("tool_input"), persona)
+                                call.get("tool_input"), persona,
+                                json.loads(reads) if reads else None)
     except Exception as e:
         ok, reason = False, "hook error: %s" % e
     print(json.dumps({"hookSpecificOutput": {
@@ -405,12 +440,14 @@ def hook_main(pkg, persona=None):
     return 0
 
 
-def worker_args(pkg, persona=None):
-    """The CLI flags for one wake (the prompt goes on stdin)."""
+def worker_args(pkg, persona=None, items=None):
+    """The CLI flags for one wake of `items` (the prompt goes on stdin):
+    its Read allowlist is those items' own files (wake_reads)."""
     hook = " ".join(shlex.quote(a) for a in
                     [sys.executable, os.path.abspath(__file__), "--hook",
-                     "--pkg", pkg] + (["--persona", persona] if persona
-                                      else []))
+                     "--pkg", pkg, "--reads",
+                     json.dumps(wake_reads(items))]
+                    + (["--persona", persona] if persona else []))
     settings = {"hooks": {"PreToolUse": [
         {"matcher": "*", "hooks": [{"type": "command", "command": hook}]}]}}
     return [claude_bin(), "-p", "--output-format", "json",
@@ -474,90 +511,95 @@ class Worker:
             pass
 
     def due(self):
-        """(items for the next wake, their owner-DM nonces, their
-        owner-command nonces, their web watch nonces): open items no
-        live lease covers, as the hook picks them. An owner DM or owner
-        command whose nonce the monitor has not written yet waits,
-        unleased (an owner command only once owner_items.json exists).
-        Owner DMs wake alone (real DMs before notices), else the owners'
-        server messages (commands, web watch holders), else one item
-        holding a web watch capability; the rest wait for the next
-        poll, and only such a wake gets those nonces. Refreshes the
-        leases (kept only for items still queued, like the hook's
-        state)."""
+        """(items for the next wake, their capabilities for
+        build_payload): open items no live lease covers, as the hook
+        picks them. An item whose reply_nonce, an owner DM whose nonce,
+        or an owner command whose nonce the monitor has not written yet
+        waits, unleased (the reply and command ones for at most
+        NONCE_WAIT_SECS after it was queued). Owner DMs wake alone (real
+        DMs before notices); else one item holding a capability (an
+        owner command, owners' first, or a web watch nonce) wakes alone;
+        the rest wait for the next poll. Refreshes the leases (kept only
+        for items still queued, like the hook's state)."""
         now = time.time()
         items, nonces = open_items(self.pkg, self.answered)
-        cmd_file = os.path.exists(os.path.join(self.pkg, OWNER_ITEMS))
-        cmds = read_json(os.path.join(self.pkg, OWNER_ITEMS), {})
-        cmds = cmds if isinstance(cmds, dict) else {}
+
+        def load(name):
+            data = read_json(os.path.join(self.pkg, name), {})
+            return os.path.exists(os.path.join(self.pkg, name)), \
+                data if isinstance(data, dict) else {}
+        cmd_file, cmds = load(OWNER_ITEMS)
+        cmds = {k: (v.get("nonce") if isinstance(v, dict) else v)
+                for k, v in cmds.items()}
+        reply_file, replies = load(ITEM_NONCES)
+        _, web = load(WEB_NONCES)
         queued = set()
         for item in read_json(os.path.join(self.pkg, "reply_queue.json"),
                               []) or []:
             if isinstance(item, dict) and isinstance(item.get("message_id"),
                                                      str):
                 queued.add(item["message_id"])
+
+        def waits(i):
+            mid = str(i["message_id"])
+            if is_owner_dm(i) and mid not in nonces:
+                return True
+            age = now - (i.get("queued_at") if isinstance(
+                i.get("queued_at"), (int, float)) else 0)
+            return age < NONCE_WAIT_SECS and (
+                (reply_file and mid not in replies)
+                or (is_owner_command(i) and cmd_file and not cmds.get(mid)))
         with self.lock:
             self.leases = {k: v for k, v in self.leases.items()
                            if k in queued}
             due = [i for i in items
                    if self.leases.get(i["message_id"], 0) + self.lease <= now
-                   and not (is_owner_dm(i)
-                            and str(i["message_id"]) not in nonces)
-                   and not (is_owner_command(i) and cmd_file
-                            and str(i["message_id"]) not in cmds)]
+                   and not waits(i)]
             owner = [i for i in due if is_owner_dm(i)]
             if any(i.get("kind") == "dm" for i in owner):
                 # The owner's own messages never share a run with the
                 # bot's notices to them (the hook's rule).
                 owner = [i for i in owner if i.get("kind") == "dm"]
-            web = read_json(os.path.join(self.pkg, "web_nonces.json"),
-                            {}) or {}
-            # The owners' server messages: commands, and those holding a
-            # web watch capability. All the owner's, so they share a wake.
-            commands = [] if owner else [
-                i for i in due if is_owner_command(i) or (
-                    (i.get("settings") or {}).get("speaker") == "owner"
-                    and str(i["message_id"]) in web)]
-            wake_web = {}
+            caps = {"reply": replies}
             if owner:
                 due = owner
-            elif commands:
-                due = commands
-                wake_web = web
+                caps.update(dm=nonces, cmd=cmds)
             else:
-                # An item holding a web watch capability wakes alone
-                # (the hook's rule), with its web_nonce.
-                solo = [i for i in due if str(i["message_id"]) in web][:1]
-                if solo:
-                    due = solo
-                    wake_web = web
+                # One item holding a capability beyond answering itself
+                # wakes alone, owners' first (the hook's rule).
+                held = [i for i in due if is_owner_command(i)
+                        or str(i["message_id"]) in web]
+                held = [i for i in held if is_owner_command(i) or (
+                    i.get("settings") or {}).get("speaker") == "owner"] \
+                    + held
+                if held:
+                    due = held[:1]
+                    caps.update(cmd=cmds, web=web)
             expired = [i for i in due if i["message_id"] in self.leases]
             for i in due:
                 self.leases[i["message_id"]] = now
         if expired:
             self.log("re-waking: item lease expired for %s"
                      % [i["message_id"] for i in expired])
-        return (due, (nonces if owner else {}),
-                (cmds if owner or commands else {}), wake_web)
+        return due, caps
 
     def poll(self):
         """One hook pass: start a wake for the due items, if any."""
         if self.stopping:
             return None
-        items, nonces, cmds, web = self.due()
+        items, caps = self.due()
         if not items:
             return None
         with self.lock:
             self.wakes += 1
             n = self.wakes
         t = threading.Thread(target=self.run_wake,
-                             args=(n, items, nonces, cmds, web),
-                             daemon=True)
+                             args=(n, items, caps), daemon=True)
         self.threads.append(t)
         t.start()
         return t
 
-    def run_wake(self, n, items, nonces=None, cmds=None, web=None):
+    def run_wake(self, n, items, caps=None):
         ids = [i["message_id"] for i in items]
         try:
             with open(os.path.join(self.pkg,
@@ -574,9 +616,8 @@ class Worker:
                 persona = f.read()
         except OSError:
             persona = None  # the worker then reads the file itself
-        prompt = wake_prompt(rendered, build_payload(items, persona, nonces,
-                                                     cmds, web))
-        args = worker_args(self.pkg, self.persona)
+        prompt = wake_prompt(rendered, build_payload(items, persona, caps))
+        args = worker_args(self.pkg, self.persona, items)
         self.log("wake %d: start items=%s" % (n, ids))
         start = time.monotonic()
         env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
@@ -655,10 +696,11 @@ def main(argv=None):
                     "'' = config.yaml persona)")
     ap.add_argument("--hook", action="store_true",
                     help=argparse.SUPPRESS)
+    ap.add_argument("--reads", default=None, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     pkg = os.path.abspath(args.pkg)
     if args.hook:
-        return hook_main(pkg, args.persona or None)
+        return hook_main(pkg, args.persona or None, args.reads)
 
     worker = Worker(pkg, args.log, args.timeout, args.lease, args.persona,
                     echo=True)

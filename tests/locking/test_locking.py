@@ -17,8 +17,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from harness import (ARGV, monitor, fresh_pkg, new_state,  # noqa: E402
                      snowflake, msg, read, write, capture, sent_texts,
                      typing_calls)
+from common import signed  # noqa: E402
 
 m = monitor
+
+
+def S(st, item):
+    """item as the wake holding its queue item writes it (with the
+    item's reply_nonce)."""
+    return signed(m, st, item)
 
 
 def append_via_helper(pkg, items, check=True):
@@ -53,15 +60,15 @@ def test_worker_append_during_slow_send_not_lost():
     try:
         a, b = snowflake(), snowflake()
         write(m.QUEUE_FILE, [qitem(a), qitem(b)])
-        write(m.OUTBOX_FILE, [{"item": a, "channel_id": "101",
-                               "reply_to": a,
-                               "parts": ["one", "two", "three"]}])
+        write(m.OUTBOX_FILE, [S(st, {"item": a, "channel_id": "101",
+                                     "reply_to": a,
+                                     "parts": ["one", "two", "three"]})])
         t = threading.Thread(target=m.process_outbox, args=(st,))
         t.start()
         time.sleep(0.4)  # mid-send
         assert os.path.exists(m.OUTBOX_PROCESSING_FILE)
-        append_via_helper(pkg, [{"item": b, "channel_id": "101",
-                                 "reply_to": b, "text": "for b"}])
+        append_via_helper(pkg, [S(st, {"item": b, "channel_id": "101",
+                                       "reply_to": b, "text": "for b"})])
         t.join()
         assert sent_texts() == ["one", "two", "three"], sent_texts()
         out = read(m.OUTBOX_FILE)
@@ -103,8 +110,9 @@ def test_concurrent_appends_stress_each_sent_once():
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True)
             for _ in ids]
         for p, i in zip(procs, ids):
-            p.stdin.write(json.dumps([{"item": i, "channel_id": "101",
-                                       "reply_to": i, "text": "r" + i}]))
+            p.stdin.write(json.dumps([S(st, {
+                "item": i, "channel_id": "101", "reply_to": i,
+                "text": "r" + i})]))
             p.stdin.close()
         for p in procs:
             assert p.wait() == 0
@@ -238,7 +246,7 @@ def test_monitor_removes_answered_items():
         qitem(silent_id),
         qitem(unnamed),
     ])
-    write(m.OUTBOX_FILE, [
+    write(m.OUTBOX_FILE, [S(st, it) for it in [
         {"item": mention, "channel_id": "101", "reply_to": mention,
          "text": "hello"},
         # answered by its item alone (no reply_to)
@@ -247,29 +255,29 @@ def test_monitor_removes_answered_items():
         {"channel_id": "101", "reply_to": frag2, "text": "burst reply"},
         {"item": silent_id, "channel_id": "101", "reply_to": silent_id,
          "silent": True},
-        # old worker already removed its queue item: nothing breaks
+        # refused: an item no longer open (answered long ago), a
+        # message the monitor never queued, and neither item nor
+        # reply_to (the queue item is left open)
         {"channel_id": "101", "reply_to": gone, "text": "late"},
-        # refused: a message the monitor never queued, and neither item
-        # nor reply_to (the queue item is left open)
         {"channel_id": "101", "reply_to": never, "text": "unknown"},
         {"channel_id": "101", "text": "a loose post"},
-    ])
+    ]])
     with capture():
         m.process_outbox(st)
     assert [q["message_id"] for q in read(m.QUEUE_FILE)] == [unnamed], \
         read(m.QUEUE_FILE)
-    assert sent_texts() == ["hello", "a post", "burst reply", "late"], \
+    assert sent_texts() == ["hello", "a post", "burst reply"], \
         sent_texts()
-    assert len(read(m.OUTBOX_REJECTED_FILE)) == 2
+    assert len(read(m.OUTBOX_REJECTED_FILE)) == 3
     assert never not in st["replied_to"]
     for mid in (mention, plain, trig, frag2, silent_id):
         assert mid in st["replied_to"], mid
     # a second worker drafts the same item: suppressed
-    write(m.OUTBOX_FILE, [{"item": plain, "channel_id": "101",
-                           "text": "a post again"}])
+    write(m.OUTBOX_FILE, [S(st, {"item": plain, "channel_id": "101",
+                                 "text": "a post again"})])
     with capture():
         m.process_outbox(st)
-    assert len(sent_texts()) == 4
+    assert len(sent_texts()) == 3
 
 
 def test_malformed_items_rejected_without_blocking():
@@ -287,8 +295,8 @@ def test_malformed_items_rejected_without_blocking():
          "reactions": [1]},
         {"channel_id": ["101"], "text": "x"},
         {"channel_id": "101", "reactions": ["\U0001F44D"]},  # react, no target
-        {"item": good, "channel_id": "101", "reply_to": good,
-         "text": "the good one"},
+        S(st, {"item": good, "channel_id": "101", "reply_to": good,
+               "text": "the good one"}),
     ])
     with capture():
         m.process_outbox(st)
@@ -326,14 +334,14 @@ def test_retry_merges_with_appends():
     st = new_state()
     a, b, c = snowflake(), snowflake(), snowflake()
     write(m.QUEUE_FILE, [qitem(a), qitem(b), qitem(c)])
-    write(m.OUTBOX_FILE, [{"item": a, "channel_id": "101", "reply_to": a,
-                           "text": "flaky"}])
+    write(m.OUTBOX_FILE, [S(st, {"item": a, "channel_id": "101",
+                                 "reply_to": a, "text": "flaky"})])
     orig = m.api_post
 
     def failing(path, data):
         if path.endswith("/messages"):
-            append_via_helper(pkg, [{"item": b, "channel_id": "101",
-                                     "reply_to": b, "text": "b"}])
+            append_via_helper(pkg, [S(st, {"item": b, "channel_id": "101",
+                                           "reply_to": b, "text": "b"})])
             raise OSError("timeout")
         return orig(path, data)
     m.api_post = failing
@@ -347,8 +355,8 @@ def test_retry_merges_with_appends():
     assert out[0]["_retry"]["n"] == 1 and "picked" in out[0]["_retry"]
     assert len(read(m.QUEUE_FILE)) == 3  # nothing settled yet
     # crash leftover: processing file is merged back first
-    write(m.OUTBOX_PROCESSING_FILE, [{"item": c, "channel_id": "101",
-                                      "text": "leftover"}])
+    write(m.OUTBOX_PROCESSING_FILE, [S(st, {"item": c, "channel_id": "101",
+                                            "text": "leftover"})])
     out[0]["_retry"]["next"] = 0
     write(m.OUTBOX_FILE, out)
     with capture():
@@ -392,8 +400,8 @@ def test_typing_thread_lifecycle():
         c1 = [c for c in typing_calls()[n0:] if "/101/" in c[2]]
         assert len(c1) >= 2, typing_calls()
         # 3. the reply goes out: typing stops for good
-        write(m.OUTBOX_FILE, [{"item": a, "channel_id": "101",
-                               "reply_to": a, "text": "done"}])
+        write(m.OUTBOX_FILE, [S(st, {"item": a, "channel_id": "101",
+                                     "reply_to": a, "text": "done"})])
         with capture():
             m.process_outbox(st)
         m.typing_refresh(st)

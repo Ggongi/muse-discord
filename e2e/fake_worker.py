@@ -3,8 +3,9 @@
 
     python3 e2e/fake_worker.py --pkg <package dir> [--interval 1]
 
-Polls <pkg>/reply_queue.json and answers every queue item exactly once
-with one outbox item, written through <pkg>/bin/outbox-append.py like
+Polls <pkg>/reply_queue.json (and item_nonces.json, for each item's
+reply_nonce, playing the wake hook) and answers every queue item exactly
+once with one outbox item, written through <pkg>/bin/outbox-append.py like
 a real worker (PROTOCOL.md): one append call per item, as
 worker-prompt.template.md has the real worker do. The reply threads
 under the item's LAST burst fragment (the trigger when there are none)
@@ -213,6 +214,9 @@ def build_reply(item, a_id=None):
     if item.get("owner_dm_nonce"):
         # An owner-DM-only wake's payload: every item for the DM echoes it.
         out["owner_dm_nonce"] = item["owner_dm_nonce"]
+    if item.get("reply_nonce"):
+        # Every outbox item echoes its item's reply_nonce.
+        out["reply_nonce"] = item["reply_nonce"]
     delay = SLOW_SECS if "slow" in flags else 0.0
     if "silent" in flags:
         out["silent"] = True
@@ -278,12 +282,20 @@ class Worker:
         if self.a_id is None:
             self.a_id = driver_a_id(self.pkg)
         queue = load_json(os.path.join(self.pkg, "reply_queue.json"), [])
+        # Playing the wake hook too: each item's reply_nonce, from the
+        # monitor's file (a real worker gets it in its wake payload).
+        nonces = load_json(os.path.join(self.pkg, "item_nonces.json"), {})
+        nonces = nonces if isinstance(nonces, dict) else {}
         now = self.clock()
         seen = []
         for item in queue if isinstance(queue, list) else []:
             mid = str(item.get("message_id") or "")
             if not mid or mid in self.answered:
                 continue
+            if nonces.get(mid):
+                item = dict(item, reply_nonce=nonces[mid])
+            elif os.path.exists(os.path.join(self.pkg, "item_nonces.json")):
+                continue   # minted within seconds: the next tick
             self.answered.add(mid)
             seen.append(item)
             out, delay = build_reply(item, self.a_id)

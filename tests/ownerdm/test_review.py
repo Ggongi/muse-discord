@@ -36,9 +36,9 @@ class BurstFragments(Base):
         return trig, frag
 
     def real(self, trig, frag):
-        self.outbox({"item": trig["id"], "channel_id": DM,
-                     "reply_to": frag["id"], "text": "real",
-                     "owner_dm_nonce": self.nonce(trig["id"])})
+        self.outbox(self.held({"item": trig["id"], "channel_id": DM,
+                               "reply_to": frag["id"], "text": "real",
+                               "owner_dm_nonce": self.nonce(trig["id"])}))
         self.assertEqual([s["content"] for s in self.sends(DM)], ["real"],
                          self.out)
         self.assertEqual(self.queued(), [])
@@ -104,9 +104,9 @@ class CanonicalIds(Base):
         self.assertEqual(self.reactions, [])
         self.assert_open(m)
         # Numbers are canonical once written as strings.
-        self.outbox({"item": int(m["id"]), "channel_id": int(DM),
-                     "reply_to": int(m["id"]), "text": "real",
-                     "owner_dm_nonce": self.nonce(m["id"])})
+        self.outbox(self.held({"item": int(m["id"]), "channel_id": int(DM),
+                               "reply_to": int(m["id"]), "text": "real",
+                               "owner_dm_nonce": self.nonce(m["id"])}))
         self.assertEqual([s["content"] for s in self.sends(DM)], ["real"])
 
 

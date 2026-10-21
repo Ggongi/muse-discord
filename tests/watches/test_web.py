@@ -104,8 +104,8 @@ class Web(tw.Base):
         self.assertEqual((entry["result"], entry["summary"]),
                          ("met", "found it on the venue site"))
         self.assertEqual(self.items(), {})           # not "every time"
-        self.outbox({"item": f["message_id"], "channel_id": CH,
-                     "text": f"It's on sale! <@{U2}>"})
+        self.outbox(self.held({"item": f["message_id"], "channel_id": CH,
+                               "text": f"It's on sale! <@{U2}>"}))
         (path, data), = self.new_sends()
         self.assertEqual(data["message_reference"]["message_id"], msg["id"])
         self.assertEqual(data["allowed_mentions"]["users"], [OWNER])
@@ -123,8 +123,8 @@ class Web(tw.Base):
         self.tick(ahead=7200)
         self.assertEqual(len(self.fires()), 1)
         # Five unknowns in a row: it ends, and they are told once.
-        self.outbox({"item": f["message_id"], "channel_id": CH,
-                     "text": "I won't check that one."})
+        self.outbox(self.held({"item": f["message_id"], "channel_id": CH,
+                               "text": "I won't check that one."}))
         self.web(what="the NFL game has started", every=1800)
         ahead = 0.0
         for _ in range(W_.WEB_MAX_FAILS):

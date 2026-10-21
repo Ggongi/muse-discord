@@ -31,6 +31,9 @@ NONCE = "c" * 32
 SRV_ITEM = "300000000000000007"   # an owner's command in a server
 SRV_NONCE = "e" * 32
 STRANGER_ITEM = "300000000000000008"
+NAMED_ID = "200000000000000006"    # named by <#id> in the owner's command
+ANNOUNCE = "200000000000000007"    # named by #announcements
+OTHER_CH = "200000000000000008"    # named nowhere in it
 
 WORK = scratch("muse-odm-api-")
 CFG = os.path.join(WORK, "config.yaml")
@@ -49,6 +52,9 @@ CHANNELS = {
     OTHER_DM: {"id": OTHER_DM, "type": 1,
                "recipients": [{"id": STRANGER}]},
     GEN_CH: {"id": GEN_CH, "type": 0, "guild_id": "5"},
+    NAMED_ID: {"id": NAMED_ID, "type": 0, "name": "dev"},
+    ANNOUNCE: {"id": ANNOUNCE, "type": 0, "name": "Announcements"},
+    OTHER_CH: {"id": OTHER_CH, "type": 0, "name": "random"},
 }
 MESSAGES = {(OWNER_DM, ITEM)}   # (channel, message) that exist
 CALLS = []
@@ -82,6 +88,17 @@ D.OWNER_ITEMS_FILE = os.path.join(WORK, "owner_items.json")
 SERVER = ("--for", SRV_ITEM, "--nonce", SRV_NONCE)
 
 
+def entry(nonce, cid, dm=False, channels=(), names=()):
+    """An owner_items.json record, as the monitor writes it."""
+    return {"nonce": nonce, "channel_id": cid, "dm": dm,
+            "channels": list(channels), "names": list(names)}
+
+
+ITEMS = {ITEM: entry(NONCE, OWNER_DM, dm=True),
+         SRV_ITEM: entry(SRV_NONCE, GEN_CH, channels=[NAMED_ID],
+                         names=["announcements"])}
+
+
 def write_owner_items(data):
     with open(D.OWNER_ITEMS_FILE, "w") as f:
         json.dump(data, f)
@@ -96,7 +113,7 @@ class _Tool(unittest.TestCase):
     def setUp(self):
         with open(D.OWNER_DM_NONCES_FILE, "w") as f:
             json.dump({ITEM: NONCE}, f)
-        write_owner_items({ITEM: NONCE, SRV_ITEM: SRV_NONCE})
+        write_owner_items(ITEMS)
 
     def run_tool(self, *args):
         CALLS.clear()
@@ -171,14 +188,24 @@ class OwnerDmChannel(_Tool):
             rc = self.run_tool(*args)
             self.assertEqual(rc, 0, args)
             self.assertTrue(writes(), args)
-        # Server channels and other people's DMs: an owner's command
-        # from a server (or the owner DM's own item) may act there.
-        for cid in (GEN_CH, OTHER_DM):
-            for prefix in (SERVER, ("--for", ITEM, "--nonce", NONCE)):
-                for args in self.every_subcommand(cid, prefix):
-                    rc = self.run_tool(*args)
-                    self.assertEqual(rc, 0, args)
-                    self.assertTrue(writes(), args)
+        # A server command: in its own channel, and where the owner's
+        # own words point (<#id>, or #name, any case).
+        for cid in (GEN_CH, NAMED_ID, ANNOUNCE):
+            for args in self.every_subcommand(cid, SERVER):
+                rc = self.run_tool(*args)
+                self.assertEqual(rc, 0, args)
+                self.assertTrue(writes(), args)
+        # Nowhere else: not a channel its words do not name, not
+        # someone's DM (named or not), and the owner DM's command not in
+        # a server channel its words do not name.
+        ITEMS[SRV_ITEM]["channels"].append(OTHER_DM)
+        write_owner_items(ITEMS)
+        ITEMS[SRV_ITEM]["channels"].pop()
+        for cid, prefix in ((OTHER_CH, SERVER), (OTHER_DM, SERVER),
+                            (GEN_CH, ("--for", ITEM, "--nonce", NONCE))):
+            for args in self.every_subcommand(cid, prefix):
+                self.assertNotEqual(self.run_tool(*args), 0, args)
+                self.assertEqual(writes(), [], args)
         # A server command's nonce opens no owner DM.
         for args in self.every_subcommand(OWNER_DM, SERVER):
             self.assertNotEqual(self.run_tool(*args), 0, args)
@@ -227,30 +254,74 @@ class OwnerCommandsOnly(_Tool):
                     self.assertNotEqual(self.run_tool(*args), 0, args)
                     self.assertEqual(CALLS, [], args)
         # Answered (the monitor dropped it), or no file at all.
-        write_owner_items({ITEM: NONCE})
+        write_owner_items({ITEM: ITEMS[ITEM]})
         self.assertNotEqual(self.run_tool(*SERVER, "post", GEN_CH, "x"), 0)
         os.remove(D.OWNER_ITEMS_FILE)
         self.assertNotEqual(self.run_tool(*SERVER, "read", GEN_CH), 0)
         self.assertEqual(CALLS, [])
 
-    def test_lookups_need_no_owner_item(self):
-        CHANNELS_LIST = [{"id": GEN_CH, "name": "general", "type": 0}]
+    def lookups(self, prefix):
+        listing = [{"id": GEN_CH, "name": "general", "type": 0},
+                   {"id": "2", "name": "layoffs-private", "type": 0}]
         real = D.api
 
         def api(method, path, data=None):
             CALLS.append((method, path, data))
             if path.endswith("/channels"):
-                return CHANNELS_LIST
-            return {"threads": [{"id": "1", "parent_id": GEN_CH}]}
+                return listing
+            return {"threads": [{"id": "1", "parent_id": GEN_CH,
+                                 "name": "hr-thread"}]}
         D.api = api
+        CALLS.clear()
+        err, out = io.StringIO(), io.StringIO()
+        old = sys.stderr, sys.stdout
+        sys.stderr, sys.stdout = err, out
+        rcs = []
         try:
-            self.assertEqual(self.run_tool("resolve-channel",
-                                           "500000000000000001",
-                                           "#general"), 0)
-            self.assertEqual(self.run_tool("list-threads",
-                                           "500000000000000001", GEN_CH), 0)
+            for args in (("resolve-channel", "500000000000000001",
+                          "#general"),
+                         ("resolve-channel", "500000000000000001", "nope"),
+                         ("list-threads", "500000000000000001", GEN_CH)):
+                try:
+                    rcs.append(D.main(["discord-api.py", *prefix, *args]))
+                except SystemExit as e:
+                    rcs.append(str(e))
+                    err.write(str(e))
         finally:
             D.api = real
+            sys.stderr, sys.stdout = old
+        return rcs, out.getvalue() + err.getvalue()
+
+    def test_lookups_need_an_owner_nonce(self):
+        rcs, text = self.lookups(())
+        self.assertNotIn(0, rcs)
+        self.assertEqual(CALLS, [])
+        for prefix in (SERVER, ("--for", ITEM, "--nonce", NONCE)):
+            rcs, text = self.lookups(prefix)
+            self.assertEqual((rcs[0], rcs[2]), (0, 0), text)
+            # A miss never lists the server's other channels.
+            self.assertNotIn("layoffs-private", text)
+        # An owner DM that is no owner command (its DM nonce only).
+        write_owner_items({SRV_ITEM: ITEMS[SRV_ITEM]})
+        rcs, _ = self.lookups(("--for", ITEM, "--nonce", NONCE))
+        self.assertEqual(rcs[0], 0)
+
+    def test_read_is_wrapped_and_posts_never_carry_a_nonce(self):
+        self.run_tool(*SERVER, "read", GEN_CH)
+        out = io.StringIO()
+        old = sys.stdout
+        sys.stdout = out
+        try:
+            D.main(["discord-api.py", *SERVER, "read", GEN_CH])
+            D.main(["discord-api.py", *SERVER, "post", GEN_CH,
+                    "leak " + "ab" * 16])
+        finally:
+            sys.stdout = old
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines[0].startswith("<<<untrusted"), lines)
+        self.assertIn("secret plans", lines[1])
+        self.assertTrue(lines[2].startswith("<<<end of untrusted"), lines)
+        self.assertEqual(CALLS[-1][2]["content"], "leak (redacted)")
 
 
 if __name__ == "__main__":

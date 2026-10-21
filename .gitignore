@@ -31,6 +31,7 @@ update_request.json
 directory.json
 owner_dm_nonces.json
 owner_items.json
+item_nonces.json
 nl_journal.json
 watches.json
 watches.json.bad-*

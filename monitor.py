@@ -2231,7 +2231,10 @@ def apply_record(state, rec):
             # Sent through the outbox like any reply (retries, the
             # attachment pipeline, settling); the hold id lets this one
             # item past the never_share check.
-            state.setdefault("hold_released", {})[hid] = time.time()
+            state.setdefault("hold_released", {})[hid] = {
+                "at": time.time(), "qid": hold.get("qid"),
+                "channel_id": str((hold.get("item") or {})
+                                  .get("channel_id"))}
             state.setdefault("released", []).append(
                 dict(hold["item"], _hold=hid))
             print(f"Owner {rec.get('by')} chose Send anyway for the held "
@@ -2383,8 +2386,7 @@ def never_share_hit(state, item, qid, parts):
     phrases = settings().get("privacy.never_share", MS.Scope.everywhere())
     if not phrases or not parts:
         return False
-    hid = item.get("_hold")
-    if hid and hid in state.get("hold_released", {}):
+    if hold_released_ok(state, item):
         return False  # an owner chose Send anyway
     meta = state.get("item_meta", {}).get(qid) if qid else None
     if meta:
@@ -2448,7 +2450,9 @@ def expire_holds(state):
             print(f"Held reply in {hold.get('where')} expired undecided; "
                   f"discarded.", flush=True)
     released = state.get("hold_released") or {}
-    for hid in [h for h, t in released.items() if now - t > 2 * 86400]:
+    for hid in [h for h, t in released.items()
+                if now - (t.get("at", 0) if isinstance(t, dict) else t)
+                > 2 * 86400]:
         del released[hid]
 
 
@@ -3271,8 +3275,9 @@ def redact_nonces(item):
     out = dict(item)
     if OWNER_DM_NONCE_FIELD in out:
         out[OWNER_DM_NONCE_FIELD] = "(redacted)"
-    if "web_nonce" in out:
-        out["web_nonce"] = "(redacted)"
+    for field in ("web_nonce", REPLY_NONCE_FIELD):
+        if field in out:
+            out[field] = "(redacted)"
     if isinstance(out.get("settings"), dict) \
             and "nonce" in out["settings"]:
         out["settings"] = dict(out["settings"], nonce="(redacted)")
@@ -3357,28 +3362,58 @@ _OWNER_ITEMS_WRITTEN = {"body": None}
 OWNER_ITEM_GRACE_SECS = 120
 
 
-def note_owner_item(state, mid, dm=False):
+def owner_targets(content):
+    """The channels an owner's own words name: <#id> mentions and #names
+    (lowercased). bin/discord-api.py acts only there (and in the item's
+    own channel), never where history or read output points."""
+    text = content if isinstance(content, str) else ""
+    ids = sorted(set(re.findall(r"<#([1-9][0-9]{16,19})>", text)))
+    names = sorted({n.lower() for n in re.findall(
+        r"(?<![\w&<#])#([^\s#<>@:,;!?()\[\]{}'\"`*~|]{1,100})", text)})
+    return ids, names
+
+
+def note_owner_item(state, mid, dm=False, channel_id=None, content=""):
     """Queue item mid is an owner's command: mint its nonce (an owner
-    DM's is its owner_dm_nonce) and write owner_items.json."""
+    DM's is its owner_dm_nonce), note where the owner's own words point
+    (owner_targets), and write owner_items.json."""
     e = state.setdefault("owner_items", {})
-    e[str(mid)] = {"at": time.time()} if dm else {
-        "nonce": secrets.token_hex(16), "at": time.time()}
+    ids, names = owner_targets(content)
+    e[str(mid)] = {"at": time.time(), "channel_id": str(channel_id or ""),
+                   "dm": bool(dm), "channels": ids, "names": names}
+    if not dm:
+        e[str(mid)]["nonce"] = secrets.token_hex(16)
     for old in list(e)[:-300]:
         del e[old]
     owner_items_write(state)
 
 
-def owner_items_write(state):
-    """owner_items.json = {message_id: owner_command_nonce} for the
-    open owner-command items (written only when that changed)."""
+def _private_file_ok(path, body):
+    """The file still holds body (it was not lost or mangled)."""
+    try:
+        with open(path) as f:
+            return json.load(f) == body
+    except (OSError, ValueError):
+        return False
+
+
+def owner_items_write(state, check=False):
+    """owner_items.json = {message_id: {nonce, channel_id, dm, channels,
+    names}} for the open owner-command items (written only when that
+    changed; check: also when the file was lost or mangled)."""
     nl = state.get("nl_nonces") or {}
     body = {}
     for mid, e in (state.get("owner_items") or {}).items():
-        n = e.get("nonce") if isinstance(e, dict) else None
-        n = n or (nl.get(mid) or {}).get("nonce")
+        if not isinstance(e, dict):
+            continue
+        n = e.get("nonce") or (nl.get(mid) or {}).get("nonce")
         if n:
-            body[mid] = n
-    if body == _OWNER_ITEMS_WRITTEN["body"]:
+            body[mid] = {"nonce": n, "channel_id": e.get("channel_id"),
+                         "dm": bool(e.get("dm")),
+                         "channels": e.get("channels") or [],
+                         "names": e.get("names") or []}
+    if body == _OWNER_ITEMS_WRITTEN["body"] and not (
+            check and not _private_file_ok(OWNER_ITEMS_FILE, body)):
         return
     try:
         _write_private(OWNER_ITEMS_FILE, body)
@@ -3389,7 +3424,8 @@ def owner_items_write(state):
 
 def owner_items_upkeep(state, queue, now):
     """(owner_dm_upkeep) Drop owner items no longer queued; mint one for
-    a queued owner command that has none (state.json lost)."""
+    a queued owner command that has none (state.json lost); rewrite a
+    lost or mangled owner_items.json. Then the same for reply nonces."""
     e = state.setdefault("owner_items", {})
     queued = {str(q["message_id"]): q for q in queue
               if isinstance(q, dict) and q.get("message_id")}
@@ -3400,8 +3436,76 @@ def owner_items_upkeep(state, queue, now):
     for mid, q in queued.items():
         if mid not in e and q.get("owner_command") is True \
                 and str(q.get("author_id")) in OWNER_USER_IDS:
-            note_owner_item(state, mid, dm=_queued_owner_dm(state, q))
-    owner_items_write(state)
+            note_owner_item(state, mid, dm=_queued_owner_dm(state, q),
+                            channel_id=q.get("channel_id"),
+                            content=q.get("content"))
+    owner_items_write(state, check=True)
+    reply_nonces_upkeep(state, queued, now)
+
+
+# ---------------------------------------------------------------------------
+# Every queue item is bound to the wake that holds it. The monitor mints
+# each queued item (fires included) a reply_nonce: 128 random bits, kept
+# in state.json (reply_nonces) and item_nonces.json (mode 600, the open
+# items only, read by the wake hook), never in reply_queue.json. The hook
+# adds it only to the wake that holds the item's lease, and every outbox
+# item must echo its item's (own_channel_problem), so a run can answer,
+# silence or put a schedule action on only the items it was handed, not
+# on ones whose ids it saw in history. Spent when the item settles.
+# ---------------------------------------------------------------------------
+REPLY_NONCE_FIELD = "reply_nonce"
+ITEM_NONCES_FILE = os.path.join(BASE_DIR, "item_nonces.json")
+_ITEM_NONCES_WRITTEN = {"body": None}
+_NONCE_TEXT = re.compile(r"(?<![0-9A-Fa-f])[0-9a-f]{32}(?![0-9A-Fa-f])")
+
+
+def scrub_nonce_text(text):
+    """Outgoing text with every 32-hex-digit string (a nonce's shape)
+    blanked: a backstop, so no nonce is ever posted to Discord."""
+    return _NONCE_TEXT.sub("(redacted)", text) if isinstance(text, str) \
+        else text
+
+
+def reply_nonce_mint(state, mid):
+    """Queue item mid's reply_nonce (minted when it has none), written to
+    item_nonces.json before the item reaches the queue file."""
+    n = state.setdefault("reply_nonces", {})
+    e = n.get(str(mid))
+    if not (isinstance(e, dict) and e.get("nonce")):
+        n[str(mid)] = e = {"nonce": secrets.token_hex(16),
+                           "at": time.time()}
+        for old in list(n)[:-1000]:
+            del n[old]
+    reply_nonces_write(state)
+    return e["nonce"]
+
+
+def reply_nonces_write(state, check=False):
+    body = {k: v["nonce"] for k, v in (state.get("reply_nonces")
+                                       or {}).items()
+            if isinstance(v, dict) and v.get("nonce")}
+    if body == _ITEM_NONCES_WRITTEN["body"] and not (
+            check and not _private_file_ok(ITEM_NONCES_FILE, body)):
+        return
+    try:
+        _write_private(ITEM_NONCES_FILE, body)
+        _ITEM_NONCES_WRITTEN["body"] = body
+    except OSError as e:
+        print(f"Could not write item_nonces.json: {e}", flush=True)
+
+
+def reply_nonces_upkeep(state, queued, now):
+    """Every queued item holds a live reply_nonce (minted again when
+    state.json was lost); ones no longer queued are dropped."""
+    n = state.setdefault("reply_nonces", {})
+    for mid in [m for m, v in n.items() if m not in queued and (
+            not isinstance(v, dict)
+            or now - v.get("at", 0) > OWNER_ITEM_GRACE_SECS)]:
+        del n[mid]
+    for mid in queued:
+        if not (n.get(mid) or {}).get("nonce"):
+            n[mid] = {"nonce": secrets.token_hex(16), "at": now}
+    reply_nonces_write(state, check=True)
 
 
 def is_forwarded(msg):
@@ -5674,7 +5778,10 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
                       [f["id"] for f in fragments])
     if owner_command:
         # bin/discord-api.py's capability for this owner's command.
-        note_owner_item(state, msg["id"], dm=owner_dm)
+        note_owner_item(state, msg["id"], dm=owner_dm,
+                        channel_id=msg["channel_id"], content=content)
+    # The capability to answer it at all, for the wake that holds it.
+    reply_nonce_mint(state, msg["id"])
     print(f"Queued {item['kind']}{' (follow-up)' if item['follow_up'] else ''}"
           f" from {msg['author'].get('username')} in "
           f"{cname}{burst_note}: {content[:80]}", flush=True)
@@ -5714,20 +5821,19 @@ def _settle(state, item, status, reason="", replied=False, detail=None):
     the trigger, and a fragment left unsettled would be requeued alone.
     replied=True also adds all those ids to replied_to (send dedup)."""
     reply_to = item.get("reply_to")
-    ids = []
-    if reply_to:
-        aliases = state.get("reply_aliases", {})
-        trigger = aliases.get(reply_to, reply_to)
-        ids = [reply_to]
-        ids += [m for m in [trigger] + [f for f, t in aliases.items()
-                                        if t == trigger]
-                if m not in ids]
-    # The queue item it answers, so a second worker's draft for the
-    # same item is suppressed too.
-    if item.get("item") and item["item"] not in ids:
-        ids.append(item["item"])
-    if not ids:
+    aliases = state.get("reply_aliases", {})
+    # The queue item it answers (its "item", else reply_to's trigger),
+    # and that item's own messages (its burst fragments) only: a
+    # reply_to under some other message is not this item's to settle
+    # (it may be another item's, still open).
+    trigger = item.get("item") or (aliases.get(reply_to, reply_to)
+                                   if reply_to else None)
+    if not trigger:
         return
+    ids = [trigger] + [f for f, t in aliases.items() if t == trigger]
+    if reply_to and reply_to not in ids \
+            and trigger_of(state, reply_to) == trigger:
+        ids.append(reply_to)
     for mid in ids:
         if replied and mid not in state["replied_to"]:
             state["replied_to"].append(mid)
@@ -5773,6 +5879,8 @@ def _outbox_problem(item):
     if item.get("_retry") is not None \
             and not isinstance(item["_retry"], dict):
         return "_retry was edited (leave it alone)"
+    if item.get("_hold") is not None and not isinstance(item["_hold"], str):
+        return "_hold was edited (leave it alone)"
     if "schedule" in item:
         # Reminders and watches (muse_watches.py): shape only here.
         problems = W.shape_problems(item)
@@ -5950,27 +6058,48 @@ def _set_aside_poison(key, exc):
         _reject_outbox([(redact_nonces(i), why) for i in gone[:1]])
 
 
-def own_channel_problem(state, item, index):
-    """None when this outbox item answers a message the monitor queued,
-    in that message's own channel (a thread, for a message in a thread);
-    else why it is refused. So a run cannot post anywhere else under a
-    made-up item: an owner's command to post elsewhere goes through
-    bin/discord-api.py with the item's owner_command_nonce. A held reply
-    an owner chose to send was checked when it was first drafted."""
+def hold_released_ok(state, item):
+    """A held reply an owner chose to send (Send anyway): its hold id,
+    item and channel are the ones the monitor recorded for it."""
     hid = item.get("_hold")
-    if hid and hid in (state.get("hold_released") or {}):
+    rec = (state.get("hold_released") or {}).get(hid) \
+        if isinstance(hid, str) else None
+    return isinstance(rec, dict) \
+        and rec.get("channel_id") == str(item.get("channel_id")) \
+        and rec.get("qid") is not None \
+        and str(rec["qid"]) == str(_answered_id(state, item))
+
+
+def own_channel_problem(state, item, index):
+    """None when this outbox item answers an open queue item, in that
+    item's own channel (a thread, for a message in a thread), and
+    carries that item's reply_nonce (handed only to the wake holding the
+    item's lease); else why it is refused. So a run can neither post
+    anywhere else under a made-up item, nor answer, silence or schedule
+    on an item it was not handed (its id may be in the history it read).
+    An owner's command to post elsewhere goes through bin/discord-api.py
+    with the item's owner_command_nonce. A held reply an owner chose to
+    send was checked when it was first drafted."""
+    if hold_released_ok(state, item):
         return None
     qid = _answered_id(state, item)
     if not qid:
         return "answers no queued message (set item to its message_id)"
     t = trigger_of(state, qid, index["frags"])
-    meta = (state.get("item_meta") or {}).get(t) or {}
-    known = {str(meta.get("channel_id") or ""),
-             index["channels"].get(t, "")} - {""}
-    if not known:
-        return f"{t} is not a message the monitor queued"
-    if str(item.get("channel_id")) not in known:
+    cid = index["channels"].get(t)
+    if not cid:
+        return (f"{t} is not an open queue item (answered already, or "
+                f"never queued)")
+    if str(item.get("channel_id")) != cid:
         return f"channel_id is not the channel of {t}"
+    want = ((state.get("reply_nonces") or {}).get(t) or {}).get("nonce")
+    if not want:
+        return f"{t}: no live reply_nonce yet (its next wake gets one)"
+    got = item.get(REPLY_NONCE_FIELD)
+    if not isinstance(got, str) or not hmac.compare_digest(
+            str(want).encode(), got.encode("utf-8", "replace")):
+        return (f"{t}: bad reply_nonce (missing or wrong: copy the item's "
+                f"{REPLY_NONCE_FIELD} from the wake payload)")
     return None
 
 
@@ -6048,10 +6177,9 @@ def process_outbox(state):
                   f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
             rejects.append((redact_nonces(item), refused))
             continue
-        # Then: it answers a queued message, in that message's channel
-        # (a fire's answer was bound to the fire's channel just above).
-        stray = None if isinstance(fire, dict) \
-            else own_channel_problem(state, item, index)
+        # Then: it answers an open queue item it was handed (its
+        # reply_nonce), in that item's channel; a fire's answer too.
+        stray = own_channel_problem(state, item, index)
         if stray:
             print(f"Refused outbox item for {item.get('channel_name') or '?'}"
                   f": {stray} (set aside in "
@@ -6097,8 +6225,8 @@ def process_outbox(state):
         # @everyone neutralization and link_mentions both lengthen text
         # normalize_parts already trimmed, and a part over the limit
         # would fail (400) on every retry.
-        parts = [link_mentions(p, item.get("channel_id"),
-                               state)[:DISCORD_MAX_CHARS]
+        parts = [scrub_nonce_text(link_mentions(
+            p, item.get("channel_id"), state))[:DISCORD_MAX_CHARS]
                  for p in normalize_parts(item)]
         # Worker-drafted emoji reactions: applied to the reply_to
         # message. A react-only item may carry no text.
@@ -6291,6 +6419,9 @@ def process_outbox(state):
         del nonces[qid]   # answered: its capability is spent
     for qid in done_ids & set(state.get("owner_items") or {}):
         del state["owner_items"][qid]
+    for qid in done_ids & set(state.get("reply_nonces") or {}):
+        del state["reply_nonces"][qid]
+    reply_nonces_write(state)
     nl_write_nonces(state)
     web = state.get("web_nonces") or {}
     for qid in done_ids & set(web):
@@ -6853,6 +6984,7 @@ def watch_enqueue(state, q):
     note_queued(state, fid)
     if owner_dm and fid not in (state.get("nl_nonces") or {}):
         nl_mint_nonce(state, fid, q["channel_id"])
+    reply_nonce_mint(state, fid)
     queue_edit(add=[q])
     items = (q.get("reminder") or {}).get("items") or []
     print(f"Queued a reminder for {q.get('author')} in "

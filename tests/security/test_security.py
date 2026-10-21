@@ -28,7 +28,7 @@ import urllib.request
 _ARGV = list(sys.argv)   # the monitor import below overwrites sys.argv
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "_lib"))
-from common import MUT_DIR as SRC, redirect_files, scratch  # noqa: E402
+from common import MUT_DIR as SRC, redirect_files, scratch, signed  # noqa: E402,E501
 
 WORK = scratch("muse-security-")
 HAVE_FFMPEG = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
@@ -163,6 +163,20 @@ M.api_get = fake_api_get
 M.send_typing = lambda cid: None
 M.send_reply_with_files = fake_send_files
 ORIG_COLLECT = M.collect_media
+_ORIG_ENQ = M.enqueue_message
+_ST = [None]   # the current test's state (reset)
+
+
+def _enqueue_and_queue(msg_, cname, state, queue, *a, **kw):
+    """enqueue_message, and the queue file write the poll does after it."""
+    n = len(queue)
+    ok = _ORIG_ENQ(msg_, cname, state, queue, *a, **kw)
+    if ok:
+        M.queue_edit(add=queue[n:])
+    return ok
+
+
+M.enqueue_message = _enqueue_and_queue
 
 
 def reset():
@@ -192,6 +206,7 @@ def reset():
     D.OWNER_ITEMS_FILE = M.OWNER_ITEMS_FILE
     st = M.load_state()
     st["guild_joined"] = {GUILD: 0}
+    _ST[0] = st
     return st
 
 
@@ -214,8 +229,11 @@ def msg(author, channel, content, **extra):
 
 
 def outbox(items):
+    """Items as the wakes holding their queue items write them (each
+    with its item's reply_nonce)."""
     with open(M.OUTBOX_FILE, "w") as f:
-        json.dump(items, f)
+        json.dump([signed(M, _ST[0], i) if isinstance(i, dict) else i
+                   for i in items], f)
 
 
 def read_outbox():
@@ -469,10 +487,10 @@ def live_owner_command(state):
     """An owner's command queued in a server channel: its id and the
     --for/--nonce prefix its owner-items-only wake would be handed."""
     q = []
-    x = msg(OWNER, GEN_CH, "post the cat in showcase")
+    x = msg(OWNER, GEN_CH, f"post the cat in <#{FORUM}>")
     assert M.enqueue_message(x, "Guild #general", state, q, guild_id=GUILD)
     with open(M.OWNER_ITEMS_FILE) as f:
-        nonce = json.load(f)[x["id"]]
+        nonce = json.load(f)[x["id"]]["nonce"]
     return x["id"], ("--for", x["id"], "--nonce", nonce)
 
 

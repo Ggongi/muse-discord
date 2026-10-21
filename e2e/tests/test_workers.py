@@ -295,32 +295,38 @@ class ClaudeWorker(ClaudeBase):
         for rule in ("owner_dm_nonces.json", "{owner_dm_nonce: $nonces",
                      '.kind == "dm"', '.settings.speaker',
                      "owner_items.json", ".owner_command == true",
-                     "{owner_command_nonce: $cmds"):
+                     "{owner_command_nonce: $cmds", "item_nonces.json",
+                     "{reply_nonce: $rn", "NONCE_WAIT_SECS=%d"
+                     % claude_worker.NONCE_WAIT_SECS):
             self.assertIn(rule, hook)
         p = claude_worker.build_payload(QUEUE, "persona!")
         self.assertEqual(set(p["items"][0]), set(claude_worker.PAYLOAD_FIELDS))
         self.assertEqual(p["persona"], "persona!")
 
-    def test_owner_dms_wake_alone_with_their_nonce(self):
+    def worker(self):
         self.use_fake("hang")
         w = claude_worker.Worker(self.pkg, os.path.join(self.tmp, "log"),
                                  timeout=30)
         self.addCleanup(w.shutdown)
+        return w
+
+    def test_owner_dms_wake_alone_with_their_nonce(self):
+        w = self.worker()
         write_json(self.pkg, "reply_queue.json", QUEUE + [OWNER_DM])
         # No nonce yet: the DM waits; the others go, without nonces.
-        items, nonces, _, _ = w.due()
+        items, caps = w.due()
         self.assertEqual([i["message_id"] for i in items], ["1001", "1002"])
-        self.assertEqual(nonces, {})
+        self.assertEqual(caps.get("dm", {}), {})
         w.leases.clear()
         write_json(self.pkg, claude_worker.OWNER_DM_NONCES,
                    {"2001": NONCE})
         # Now the DM wakes alone, with its nonce; the rest wait.
-        items, nonces, _, _ = w.due()
+        items, caps = w.due()
         self.assertEqual([i["message_id"] for i in items], ["2001"])
-        p = claude_worker.build_payload(items, None, nonces)
+        p = claude_worker.build_payload(items, None, caps)
         self.assertEqual(p["items"][0]["owner_dm_nonce"], NONCE)
         self.assertNotIn("owner_dm_nonce", claude_worker.build_payload(
-            QUEUE, None, {"1001": NONCE, **nonces})["items"][1])
+            QUEUE, None, {"dm": {"2001": NONCE}})["items"][1])
         # Only an outbox entry with the DM's nonce answers it.
         w.leases.clear()
         write_json(self.pkg, "reply_outbox.json", [
@@ -334,64 +340,89 @@ class ClaudeWorker(ClaudeBase):
         items, _ = claude_worker.open_items(self.pkg)
         self.assertNotIn("2001", [i["message_id"] for i in items])
 
-    def test_owner_commands_wake_alone_with_their_nonce(self):
-        self.use_fake("hang")
-        w = claude_worker.Worker(self.pkg, os.path.join(self.tmp, "log"),
-                                 timeout=30)
-        self.addCleanup(w.shutdown)
+    def test_reply_nonces_reach_only_their_wake(self):
+        w = self.worker()
         own = dict(QUEUE[0], message_id="1005", owner_command=True)
+        write_json(self.pkg, claude_worker.ITEM_NONCES,
+                   {"1001": "a1" * 16, "1002": "b2" * 16})
+        # 1005 has none yet (and was queued just now): it waits.
+        write_json(self.pkg, "reply_queue.json",
+                   QUEUE + [dict(own, queued_at=time.time())])
+        items, caps = w.due()
+        p = claude_worker.build_payload(items, None, caps)
+        self.assertEqual([(i["message_id"], i.get("reply_nonce"))
+                          for i in p["items"]],
+                         [("1001", "a1" * 16), ("1002", "b2" * 16)])
+        # Answers count only with the item's own nonce.
+        write_json(self.pkg, "reply_outbox.json", [
+            {"item": "1001", "text": "forged"},
+            {"item": "1002", "reply_to": "1001", "reply_nonce": "b2" * 16,
+             "text": "x"}])
+        items, _ = claude_worker.open_items(self.pkg)
+        self.assertEqual([i["message_id"] for i in items], ["1001", "1005"])
+
+    def test_owner_commands_wake_alone_with_their_nonce(self):
+        w = self.worker()
+        own = dict(QUEUE[0], message_id="1005", owner_command=True,
+                   queued_at=time.time())
         write_json(self.pkg, "reply_queue.json", QUEUE + [own])
         # No owner_items.json at all (an older monitor): it wakes alone,
         # without a nonce.
-        items, _, cmds, _ = w.due()
-        self.assertEqual(([i["message_id"] for i in items], cmds),
-                         (["1005"], {}))
+        items, caps = w.due()
+        self.assertEqual(([i["message_id"] for i in items],
+                          caps.get("cmd")), (["1005"], {}))
         w.leases.clear()
-        # No nonce yet: the command waits; the others go, without one.
+        # No nonce yet: the command waits a while; the others go.
         write_json(self.pkg, claude_worker.OWNER_ITEMS, {})
-        items, _, cmds, _ = w.due()
+        items, caps = w.due()
         self.assertEqual([i["message_id"] for i in items], ["1001", "1002"])
-        self.assertEqual(cmds, {})
+        self.assertEqual(caps.get("cmd", {}), {})
         w.leases.clear()
-        write_json(self.pkg, claude_worker.OWNER_ITEMS, {"1005": NONCE})
-        items, _, cmds, _ = w.due()
+        write_json(self.pkg, claude_worker.OWNER_ITEMS,
+                   {"1005": {"nonce": NONCE, "channel_id": "500"}})
+        items, caps = w.due()
         self.assertEqual([i["message_id"] for i in items], ["1005"])
-        p = claude_worker.build_payload(items, None, {}, cmds)
+        p = claude_worker.build_payload(items, None, caps)
         self.assertEqual(p["items"][0]["owner_command_nonce"], NONCE)
-        # Never on anyone else's item, nor in a mixed wake.
+        # Never on anyone else's item.
         self.assertNotIn("owner_command_nonce", json.dumps(
-            claude_worker.build_payload(QUEUE, None, {}, {"1001": NONCE})))
+            claude_worker.build_payload(QUEUE, None,
+                                        {"cmd": {"1001": NONCE}})))
         # The rest go on the next poll, without it.
-        items, _, cmds, _ = w.due()
-        self.assertEqual(([i["message_id"] for i in items], cmds),
-                         (["1001", "1002"], {}))
+        items, caps = w.due()
+        self.assertEqual(([i["message_id"] for i in items],
+                          caps.get("cmd", {})), (["1001", "1002"], {}))
+        # Not for good: a minute after it was queued, a command whose
+        # nonce never came goes out without it.
+        w.leases.clear()
+        write_json(self.pkg, claude_worker.OWNER_ITEMS, {})
+        write_json(self.pkg, "reply_queue.json",
+                   [dict(own, queued_at=time.time() - 61)])
+        items, caps = w.due()
+        self.assertEqual(([i["message_id"] for i in items],
+                          caps.get("cmd")), (["1005"], {}))
 
-    def test_owner_items_share_a_wake_with_both_nonces(self):
-        self.use_fake("hang")
-        w = claude_worker.Worker(self.pkg, os.path.join(self.tmp, "log"),
-                                 timeout=30)
-        self.addCleanup(w.shutdown)
+    def test_capability_holders_wake_one_at_a_time(self):
+        w = self.worker()
         own = dict(QUEUE[0], message_id="1005", owner_command=True)
         web = dict(QUEUE[0], message_id="1006",
                    settings={"speaker": "owner"})
         write_json(self.pkg, "reply_queue.json", QUEUE + [own, web])
-        write_json(self.pkg, claude_worker.OWNER_ITEMS, {"1005": NONCE})
+        write_json(self.pkg, claude_worker.OWNER_ITEMS,
+                   {"1005": {"nonce": NONCE}})
         write_json(self.pkg, "web_nonces.json",
                    {"1005": "cd" * 16, "1006": "ef" * 16,
                     "1002": "01" * 16})
-        items, _, cmds, wn = w.due()
-        self.assertEqual([i["message_id"] for i in items], ["1005", "1006"])
-        p = claude_worker.build_payload(items, None, {}, cmds, wn)
-        self.assertEqual([(i.get("owner_command_nonce"), i.get("web_nonce"))
-                          for i in p["items"]],
-                         [(NONCE, "cd" * 16), (None, "ef" * 16)])
-        # Then 1002 (someone allowed web watches) alone; then the rest.
-        items, _, cmds, wn = w.due()
-        self.assertEqual(([i["message_id"] for i in items], cmds),
-                         (["1002"], {}))
-        items, _, cmds, wn = w.due()
-        self.assertEqual(([i["message_id"] for i in items], cmds, wn),
-                         (["1001"], {}, {}))
+        seen = []
+        for _ in range(4):
+            items, caps = w.due()
+            p = claude_worker.build_payload(items, None, caps)
+            seen.append([(i["message_id"], i.get("owner_command_nonce"),
+                          i.get("web_nonce")) for i in p["items"]])
+        self.assertEqual(seen, [[("1005", NONCE, "cd" * 16)],
+                                [("1006", None, "ef" * 16)],
+                                [("1002", None, "01" * 16)],
+                                [("1001", None, None)]])
 
     def test_answers_each_item_once(self):
         self.use_fake("append")
@@ -444,13 +475,25 @@ class ClaudeWorker(ClaudeBase):
         for cmd in denied:
             self.assertFalse(claude_worker.bash_allowed(pkg, cmd)[0], cmd)
         check = claude_worker.check_tool
+        # Only this wake's own media and generated files.
+        reads = claude_worker.wake_reads([
+            {"message_id": "1002",
+             "media": [{"path": pkg + "/media/1002_0.img.png"}]}])
         self.assertTrue(check(pkg, "Read", {
-            "file_path": pkg + "/media/1002_0.img.png"})[0])
+            "file_path": pkg + "/media/1002_0.img.png"}, None, reads)[0])
+        self.assertTrue(check(pkg, "Read", {
+            "file_path": pkg + "/generated/1002/a.png"}, None, reads)[0])
         for path in (pkg + "/config.yaml", pkg + "/media/../config.yaml",
                      pkg + "/" + claude_worker.OWNER_DM_NONCES,
+                     pkg + "/" + claude_worker.ITEM_NONCES,
+                     pkg + "/reply_queue.json",
+                     pkg + "/media/2001_0.img.png",     # another wake's
+                     pkg + "/generated/2001/a.png",
                      "/etc/passwd"):
-            self.assertFalse(check(pkg, "Read", {"file_path": path})[0],
-                             path)
+            self.assertFalse(check(pkg, "Read", {"file_path": path},
+                                   None, reads)[0], path)
+        self.assertFalse(check(pkg, "Read", {
+            "file_path": pkg + "/media/1002_0.img.png"})[0])
         self.assertFalse(check(pkg, "Write", {"file_path": "x"})[0])
         args = claude_worker.worker_args(pkg)
         self.assertEqual(args[args.index("--tools") + 1], "Bash,Read")

@@ -33,15 +33,15 @@ class Bound(tw.Base):
         self.remind(after=60)
         self.tick(ahead=61)
         (f,) = self.fires()
-        self.outbox({"item": f["message_id"], "channel_id": CH,
-                     "text": "Reminder!"})
+        self.outbox(self.held({"item": f["message_id"], "channel_id": CH,
+                               "text": "Reminder!"}))
         self.assertEqual(len(self.new_sends()), 1, self.out)
 
     def test_owner_server_message_holds_both_nonces(self):
         own, _ = self.ask(OWNER, "<@bot> pin that, and watch the page")
         other, _ = self.ask(U1, "<@bot> hi")
         with open(self.mod.OWNER_ITEMS_FILE) as f:
-            cmds = json.load(f)
+            cmds = {k: v["nonce"] for k, v in json.load(f).items()}
         with open(self.mod.WEB_NONCES_FILE) as f:
             web = json.load(f)
         self.assertEqual(list(cmds), [own["id"]])
