@@ -6,7 +6,38 @@ entries below the releases are pre-release history. **Action
 needed** lists what an existing install must do after updating;
 UPDATING.md walks a Muse through it.
 
-## 2026-10-21: Setup in five steps
+## 2026-10-21: Your Muse reaches out on its own
+
+New:
+
+- Your Muse can start a conversation by itself now and then, the way a
+  friend would: ask how the exam went, share something you'd like, or
+  check in after a long quiet spell. Most of the time it decides there
+  is nothing worth saying, and says nothing.
+- It is **off** unless you turn it on, on new and existing installs
+  alike. To turn it on: pick the **Friends** style for a server (in
+  `/settings`), which turns it on for that server; or DM the bot
+  "reach out sometimes" (for check-ins with you by DM), or "be
+  proactive in #general"; or set `proactive.enabled: on` in
+  `config.yaml`. How often it thinks about it: rarely (the default,
+  once or twice a day), sometimes (4 to 6 times a day), or often
+  (about every hour).
+- Who it may contact: you (its owners), by DM; people who DMed it
+  first, as long as your DM settings still let them in (it never DMs
+  anyone out of the blue: Discord treats that as spam); and channels
+  where you turned it on, only when they have been quiet for a while,
+  never in a paused or muted place, nor in a server none of its owners
+  is in.
+- Limits: at most one unprompted message to a person a day and three a
+  week, one a channel a day, and 2, 5 or 10 a day in all (rarely,
+  sometimes, often). Never a second one to someone who hasn't answered
+  the first. No unprompted messages during quiet hours, 22:00 to 09:00
+  in the time zone you set (`proactive.timezone`, UTC by default; DM it
+  "my time zone is Europe/Paris").
+- Anyone can say "stop messaging me" (in a DM, or to the bot in a
+  server), you included, and it won't write to them first again unless
+  they say it may.
+
 
 New:
 

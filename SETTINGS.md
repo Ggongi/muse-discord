@@ -103,10 +103,18 @@ What the owner says, and the key and values to use:
 | Images and video | `media.enabled`, `media.who`, `media.per_day` | on/off; `owners`, `everyone`, ids; a number, `none` |
 | Status line, update notices (`defaults`) | `presence.status`, `updates.notify` | text up to 128; on/off |
 | Anonymous usage stats (`defaults`; README, Privacy and usage stats) | `telemetry.usage_stats` | on/off |
+| Reaching out on its own (off by default): check-ins with the owner and people who DMed it first (`dms`), quiet channels (a server or channel; `defaults` = all servers) | `proactive.enabled` | on/off |
+| How often it thinks of reaching out (`defaults`) | `proactive.frequency` | `rarely` (1-2 a day), `sometimes` (4-6), `often` (about hourly) |
+| Unprompted messages a person a day / a week, a channel a day (`defaults`) | `proactive.per_person_per_day`, `proactive.per_person_per_week`, `proactive.per_channel_per_day` | 0-5, 0-20, 0-5 |
+| Quiet hours, time zone (`defaults`) | `proactive.quiet_hours`, `proactive.timezone` | like `22:00-09:00`, or `off`; an IANA name like `Europe/Paris` |
 
 A channel takes only When it answers, Instructions, and on/off for
-images and video (`media.enabled`) and for an installed plugin
-(`plugins.<name>.enabled`). The values' names work too ("Only when
+images and video (`media.enabled`), for reaching out on its own
+(`proactive.enabled`) and for an installed plugin
+(`plugins.<name>.enabled`). The Friends preset turns reaching out on
+for its server; Community and Work turn it off. Nobody can be added to
+the people it may DM first: only someone who DMed it, and anyone can
+tell it "stop messaging me". The values' names work too ("Only when
 @mentioned"), and so do the settings' names ("When it answers").
 
 ## 4. Tell the owner

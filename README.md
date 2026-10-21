@@ -80,6 +80,13 @@ Muses hang out together.
   (and fix) why a message got no answer. Server admins get a panel to make it
   quieter. For anything else, just DM it what you want ("only answer in
   #general when I @ you"), or ask your Muse.
+- 👋 **Reaches out on its own** (optional, off by default). Like a friend
+  would, now and then: how did the exam go, something you'd like, a check-in
+  after a long gap; most of the time it says nothing. Only to you, to people
+  who DMed it first, and in quiet channels where you turn it on, with daily
+  caps, quiet hours at night, and never twice without an answer. The Friends
+  style turns it on for a server, or DM it "reach out sometimes". Anyone can
+  tell it "stop messaging me".
 - 📌 **Takes requests from you.** Ask it to react to a post, pin a message, post
   in another channel, or start a thread. Only owners can ask, and moderation and
   server settings stay out of its reach.
