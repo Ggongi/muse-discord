@@ -1767,8 +1767,7 @@ def _join_summary(gid, ginfo, channels):
             f". Plugins on there: {', '.join(on) or 'none'}.\n"
             f"Channels I can see ({len(visible)}): {shown or 'none'}\n"
             f"To change what I do there (welcomes, for one), press "
-            f"**Configure** (or use /settings), or {how}."
-            + TM.notice_line(st))
+            f"**Configure** (or use /settings), or {how}.")
 
 
 def configure_button(gid):
@@ -1836,7 +1835,8 @@ def flush_join_notices(state, guilds, channels):
         if gid not in state.get("known_guilds", {}):
             continue  # removed again before the notice went out
         if not notify_owners(_join_summary(gid, guilds.get(gid) or {},
-                                           channels),
+                                           channels)
+                             + TM.notice_line(settings()),
                              components=configure_button(gid)):
             left.append(gid)
     state["join_notices"] = left
