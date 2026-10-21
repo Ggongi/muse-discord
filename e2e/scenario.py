@@ -16,7 +16,7 @@ API:
     fixture_path(name) -> absolute path of a file in e2e/fixtures/
 
 Every problem raises ScenarioError with the file and the field at
-fault, e.g. "mention_basic.yaml: steps[2].send.reply_to: unknown label
+fault, e.g. "mention_burst.yaml: steps[2].send.reply_to: unknown label
 'q9' (defined so far: q1)".
 
 Threads and labels. A `thread` step starts a thread on a channel
@@ -59,8 +59,8 @@ SETTINGS_OPS = ("set", "reset", "undo")
 _SETTING_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]*(\.[a-z0-9_-]+)+$")
 THREAD_NAME_MAX = 100
 
-TOP_KEYS = {"id", "tier", "title", "b_is_bot", "legacy_config", "config",
-            "steps", "expect", "judge"}
+TOP_KEYS = {"id", "tier", "title", "b_is_bot", "config", "steps",
+            "expect", "judge"}
 # Placeholders a scenario's `config:` overrides may use (sut.py renders
 # them, in keys and values).
 CONFIG_PLACEHOLDERS = ("GUILD_ID", "A_ID", "B_ID", "CHANNEL_ID")
@@ -539,6 +539,17 @@ def _arg_regex(v, w, labels, kinds):
         _fail(w, f"invalid regular expression: {e}")
 
 
+def _arg_content(v, w, labels, kinds):
+    """A regex for every SUT message, or {label, pattern}: the SUT
+    messages that reply to that label (at least one)."""
+    if isinstance(v, dict):
+        _only_keys(v, ("label", "pattern"), w, required=("label", "pattern"))
+        _label_ref(v["label"], labels, f"{w}.label")
+        _arg_regex(v["pattern"], f"{w}.pattern", labels, kinds)
+    else:
+        _arg_regex(v, w, labels, kinds)
+
+
 def _arg_key_suffix(v, w, labels, kinds):
     """A settings key (or the end of one), e.g. who.replies."""
     if not isinstance(v, str) or not re.fullmatch(r"[a-z_]+(\.[a-z_]+)*",
@@ -555,7 +566,7 @@ CHECK_ARGS = {
     "latency": _arg_latency,
     "max_chars": _arg_max_chars,
     "total_chars": _arg_count,
-    "content_matches": _arg_regex,
+    "content_matches": _arg_content,
     "no_mass_mentions": _arg_true,
     "no_duplicate_replies": _arg_true,
     "mentions": _arg_mentions,
@@ -651,9 +662,6 @@ def validate(sc, source=None, fixtures_dir=None):
     if "b_is_bot" in sc and not isinstance(sc["b_is_bot"], bool):
         _fail(f"{name}: b_is_bot", f"expected true/false, got "
                                    f"{sc['b_is_bot']!r}")
-    if "legacy_config" in sc and not isinstance(sc["legacy_config"], bool):
-        _fail(f"{name}: legacy_config", f"expected true/false, got "
-                                        f"{sc['legacy_config']!r}")
     if "config" in sc:
         if not isinstance(sc["config"], dict):
             _fail(f"{name}: config", "expected a mapping of config "

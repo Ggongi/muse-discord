@@ -223,15 +223,22 @@ def check_total_chars(spec, tr):
                 f"{want}")
 
 
-def check_content_matches(pattern, tr):
-    sut = _sut(tr)
+def check_content_matches(arg, tr):
+    """Every SUT message matches the regex; with {label, pattern}, every
+    SUT message replying to that label (and there is one)."""
+    sut, which = _sut(tr), "SUT message(s)"
+    pattern = arg
+    if isinstance(arg, dict):
+        pattern, mid = arg["pattern"], _label_id(tr, arg["label"])
+        sut = [m for m in sut if _replies_to(m, mid)]
+        which = f"SUT repl(ies) to {arg['label']} ({mid})"
     if not sut:
-        return False, f"no SUT messages; expected them to match /{pattern}/"
+        return False, f"no {which}; expected them to match /{pattern}/"
     bad = [m for m in sut if not re.search(pattern, m.get("content") or "")]
     if bad:
-        return False, (f"{len(bad)} of {len(sut)} SUT message(s) do not "
+        return False, (f"{len(bad)} of {len(sut)} {which} do not "
                        f"match /{pattern}/: {_show(bad)}")
-    return True, f"all {len(sut)} SUT message(s) match /{pattern}/"
+    return True, f"all {len(sut)} {which} match /{pattern}/"
 
 
 # A raw @everyone / @here in sent text means the monitor's zero-width

@@ -1,13 +1,11 @@
 # The OLD config layout (bot:, behavior:, safety:, owners.user_ids,
-# ...), kept on purpose: a scenario with `legacy_config: true` runs
-# under this file instead of config.test.yaml, proving an old
-# config.yaml still loads unchanged (mapped by muse_settings.py, with
-# its one-line notice in monitor.log). Same placeholders and forced
-# fields as config.test.yaml (see sut.SUT).
+# ...). No e2e scenario runs under it any more (old layouts are proven
+# offline); it is kept as a fixture: tests/settings (OldLayout) loads
+# it, with the placeholders filled in, as a real old config.yaml that
+# must still load unchanged with its one-line notice.
 #
-#   {{GUILD_ID}}  the test server       {{A_ID}}  driver A (owner)
-#   {{B_ID}}      driver B (left out of treat_as_human when a scenario
-#                 sets b_is_bot: true)
+#   {{GUILD_ID}}  the test server       {{A_ID}}  the owner
+#   {{B_ID}}      another user
 
 bot:
   token_file: "{{TOKEN_FILE}}"

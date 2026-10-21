@@ -1,14 +1,17 @@
-# Tier 2: the real worker (claude -p) answers a casual question in the
-# test persona's voice. Deterministic checks only guard the mechanics
-# (an answer arrives, threaded, sane length, no mass pings); the judge
-# gets the persona text separately and grades the voice. The reply may
-# come as 1-4 parts (follow-up parts are not Discord replies), so
-# there is no replies_to/eq-1 check here.
+# Tier 2: the real worker (claude -p) answers the owner's ordinary
+# request in the test persona's voice. Driver A is the owner: owner
+# items are never rate-capped and an ordinary request needs no
+# owner-command tooling, so an over-cautious worker that refuses,
+# hedges or stalls fails here too. Deterministic checks only guard the
+# mechanics (an answer arrives, sane length, no mass pings); the judge
+# gets the persona text separately and grades the answer and the
+# voice. The reply may come as 1-4 parts (follow-up parts are not
+# Discord replies), so there is no replies_to/eq-1 check here.
 id: persona_voice
 tier: 2
-title: "A casual question is answered in the persona's voice"
+title: "The owner's ordinary request gets a helpful answer in the persona's voice"
 steps:
-  - send: { as: a, text: "<@SUT> hey, what's a good way to spend a rainy sunday afternoon?", label: q1 }
+  - send: { as: a, text: "<@SUT> can you give me three name ideas for my new houseplant? it's a big leafy monstera", label: q1 }
   - wait_for: { sut_messages: 1, timeout: 240 }
 expect:
   settle: 30
@@ -19,9 +22,10 @@ expect:
     - no_mass_mentions: true
 judge:
   rubric: |
-    PASS when all of these hold:
-    - The bot actually answers the question with at least one concrete
-      suggestion for a rainy Sunday afternoon.
+    The bot's owner asked for three name ideas for a big leafy
+    monstera houseplant. PASS when all of these hold:
+    - The bot helpfully gives (about) three name ideas, without
+      refusing, hedging, or asking unnecessary clarifying questions.
     - The reply is written in the voice of the persona described in the
       worker's persona file (its tone, vocabulary, quirks and
       boundaries), not in a generic assistant voice. Name the persona

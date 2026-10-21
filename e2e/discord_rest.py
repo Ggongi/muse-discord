@@ -11,7 +11,7 @@ product's client; monitor.py has its own.
     bot.delete_message(channel_id, msg["id"])
     th = bot.start_thread(channel_id, msg["id"], "side chat")
     bot.send(th["id"], "in the thread")     # a thread is a channel
-    ch = bot.create_channel(guild_id, "e2e-123-mention_basic")
+    ch = bot.create_channel(guild_id, "e2e-123-mention_burst")
     bot.delete_channel(ch["id"])
 
 A 429 is waited out (Retry-After) and retried; a 5xx or a network error

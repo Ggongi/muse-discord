@@ -7,7 +7,7 @@
 # must merge the file back and send it once), or after Discord already
 # created the message but before replied_to was saved (the restart
 # re-sends the same item, and only the per-part nonce with
-# enforce_nonce stops a duplicate). [[slow]] holds the draft back 15 s
+# enforce_nonce stops a duplicate). [[slow]] holds the draft back 8 s
 # so the runner is already watching for the processing file when it
 # appears; the file lives for one POST round trip (a few hundred ms),
 # so the runner must poll it fast (<= 50 ms) and kill immediately.
@@ -23,7 +23,7 @@ steps:
   - action: start_monitor
   - wait_for: { sut_messages: 1, timeout: 90 }
 expect:
-  settle: 30
+  settle: 20
   checks:
     - sut_reply_count: { eq: 1 }
     - replies_to: q1

@@ -4,8 +4,9 @@
 Plays the production reply worker against a test package dir. It does
 what hooks/mention-watch.sh does in a Muse install (poll the queue,
 hand each open item to exactly one worker run, re-hand it only after
-its lease runs out) and what the worker session does (follow
-worker-prompt.template.md), with `claude -p` as the agent:
+its lease runs out; owner DMs wake alone, with their owner_dm_nonce)
+and what the worker session does (follow worker-prompt.template.md),
+with `claude -p` as the agent:
 
     python3 e2e/claude_worker.py --pkg <pkg_dir> [--log FILE]
 
@@ -113,18 +114,34 @@ def read_json(path, default):
 # What to hand out (mention-watch.sh, in Python)
 # ---------------------------------------------------------------------------
 
-def answered_ids(pkg):
-    """Message ids that already have an outbox entry (queued for sending
-    or being sent): an item answered under any of them is not open."""
-    ids = set()
+# The monitor's private {message_id: nonce} file for open owner DMs.
+OWNER_DM_NONCES = "owner_dm_nonces.json"
+
+
+def is_owner_dm(item):
+    return item.get("kind") == "dm" \
+        and (item.get("settings") or {}).get("speaker") == "owner"
+
+
+def outbox_answers(pkg):
+    """[(ids, nonce)] for every outbox entry (queued for sending or
+    being sent): the message ids it names (item, reply_to) and the
+    owner-DM nonce it carries (owner_dm_nonce, else its settings
+    action's nonce)."""
+    out = []
     for name in ("reply_outbox.json", "reply_outbox.processing.json"):
         data = read_json(os.path.join(pkg, name), [])
-        for item in data if isinstance(data, list) else []:
-            if isinstance(item, dict):
-                for key in ("item", "reply_to"):
-                    if isinstance(item.get(key), str):
-                        ids.add(item[key])
-    return ids
+        for e in data if isinstance(data, list) else []:
+            if not isinstance(e, dict):
+                continue
+            s = e.get("settings") if isinstance(e.get("settings"),
+                                                dict) else {}
+            nonce = next((n for n in (e.get("owner_dm_nonce"),
+                                      s.get("nonce"))
+                          if isinstance(n, str)), None)
+            out.append(({e[k] for k in ("item", "reply_to")
+                         if isinstance(e.get(k), str)}, nonce))
+    return out
 
 
 def item_ids(item):
@@ -137,23 +154,39 @@ def item_ids(item):
 
 
 def open_items(pkg, answered=None):
-    """Queue items with no outbox entry yet. The outbox is read BEFORE
-    the queue: the monitor removes an answered item from the queue
-    before it drops the item's outbox entry, so this order never sees
-    one without the other. `answered` (a set) is updated with every
-    answered id seen, so the caller can remember them."""
-    seen = answered_ids(pkg)
-    if answered is not None:
-        answered |= seen
-        seen = answered
+    """(queue items no outbox entry answers yet, the owner-DM nonces).
+    Read in the hook's order: the outbox BEFORE the queue (the monitor
+    removes an answered item from the queue before it drops the item's
+    outbox entry, so this order never sees one without the other), the
+    nonces after it (the monitor writes a DM's nonce before it queues
+    the DM). An owner's DM counts as answered only by an entry that
+    carries its nonce: anything else is a forgery the monitor refuses.
+    `answered` (a set) remembers the ids of items found answered, so
+    they stay answered once the monitor takes the outbox."""
+    entries = outbox_answers(pkg)
     queue = read_json(os.path.join(pkg, "reply_queue.json"), [])
+    nonces = read_json(os.path.join(pkg, OWNER_DM_NONCES), {})
+    nonces = nonces if isinstance(nonces, dict) else {}
     out = []
     for item in queue if isinstance(queue, list) else []:
         if not isinstance(item, dict) or item.get("message_id") is None:
             continue
-        if not any(i in seen for i in item_ids(item)):
-            out.append(item)
-    return out
+        ids = item_ids(item)
+        if answered is not None and any(i in answered for i in ids):
+            continue
+        n = nonces.get(str(item["message_id"]))
+        hits = [nonce for named, nonce in entries
+                if any(i in named for i in ids)]
+        if n is not None:
+            hits = [x for x in hits if x == n]
+        elif is_owner_dm(item):
+            hits = []
+        if hits:
+            if answered is not None:
+                answered.update(ids)
+            continue
+        out.append(item)
+    return out, nonces
 
 
 def persona_file(pkg, override=None):
@@ -177,11 +210,17 @@ def persona_file(pkg, override=None):
     return os.path.join(pkg, os.path.expanduser(name or "persona.md"))
 
 
-def build_payload(items, persona):
-    """The wake payload: {count, persona, items} with the hook's fields."""
-    return {"count": len(items), "persona": persona,
-            "items": [{k: item.get(k) for k in PAYLOAD_FIELDS}
-                      for item in items]}
+def build_payload(items, persona, nonces=None):
+    """The wake payload: {count, persona, items} with the hook's fields,
+    plus owner_dm_nonce on the items `nonces` has one for (the caller
+    passes nonces only for a wake of owner DMs alone)."""
+    out = []
+    for item in items:
+        p = {k: item.get(k) for k in PAYLOAD_FIELDS}
+        if (nonces or {}).get(str(item.get("message_id"))):
+            p["owner_dm_nonce"] = nonces[str(item["message_id"])]
+        out.append(p)
+    return {"count": len(items), "persona": persona, "items": out}
 
 
 # ---------------------------------------------------------------------------
@@ -424,10 +463,14 @@ class Worker:
             pass
 
     def due(self):
-        """Open items no live lease covers; refreshes the leases (kept
-        only for items still queued, like the hook's state)."""
+        """(items for the next wake, their owner-DM nonces): open items
+        no live lease covers, as the hook picks them. An owner DM whose
+        nonce the monitor has not written yet waits, unleased; owner DMs
+        wake alone (the rest wait for the next poll), and only such a
+        wake gets their nonces. Refreshes the leases (kept only for
+        items still queued, like the hook's state)."""
         now = time.time()
-        items = open_items(self.pkg, self.answered)
+        items, nonces = open_items(self.pkg, self.answered)
         queued = set()
         for item in read_json(os.path.join(self.pkg, "reply_queue.json"),
                               []) or []:
@@ -438,32 +481,37 @@ class Worker:
             self.leases = {k: v for k, v in self.leases.items()
                            if k in queued}
             due = [i for i in items
-                   if self.leases.get(i["message_id"], 0) + self.lease <= now]
+                   if self.leases.get(i["message_id"], 0) + self.lease <= now
+                   and not (is_owner_dm(i)
+                            and str(i["message_id"]) not in nonces)]
+            owner = [i for i in due if is_owner_dm(i)]
+            if owner:
+                due = owner
             expired = [i for i in due if i["message_id"] in self.leases]
             for i in due:
                 self.leases[i["message_id"]] = now
         if expired:
             self.log("re-waking: item lease expired for %s"
                      % [i["message_id"] for i in expired])
-        return due
+        return due, (nonces if owner else {})
 
     def poll(self):
         """One hook pass: start a wake for the due items, if any."""
         if self.stopping:
             return None
-        items = self.due()
+        items, nonces = self.due()
         if not items:
             return None
         with self.lock:
             self.wakes += 1
             n = self.wakes
-        t = threading.Thread(target=self.run_wake, args=(n, items),
+        t = threading.Thread(target=self.run_wake, args=(n, items, nonces),
                              daemon=True)
         self.threads.append(t)
         t.start()
         return t
 
-    def run_wake(self, n, items):
+    def run_wake(self, n, items, nonces=None):
         ids = [i["message_id"] for i in items]
         try:
             with open(os.path.join(self.pkg,
@@ -480,7 +528,7 @@ class Worker:
                 persona = f.read()
         except OSError:
             persona = None  # the worker then reads the file itself
-        prompt = wake_prompt(rendered, build_payload(items, persona))
+        prompt = wake_prompt(rendered, build_payload(items, persona, nonces))
         args = worker_args(self.pkg, self.persona)
         self.log("wake %d: start items=%s" % (n, ids))
         start = time.monotonic()
