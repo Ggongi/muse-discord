@@ -3284,8 +3284,9 @@ def _queued_owner_dm(state, q):
     if meta is not None:
         return _meta_owner_dm(meta)
     card = q.get("settings") if isinstance(q.get("settings"), dict) else {}
-    # (A reminder firing in an owner's DM is one too.)
-    dm = q.get("kind") == "dm" or (q.get("kind") == "reminder"
+    # (A reminder or web watch firing in an owner's DM is one too.)
+    dm = q.get("kind") == "dm" or (q.get("kind") in ("reminder",
+                                                     "watch-met")
                                    and card.get("where") == "dm")
     return dm and card.get("speaker") == "owner" \
         and str(q.get("author_id")) in OWNER_USER_IDS
@@ -6155,6 +6156,11 @@ def process_outbox(state):
 # saving it and queueing it re-queues it instead of losing it.
 # ---------------------------------------------------------------------------
 WATCHES_FILE = os.path.join(BASE_DIR, "watches.json")
+# Web watches: the live checks for hooks/watch-due.sh (mode 600), and
+# the checker's reports from bin/watch-report.py (drained each tick).
+WEB_DUE_FILE = os.path.join(BASE_DIR, "web_watches_due.json")
+WEB_RESULTS_FILE = os.path.join(BASE_DIR, "web_watch_results.json")
+_WEB_DUE_WRITTEN = {"body": None, "path": None}
 _WATCH_STORE = {"store": None}
 PERM_VIEW_CHANNEL = 1 << 10
 PERM_ALL = (1 << 62) - 1
@@ -6285,6 +6291,19 @@ def watch_can_set(uid, from_bot, here, matches):
         return False
 
 
+def watch_can_web(uid, from_bot, here, matches):
+    """abilities.web_watches allows uid here (owners always; bots never;
+    default: owners only)."""
+    if from_bot:
+        return False
+    if str(uid) in OWNER_USER_IDS:
+        return True
+    try:
+        return bool(matches(here["abilities.web_watches"]))
+    except Exception:
+        return False
+
+
 def watch_card(uid, guild_id, dm, from_bot, here, matches):
     """A queue item's `watches` field (muse_watches.card). Never raises."""
     try:
@@ -6329,6 +6348,8 @@ def watch_resolve(value, uid, gid, cid, dm):
            "another one.")
     if tg not in GUILDS:
         no("I'm not in that server.")
+    if str(uid) not in OWNER_USER_IDS and owners_absent(tg):
+        no("I don't answer anyone in that server.")
     if tc and (CHANNELS.get(tc) or {}).get("guild_id") != tg:
         no("I can't read that channel.")
     try:
@@ -6386,19 +6407,23 @@ def watch_schedule(state, item, index):
         if meta.get("bot"):
             raise W.Refused(W.LINES["bot"])
         here = settings().resolve(scope_for(gid, cid, dm))
-        can = watch_can_set(uid, False, here, lambda who: people_match(
-            who, uid, lambda: member_roles(gid, uid)))
+        def matches(who):
+            return people_match(who, uid, lambda: member_roles(gid, uid))
+        can = watch_can_set(uid, False, here, matches)
         resolved = {}
         if can:
             for c in changes:
                 if c.get("op") == "add" and c.get("kind") == "watch" \
+                        and "match" in c \
                         and c["match"]["in"] not in resolved:
                     resolved[c["match"]["in"]] = watch_resolve(
                         c["match"]["in"], uid, gid, cid, dm)
         req = W.Request(uid, meta.get("author") or _USER_NAMES.get(uid)
                         or uid, uid in OWNER_USER_IDS, gid, cid, dm, qid,
                         _snowflake_ts(qid), can, watch_where(gid, cid, dm),
-                        resolved.__getitem__)
+                        resolved.__getitem__,
+                        can_web=can and watch_can_web(uid, False, here,
+                                                      matches))
         with store.edit() as data:
             prev = data["done"].get(qid)
             if prev is None:
@@ -6448,10 +6473,12 @@ def watch_fire_allowed(uid, name, cid, gid, dm):
     return None
 
 
-def watch_fire_item(state, fid, uid, name, cid, gid, dm, entries, now):
-    """The queue item of a fire (kind "reminder"): what is due or matched
-    in `reminder`, with the place's recent history and settings card, so
-    the worker writes the reminder as a normal reply."""
+def watch_fire_item(state, fid, uid, name, cid, gid, dm, entries, now,
+                    kind="reminder"):
+    """The queue item of a fire (kind "reminder", or "watch-met" for a
+    web watch): what is due or matched in `reminder`, with the place's
+    recent history and settings card, so the worker writes it as a
+    normal reply."""
     hist = (state.get("history") or {}).get(cid) or []
     scope = scope_for(gid, cid, dm)
     card = settings_card(scope, settings().resolve(scope), uid, False, cid)
@@ -6460,7 +6487,7 @@ def watch_fire_item(state, fid, uid, name, cid, gid, dm, entries, now):
         CHANNELS.get(cid) or {"name": cid})
     return {
         "message_id": fid, "channel_id": cid, "channel_name": cname,
-        "guild_id": gid, "kind": "reminder", "author": name,
+        "guild_id": gid, "kind": kind, "author": name,
         "author_id": uid, "content": "", "timestamp": W.iso(now),
         "media": [], "documents": [], "unviewable": [],
         "history": hist[-HISTORY_ATTACHED:], "may_generate": False,
@@ -6482,7 +6509,7 @@ def watch_enqueue(state, q):
     dm = q.get("guild_id") is None
     owner_dm = dm and uid in OWNER_USER_IDS
     note_item_meta(state, fid, author_id=uid, channel_id=q["channel_id"],
-                   bot=False, dm=dm, kind="reminder", owner_dm=owner_dm,
+                   bot=False, dm=dm, kind=q.get("kind"), owner_dm=owner_dm,
                    guild_id=q.get("guild_id"), author=q.get("author"))
     note_queued(state, fid)
     if owner_dm and fid not in (state.get("nl_nonces") or {}):
@@ -6531,33 +6558,112 @@ def watch_tick(state, now=None):
             for wid in W.expired_watches(data, now):
                 del data["items"][wid]
                 print(f"Watch {wid} ended (its time ran out).", flush=True)
-            for (uid, cid), es in W.group(entries).items():
-                r0 = es[0][0]
-                gid, dm = r0.get("guild_id"), bool(r0.get("dm"))
-                name = r0.get("name") or uid
-                why = watch_fire_allowed(uid, name, cid, gid, dm)
-                if why:
-                    print(f"Reminder for {name} in {cid} not sent "
-                          f"({why}).", flush=True)
-                    continue
-                fid = W.new_fire_id(now)
-                ents = [dict(e, asked=msg_link(gid, cid, r["message_id"]))
-                        for r, e in es]
-                q = watch_fire_item(state, fid, uid, name, cid, gid, dm,
-                                    ents, now)
-                data["fires"][fid] = {
-                    "id": fid, "at": now, "requester": uid,
-                    "channel_id": cid, "guild_id": gid, "dm": dm,
-                    "originals": sorted({r["message_id"] for r, _ in es},
-                                        key=int),
-                    "item": q}
-                W.note_fired(data, fid, now)
-                queued.append(q)
+            queued += _watch_make_fires(state, data, entries, now)
+    if os.path.exists(WEB_RESULTS_FILE) or W.web_work(data, now):
+        with store.edit() as data:
+            queued += _web_tick(state, data, now)
+    watch_write_due(store.read(), now)
     for q in queued:
         watch_enqueue(state, q)
     if now >= _WATCH_TICK["upkeep"]:
         _WATCH_TICK["upkeep"] = now + WATCH_UPKEEP_SECS
         watch_fire_upkeep(state, now)
+
+
+def _watch_make_fires(state, data, entries, now, kind="reminder"):
+    """Fires for entries [(requester, place, (record, fire entry))], one
+    per person and place, recorded in data["fires"] (under the store's
+    lock); returns their queue items (queued by the caller after the
+    store is written, so a fire is never queued without its record)."""
+    out = []
+    for (uid, cid), es in W.group(entries).items():
+        r0 = es[0][0]
+        gid, dm = r0.get("guild_id"), bool(r0.get("dm"))
+        name = r0.get("name") or uid
+        why = watch_fire_allowed(uid, name, cid, gid, dm)
+        if why:
+            print(f"Reminder for {name} in {cid} not sent ({why}).",
+                  flush=True)
+            continue
+        fid = W.new_fire_id(now)
+        ents = [dict(e, asked=msg_link(gid, cid, r["message_id"]))
+                for r, e in es]
+        q = watch_fire_item(state, fid, uid, name, cid, gid, dm, ents, now,
+                            kind=kind)
+        data["fires"][fid] = {
+            "id": fid, "at": now, "requester": uid, "channel_id": cid,
+            "guild_id": gid, "dm": dm,
+            "originals": sorted({r["message_id"] for r, _ in es}, key=int),
+            "item": q}
+        W.note_fired(data, fid, now)
+        out.append(q)
+    return out
+
+
+def _web_take_results():
+    """The checker's reports (bin/watch-report.py), emptied; the caller
+    holds the store's lock, which the tool appends under."""
+    try:
+        with open(WEB_RESULTS_FILE) as f:
+            reps = json.load(f)
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as e:
+        print(f"web_watch_results.json unreadable ({e}); dropped",
+              flush=True)
+        reps = []
+    try:
+        os.remove(WEB_RESULTS_FILE)
+    except OSError:
+        pass
+    return reps if isinstance(reps, list) else []
+
+
+def _web_tick(state, data, now):
+    """Web watches, under the store's lock: apply the checker's reports
+    (only with a live check's nonce, for an active watch; anything else
+    changes nothing), expire and issue checks, and make the fires:
+    "watch-met" for a met result, a refused one, or a watch that gave
+    up."""
+    out = []
+    for rep in _web_take_results():
+        res, i, rec = W.web_apply(data, rep, now)
+        if res is None:
+            print(f"Refused a web watch report for {i or '?'}: {rec}.",
+                  flush=True)
+            continue
+        print(f"Web watch {i}: {res}.", flush=True)
+        if res in ("met", "gave-up", "refused"):
+            # The requester hears once: it happened, it could not be
+            # checked, or the checker would not check it.
+            m = {"result": res}
+            if res in ("met", "refused"):
+                m["summary"] = rep.get("summary") or ""
+            out.append((rec["requester"], rec["channel_id"],
+                        (rec, W.fire_entry(i, rec, now, m))))
+    for i, rec in W.web_issue(data, now):
+        print(f"Web watch {i}: no answer {W.WEB_MAX_FAILS} times; ended.",
+              flush=True)
+        out.append((rec["requester"], rec["channel_id"],
+                    (rec, W.fire_entry(i, rec, now, {"result": "gave-up"}))))
+    return _watch_make_fires(state, data, out, now, kind="watch-met")
+
+
+def watch_write_due(data, now=None):
+    """web_watches_due.json: the live checks (muse_watches.web_due), for
+    hooks/watch-due.sh; written (mode 600) only when it changes."""
+    body = W.web_due(data, now)
+    if body == _WEB_DUE_WRITTEN["body"] \
+            and _WEB_DUE_WRITTEN["path"] == WEB_DUE_FILE:
+        return
+    if not body and not os.path.exists(WEB_DUE_FILE):
+        _WEB_DUE_WRITTEN.update(body=body, path=WEB_DUE_FILE)
+        return
+    try:
+        _write_private(WEB_DUE_FILE, body)
+        _WEB_DUE_WRITTEN.update(body=body, path=WEB_DUE_FILE)
+    except OSError as e:
+        print(f"Could not write web_watches_due.json: {e}", flush=True)
 
 
 def watch_fire_upkeep(state, now=None):
@@ -6617,6 +6723,8 @@ def _watch_scan(msg, guild_id):
     if not guild_id:
         return
     items = watch_store().read()["items"]
+    if items and owners_absent(guild_id):
+        return   # a server none of the owners is in: nothing from it
     text = msg.get("content") or ""
     if not items or not text:
         return

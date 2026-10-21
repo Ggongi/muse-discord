@@ -7,9 +7,10 @@ three kinds inside:
     remind      at a time, or after a delay
     watch       a Discord watch: words or phrases in the messages the
                 monitor already reads (gateway and poll)
-    watch-web   RESERVED: an outside-world condition the owner's Muse
-                checks on the Muse platform's own scheduler. Not built;
-                see "watch-web" below for where it plugs in.
+    watch-web   a web watch: an outside-world condition ("the venue
+                announces the date") a checker session of the owner's
+                Muse checks on the web, every so often (see "Web
+                watches" below; owners only by default)
 
 This module is the data model, the outbox action's shape and meaning,
 the caps, the matching and the store. It makes no Discord calls:
@@ -28,7 +29,13 @@ Security properties (PROTOCOL.md, Reminders and watches):
   watch per DEBOUNCE_SECS, and link the message instead of quoting it.
 - Matching is case-insensitive literal words and phrases (escaped,
   bounded): no user-supplied regular expressions.
+- A web watch's condition is stored as data and handed to the checker
+  only inside a delimited data block; a check result counts only with
+  that check's one-time nonce (128 bits, compared in constant time,
+  spent on use, expiring after WEB_CHECK_SECS) for a watch still
+  active, and checks are budgeted per day.
 """
+import hmac
 import contextlib
 import fcntl
 import json
@@ -40,8 +47,8 @@ import time
 from datetime import datetime, timezone
 
 VERSION = 1
-KINDS = ("remind", "watch")       # what an `add` takes today
-RESERVED_KINDS = ("watch-web",)   # refused until the platform scheduler
+KINDS = ("remind", "watch")       # an `add`'s kind (a web watch is a
+                                  # watch with "check": "web")
 
 # Limits (PROTOCOL.md, Reminders and watches).
 REMIND_MIN_SECS = 60                    # at least a minute away
@@ -64,6 +71,18 @@ WORD_MIN, WORD_MAX = 2, 60
 CHANGES_MAX = 5
 LIST_MAX = 25         # items listed on a queue item
 TZ_MAX_USERS = 5000
+# Web watches.
+WEB_EVERY_MIN = 1800            # checked at most every 30 minutes
+WEB_EVERY_MAX = 7 * 86400
+WEB_PER_PERSON, WEB_OWNER_PER_PERSON = 3, 20
+WEB_PLACE_PER_DAY = 48          # checks a day for non-owners, per place
+WEB_TOTAL_PER_DAY = 200         # checks a day in all
+WEB_CHECK_SECS = 15 * 60        # a check's nonce lives this long
+WEB_MAX_FAILS = 5               # unknown / no report in a row: it ends
+WEB_REPEAT_SECS = 6 * 3600      # "every time": quiet this long after one
+WEB_BACKOFF_MAX = 86400
+WHAT_MAX = SUMMARY_MAX = 300
+RESULTS = ("met", "not-met", "unknown", "refused")
 
 ID_RE = re.compile(r"[1-9][0-9]{0,19}")
 ITEM_ID_RE = re.compile(r"[rw][a-z0-9]{5}")
@@ -72,6 +91,8 @@ PLACE_RE = re.compile(r"here|server|server:([1-9][0-9]{0,19})"
                       r"|channel:([1-9][0-9]{0,19}):([1-9][0-9]{0,19})")
 NONCE_RE = re.compile(r"[0-9a-f]{32,64}")
 ADD_KEYS = {"op", "kind", "at", "after", "note", "match", "until"}
+WEB_KEYS = {"op", "kind", "check", "what", "every", "until", "note",
+            "repeat"}
 MATCH_KEYS = {"words", "in", "every"}
 NOT_ON_SCHEDULE_ITEMS = ("silent", "settings", "attachments")
 _ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789"
@@ -103,6 +124,13 @@ LINES = {
     "channel": "I can only set reminders and watches where you asked, so "
                "nothing changed.",
     "unknown": "I couldn't set that, so nothing changed.",
+    "web-not-allowed": "Only my owners can set web watches here, so "
+                       "nothing changed.",
+    "cap-watch-web": "I can't set that: you already have {cap} web "
+                     "watches going, the most I keep for one person.",
+    "web-budget": "I can't set that: checking it that often would go "
+                  "past how many web checks I do a day. Nothing changed; "
+                  "a longer gap between checks may fit.",
 }
 # Ledger reasons: monitor.ledger_code maps the prefixes to codes.
 REASON_CAP = "reminders: limit reached"          # -> watch-cap
@@ -183,6 +211,8 @@ def _change_problems(c, where):
     if not isinstance(c, dict):
         return [f"{where} is not an object"]
     op = c.get("op")
+    if op == "add" and c.get("check") is not None:
+        return _web_problems(c, where)
     if op == "add":
         out = []
         extra = set(c) - ADD_KEYS
@@ -191,8 +221,6 @@ def _change_problems(c, where):
                        f"{', '.join(sorted(map(str, extra)))} (the "
                        f"requester and place are always the item's own)")
         kind = c.get("kind")
-        if kind in RESERVED_KINDS:
-            return out + [f"{where}: kind {kind} is not available yet"]
         if kind not in KINDS:
             return out + [f'{where}.kind must be "remind" or "watch"']
         note = c.get("note")
@@ -258,6 +286,35 @@ def _change_problems(c, where):
     return [f'{where}.op must be "add", "cancel" or "tz"']
 
 
+def _web_problems(c, where):
+    out = []
+    extra = set(c) - WEB_KEYS
+    if extra:
+        out.append(f"{where} has unknown fields: "
+                   f"{', '.join(sorted(map(str, extra)))} (the requester "
+                   f"and place are always the item's own)")
+    if c.get("kind") != "watch" or c.get("check") != "web":
+        out.append(f'{where}: a web watch is "kind": "watch", "check": '
+                   f'"web"')
+    what = c.get("what")
+    if not isinstance(what, str) or not 1 <= len(what.strip()) <= WHAT_MAX:
+        out.append(f"{where}.what is the condition in the requester's "
+                   f"words, up to {WHAT_MAX} characters")
+    e = c.get("every")
+    if not (_int(e) and WEB_EVERY_MIN <= e <= WEB_EVERY_MAX):
+        out.append(f"{where}.every is the seconds between checks, "
+                   f"{WEB_EVERY_MIN} to {WEB_EVERY_MAX}")
+    if "until" in c and parse_utc(c["until"]) is None:
+        out.append(f"{where}.until must be an ISO-8601 UTC time")
+    if "repeat" in c and not isinstance(c["repeat"], bool):
+        out.append(f"{where}.repeat is true or false")
+    note = c.get("note")
+    if note is not None and (not isinstance(note, str)
+                             or len(note) > NOTE_MAX):
+        out.append(f"{where}.note is text up to {NOTE_MAX} characters")
+    return out
+
+
 def shape_problems(item):
     """What is wrong with an outbox item's `schedule` action, as
     sentences the worker can act on; [] when the shape is fine. Meaning
@@ -291,7 +348,7 @@ def shape_problems(item):
 # ---------------------------------------------------------------------------
 def empty():
     return {"v": VERSION, "items": {}, "fires": {}, "done": {}, "tz": {},
-            "fired": {}}
+            "fired": {}, "web": {}}
 
 
 def _clean(data):
@@ -388,7 +445,7 @@ def active(data, now=None):
     """The live items (not past their expiry)."""
     now = time.time() if now is None else now
     return {i: r for i, r in data["items"].items() if isinstance(r, dict)
-            and (r.get("kind") != "watch" or r.get("until", 0) > now)}
+            and (r.get("kind") == "remind" or r.get("until", 0) > now)}
 
 
 def place_key(rec):
@@ -415,7 +472,8 @@ class Request:
     channel permissions)."""
 
     def __init__(self, requester, name, owner, guild_id, channel_id, dm,
-                 message_id, message_time, can_set, where, resolve):
+                 message_id, message_time, can_set, where, resolve,
+                 can_web=False):
         self.requester = str(requester)
         self.name = name
         self.owner = bool(owner)
@@ -427,6 +485,7 @@ class Request:
         self.can_set = can_set
         self.where = where
         self.resolve = resolve
+        self.can_web = can_web
 
 
 def decide(data, req, changes, now=None):
@@ -434,8 +493,12 @@ def decide(data, req, changes, now=None):
     all or nothing. Returns a list of what was done ([(op, id)]); raises
     Refused, leaving data untouched."""
     now = time.time() if now is None else now
-    if not req.can_set and any(c.get("op") == "add" for c in changes):
+    adds = [c for c in changes if c.get("op") == "add"]
+    if not req.can_set and adds:
         raise Refused(LINES["not-allowed"], REASON_NOT_ALLOWED)
+    if not req.can_web and any(c.get("check") == "web" for c in adds):
+        raise Refused(LINES["web-not-allowed"], REASON_NOT_ALLOWED,
+                      {"kind": "watch-web"})
     items = dict(data["items"])
     live = active(data, now)
     tz = dict(data["tz"])
@@ -466,7 +529,7 @@ def decide(data, req, changes, now=None):
                 live.pop(i, None)
                 done.append(("cancel", i))
             continue
-        kind = c["kind"]
+        kind = "watch-web" if c.get("check") == "web" else c["kind"]
         rec = {"kind": kind, "requester": req.requester, "name": req.name,
                "guild_id": None if req.dm else req.guild_id,
                "channel_id": req.channel_id, "dm": req.dm,
@@ -481,6 +544,16 @@ def decide(data, req, changes, now=None):
                     or due - now > REMIND_MAX_SECS:
                 raise Refused(LINES["time"])
             rec["due"] = due
+        elif kind == "watch-web":
+            until = parse_utc(c["until"]) if "until" in c \
+                else now + WATCH_DEFAULT_SECS
+            if until - now < WATCH_MIN_SECS or until - now > WATCH_MAX_SECS:
+                raise Refused(LINES["watch-time"])
+            rec.update({"until": until, "what": " ".join(c["what"].split()),
+                        "every": c["every"], "repeat": bool(c.get("repeat")),
+                        "owner": req.owner, "next_check": now,
+                        "check": None, "fails": 0, "checks": 0})
+            _web_budget_fits(live, rec)
         else:
             m = c["match"]
             until = parse_utc(c["until"]) if "until" in c \
@@ -495,7 +568,10 @@ def decide(data, req, changes, now=None):
                         "last_fired": 0, "fired": 0})
         mine = [r for r in live.values() if r.get("requester") ==
                 req.requester and r.get("kind") == kind]
-        cap = (OWNER_PER_PERSON if req.owner else PER_PERSON)[kind]
+        if kind == "watch-web":
+            cap = WEB_OWNER_PER_PERSON if req.owner else WEB_PER_PERSON
+        else:
+            cap = (OWNER_PER_PERSON if req.owner else PER_PERSON)[kind]
         if len(mine) >= cap:
             raise Refused(LINES[f"cap-{kind}"].format(cap=cap), REASON_CAP,
                           {"kind": kind, "cap": cap, "per": "person"})
@@ -544,6 +620,12 @@ def _entry(i, r, show_for=False):
         e["note"] = r.get("note") or ""
     if r.get("kind") == "remind":
         e["due"] = iso(r.get("due", 0))
+    elif r.get("kind") == "watch-web":
+        e.update({"web": True, "every_secs": r.get("every"),
+                  "repeat": bool(r.get("repeat")),
+                  "until": iso(r.get("until", 0))})
+        if not show_for:
+            e["what"] = r.get("what")
     else:
         e.update({"in": r.get("scope_name"), "every": bool(r.get("every")),
                   "until": iso(r.get("until", 0))})
@@ -599,7 +681,7 @@ def due_reminders(data, now=None):
 def expired_watches(data, now=None):
     now = time.time() if now is None else now
     return [i for i, r in data["items"].items()
-            if isinstance(r, dict) and r.get("kind") == "watch"
+            if isinstance(r, dict) and r.get("kind") != "remind"
             and r.get("until", 0) <= now]
 
 
@@ -679,21 +761,188 @@ def note_fired(data, fid, now=None):
 
 
 # ---------------------------------------------------------------------------
-# watch-web (reserved, not built)
+# Web watches
 # ---------------------------------------------------------------------------
-# When the Muse platform's scheduler is available, a watch-web item is
-# stored like a watch ({"kind": "watch-web", "check": {...}, "until"}),
-# but checked by the owner's Muse on that scheduler instead of matched
-# here. The Muse reports a check result through the outbox, bound to a
-# queue item the monitor injects for the check (kind "watch-check",
-# carrying a per-check nonce the monitor mints, like owner_dm_nonce):
-#   {"op": "result", "id": "<watch id>", "nonce": "...",
-#    "matched": true, "summary": "...", "link": "https://..."}
-# The monitor validates it (the id is a live watch-web item, the nonce
-# is the check's, the link is http(s)) and fires through the same path
-# as a Discord watch (fire_entry), so the requester, the place and the
-# ping stay bound exactly as for reminders. Today "watch-web" and
-# "result" are refused by shape_problems.
+# The monitor issues each due check with a fresh one-time nonce and lists
+# the live ones in web_watches_due.json; hooks/watch-due.sh wakes one
+# checker session (watch-checker-prompt.template.md) with them as data;
+# the checker reports each with bin/watch-report.py into
+# web_watch_results.json, which the monitor drains (web_apply). A met
+# result fires like a reminder (kind "watch-met"); not-met and unknown
+# schedule the next check; unknown or no report backs off, and after
+# WEB_MAX_FAILS in a row the watch ends and the requester is told once.
+# The checker first screens each condition: one that is more than a
+# plain condition (instructions, "also message...", a URL to post to) is
+# reported "refused", which ends the watch (the requester is told once).
+def _per_day(rec):
+    return 86400.0 / max(WEB_EVERY_MIN, rec.get("every") or WEB_EVERY_MIN)
+
+
+def _web_budget_fits(live, rec):
+    """A new web watch must fit the daily check budgets as planned (every
+    active web watch checked on its schedule): non-owners' per place,
+    everyone's in total."""
+    web = [r for r in live.values() if r.get("kind") == "watch-web"]
+    total = sum(_per_day(r) for r in web) + _per_day(rec)
+    here = place_key(rec)
+    place = sum(_per_day(r) for r in web if not r.get("owner")
+                and place_key(r) == here) + _per_day(rec)
+    if total > WEB_TOTAL_PER_DAY or (not rec.get("owner")
+                                     and place > WEB_PLACE_PER_DAY):
+        raise Refused(LINES["web-budget"], REASON_CAP,
+                      {"kind": "watch-web", "per": "budget",
+                       "cap": WEB_TOTAL_PER_DAY if total > WEB_TOTAL_PER_DAY
+                       else WEB_PLACE_PER_DAY})
+
+
+def _utc_day(now):
+    return datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d")
+
+
+def _backoff(rec, now):
+    rec["next_check"] = now + min(WEB_BACKOFF_MAX, rec.get("every", 3600)
+                                  * 2 ** max(0, rec.get("fails", 0)))
+
+
+def web_issue(data, now=None):
+    """Expire checks nobody reported on (a failure each: back off, and
+    give up after WEB_MAX_FAILS), then issue the due ones, each with a
+    fresh nonce, within today's budgets (over budget: tomorrow).
+    Returns [(id, record)] of the watches that gave up (removed)."""
+    now = time.time() if now is None else now
+    day = _utc_day(now)
+    used = data.setdefault("web", {})
+    if used.get("day") != day:
+        used.clear()
+        used.update({"day": day, "total": 0, "places": {}})
+    gave_up = []
+    for i, r in list(data["items"].items()):
+        if not isinstance(r, dict) or r.get("kind") != "watch-web" \
+                or r.get("until", 0) <= now:
+            continue
+        chk = r.get("check")
+        if chk and chk.get("expires", 0) <= now:
+            r["check"] = None
+            r["fails"] = r.get("fails", 0) + 1
+            if r["fails"] >= WEB_MAX_FAILS:
+                gave_up.append((i, data["items"].pop(i)))
+                continue
+            _backoff(r, now)
+            continue
+        if chk or r.get("next_check", 0) > now:
+            continue
+        here = place_key(r)
+        if used["total"] >= WEB_TOTAL_PER_DAY or (
+                not r.get("owner")
+                and used["places"].get(here, 0) >= WEB_PLACE_PER_DAY):
+            tomorrow = datetime.strptime(day, "%Y-%m-%d").replace(
+                tzinfo=timezone.utc).timestamp() + 86400
+            r["next_check"] = tomorrow + secrets.randbelow(600)
+            continue
+        used["total"] += 1
+        if not r.get("owner"):
+            used["places"][here] = used["places"].get(here, 0) + 1
+        r["check"] = {"nonce": secrets.token_hex(16), "issued": now,
+                      "expires": now + WEB_CHECK_SECS}
+        r["checks"] = r.get("checks", 0) + 1
+    return gave_up
+
+
+def web_due(data, now=None):
+    """What web_watches_due.json lists: every live check, as data for the
+    checker (the condition, the id, the nonce, when it expires) and the
+    hook's lease key. Nothing about who asked or where."""
+    now = time.time() if now is None else now
+    out = []
+    for i, r in sorted(data["items"].items()):
+        chk = r.get("check") if isinstance(r, dict) else None
+        if r.get("kind") == "watch-web" and chk \
+                and chk.get("expires", 0) > now:
+            out.append({"id": i, "key": f"{i}:{int(chk['issued'])}",
+                        "nonce": chk["nonce"], "what": r.get("what"),
+                        "expires": iso(chk["expires"])})
+    return out
+
+
+def report_problems(rep):
+    """Shape of one check report (bin/watch-report.py, the monitor)."""
+    if not isinstance(rep, dict):
+        return ["not an object"]
+    out = []
+    if not (isinstance(rep.get("id"), str)
+            and ITEM_ID_RE.fullmatch(rep["id"])):
+        out.append("id is the check's id from the data block")
+    if not (isinstance(rep.get("nonce"), str)
+            and NONCE_RE.fullmatch(rep["nonce"])):
+        out.append("nonce is the check's nonce from the data block")
+    if rep.get("result") not in RESULTS:
+        out.append("result is met, not-met, unknown or refused")
+    sm = rep.get("summary")
+    if not isinstance(sm, str) or len(sm) > SUMMARY_MAX \
+            or any(ord(ch) < 32 and ch != "\n" for ch in sm):
+        out.append(f"summary is plain text, up to {SUMMARY_MAX} "
+                   f"characters")
+    return out
+
+
+def web_apply(data, rep, now=None):
+    """Apply one check report: (result, id, record) for a report naming
+    a live check of an active web watch with that check's nonce (spent
+    now), else (None, id, why). met: the watch ends unless it repeats, then
+    stays quiet WEB_REPEAT_SECS; not-met: the next check in `every`;
+    unknown: a failure (back off; ends after WEB_MAX_FAILS, result
+    "gave-up"); refused (the checker judged the condition to be more
+    than a condition: instructions, a request to act): the watch ends."""
+    now = time.time() if now is None else now
+    if report_problems(rep):
+        return None, None, "malformed"
+    i = rep["id"]
+    r = data["items"].get(i)
+    chk = (r or {}).get("check") if isinstance(r, dict) else None
+    if not r or r.get("kind") != "watch-web" or r.get("until", 0) <= now:
+        return None, i, "no such active web watch"
+    if not chk or chk.get("expires", 0) <= now:
+        return None, i, "no live check (expired or already reported)"
+    if not hmac.compare_digest(str(chk.get("nonce")).encode(),
+                               rep["nonce"].encode()):
+        return None, i, "wrong nonce"
+    r["check"] = None
+    result = rep["result"]
+    if result == "met":
+        r["fails"] = 0
+        r["last_met"] = now
+        if not r.get("repeat"):
+            del data["items"][i]
+        else:
+            r["next_check"] = now + max(r.get("every", 0), WEB_REPEAT_SECS)
+        return "met", i, dict(r)
+    if result == "refused":
+        return "refused", i, data["items"].pop(i)
+    if result == "not-met":
+        r["fails"] = 0
+        r["next_check"] = now + r.get("every", 3600)
+        return "not-met", i, r
+    r["fails"] = r.get("fails", 0) + 1
+    if r["fails"] >= WEB_MAX_FAILS:
+        return "gave-up", i, data["items"].pop(i)
+    _backoff(r, now)
+    return "unknown", i, r
+
+
+def web_work(data, now=None):
+    """True when web_issue has something to do (a check to issue or to
+    expire), so the monitor takes the lock only then."""
+    now = time.time() if now is None else now
+    for r in data["items"].values():
+        if isinstance(r, dict) and r.get("kind") == "watch-web" \
+                and r.get("until", 0) > now:
+            chk = r.get("check")
+            if (chk and chk.get("expires", 0) <= now) or (
+                    not chk and r.get("next_check", 0) <= now):
+                return True
+    return False
+
+
 def fire_entry(i, r, now, matched=None):
     """One entry of a fire's `reminder.items`."""
     e = {"id": i, "kind": r.get("kind"), "note": r.get("note") or "",
@@ -701,6 +950,13 @@ def fire_entry(i, r, now, matched=None):
     if r.get("kind") == "remind":
         e["due"] = iso(r.get("due", now))
         e["late"] = now - r.get("due", now) > LATE_SECS
+    elif r.get("kind") == "watch-web":
+        res = (matched or {}).get("result", "met")
+        e.update({"what": r.get("what"), "result": res,
+                  "ends": iso(r.get("until", now))
+                  if r.get("repeat") and res == "met" else "now"})
+        if (matched or {}).get("summary"):
+            e["summary"] = matched["summary"]
     else:
         e.update({"words": r.get("words"), "in": r.get("scope_name")})
         if matched:

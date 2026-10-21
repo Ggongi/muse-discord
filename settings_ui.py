@@ -159,6 +159,7 @@ CORE_CODES = {
     "who.ignore": "ig", "who.bots": "b", "who.bot_exchange_limit": "bx",
     "style.length": "ln", "style.notes": "n",
     "abilities.owner_commands": "oc", "abilities.reminders": "rw",
+    "abilities.web_watches": "ww",
     "privacy.memory": "m",
     "privacy.suspicious": "su", "limits.per_day": "pd",
     "limits.per_person_per_day": "pp", "presence.status": "ps",

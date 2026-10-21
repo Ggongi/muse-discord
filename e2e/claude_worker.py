@@ -131,10 +131,12 @@ OWNER_DM_NONCES = "owner_dm_nonces.json"
 
 
 def is_owner_dm(item):
-    """An owner's own DM, or a reminder firing in one (the hook's test)."""
+    """An owner's own DM, or a reminder or web watch firing in one (the
+    hook's test)."""
     card = item.get("settings") or {}
-    return (item.get("kind") == "dm" or (item.get("kind") == "reminder"
-                                         and card.get("where") == "dm")) \
+    notice = item.get("kind") in ("reminder", "watch-met") \
+        and card.get("where") == "dm"
+    return (item.get("kind") == "dm" or notice) \
         and card.get("speaker") == "owner"
 
 
@@ -477,6 +479,10 @@ class Worker:
                    and not (is_owner_dm(i)
                             and str(i["message_id"]) not in nonces)]
             owner = [i for i in due if is_owner_dm(i)]
+            if any(i.get("kind") == "dm" for i in owner):
+                # The owner's own messages never share a run with the
+                # bot's notices to them (the hook's rule).
+                owner = [i for i in owner if i.get("kind") == "dm"]
             if owner:
                 due = owner
             expired = [i for i in due if i["message_id"] in self.leases]

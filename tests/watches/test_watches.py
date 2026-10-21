@@ -130,7 +130,7 @@ class Base(unittest.TestCase):
 
     def fires(self):
         return [q for q in self.mod.load_queue()
-                if q.get("kind") == "reminder"]
+                if q.get("kind") in ("reminder", "watch-met")]
 
     def new_sends(self):
         return [(p, d) for p, d in self.mod.api.posts[self.n_posts:]
@@ -482,6 +482,21 @@ class OwnerDMs(Base):
         self.assertEqual([i["message_id"] for i in items], ["5"])
         self.assertEqual(items[0]["owner_dm_nonce"], "a" * 32)
         self.assertIn("reminder", items[0])
+        # The owner's own DM and a notice to them (text from elsewhere)
+        # never share a run: the DM first.
+        own = {"message_id": "7", "channel_id": DM, "kind": "dm",
+               "author_id": OWNER,
+               "settings": {"where": "dm", "speaker": "owner"}}
+        for name, data in (("reply_queue.json", [fire, own]),
+                           ("owner_dm_nonces.json", {"5": "a" * 32,
+                                                     "7": "b" * 32})):
+            with open(os.path.join(pkg, name), "w") as f:
+                json.dump(data, f)
+        os.remove(env["HOOK_STATE"])
+        r = subprocess.run(["bash", HOOK], env=env, capture_output=True,
+                           text=True, timeout=30)
+        items = json.loads(r.stdout.splitlines()[1])["items"]
+        self.assertEqual([i["message_id"] for i in items], ["7"])
 
 
 if __name__ == "__main__":

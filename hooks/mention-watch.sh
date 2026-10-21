@@ -40,9 +40,10 @@
 #
 # Owner DMs are handed out alone (never in the same wake as anyone
 # else's message), so a server message can never share a worker's
-# context with an owner's DM. A reminder firing in an owner's DM
-# (kind "reminder", settings.where "dm") is an owner DM too. Only such
-# a wake gets each DM's
+# context with an owner's DM. A reminder or web watch firing in an
+# owner's DM (kind "reminder" or "watch-met", settings.where "dm") is an
+# owner DM too, and never shares a run with the owner's own messages.
+# Only such a wake gets each DM's
 # owner_dm_nonce, which every outbox item for an owner DM must carry
 # (PROTOCOL.md, Owner DMs); an outbox entry for an owner DM without its
 # nonce (one the monitor will refuse) does not count as answering it.
@@ -209,10 +210,11 @@ done
 # unless the monitor has yet to mint it (then it waits, below). Read to
 # tell a real answer to an owner DM from a forged one; they reach a
 # payload only in an owner-DM-only wake.
-# An owner's own DM (or a reminder firing in one), as jq: prefixed to
-# the filters below that hand owner DMs out alone and with their nonce.
-OWNER_DM='def owner_dm: (.kind == "dm" or (.kind == "reminder"
-    and (.settings.where? // "") == "dm"))
+# An owner's own DM (or a reminder or web watch firing in one), as jq:
+# prefixed to the filters below that hand owner DMs out alone and with
+# their nonce.
+OWNER_DM='def owner_dm: (.kind == "dm" or ((.kind == "reminder"
+    or .kind == "watch-met") and (.settings.where? // "") == "dm"))
     and (.settings.speaker? // "") == "owner";'
 queue=$(jq -c 'if type == "array" then . else [] end' "$QUEUE" \
     2>/dev/null) || queue='[]'
@@ -272,7 +274,11 @@ fi
 # else's, so text written by someone else can never share a context
 # with an owner's settings request. The rest are handed out on the
 # next run, a few seconds later (they keep no lease meanwhile).
-owner_dms=$(printf '%s' "$due" | jq -c "$OWNER_DM"'[.[] | select(owner_dm)]')
+# The owner's own messages and the bot's notices to them (reminders,
+# watches: they carry text from elsewhere, such as a web page's
+# summary) never share a run either: real DMs first.
+owner_dms=$(printf '%s' "$due" | jq -c "$OWNER_DM"'[.[] | select(owner_dm)]
+    | if any(.[]; .kind == "dm") then map(select(.kind == "dm")) else . end')
 nowner=$(printf '%s' "$owner_dms" | jq 'length')
 if [ "$nowner" -gt 0 ] && [ "$nowner" -lt "$ndue" ]; then
     log "owner DMs wake alone; the rest wait for the next run" \
