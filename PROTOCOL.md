@@ -415,7 +415,13 @@ and an owner can turn it on by DM ("reach out sometimes"), with
   allows, it queues ONE item of `kind: "proactive"`, a *slot*: one
   worker wake, which may (and usually should) end in silence. Nobody
   eligible: no wake at all. One slot at a time.
-- The slot lives 15 minutes; one nobody answered leaves the queue then.
+- A slot holds private targets (owners and people, by DM) or public
+  ones (channels), never both, so nothing private shares a run with a
+  public room: heartbeats alternate between the two, taking the other
+  side when one has nobody eligible.
+- The slot lives 15 minutes; one nobody answered leaves the queue then,
+  and so does any `proactive` queue item that is not the live slot (its
+  record was lost, say), every 30 seconds.
 
 ```json
 {"message_id": "<a new id>", "kind": "proactive", "channel_id": null,
@@ -472,11 +478,18 @@ target at send time; nothing the worker writes adds a target.
 - Never in quiet hours (`proactive.quiet_hours`, default `22:00-09:00`,
   in `proactive.timezone`, default `UTC`; `off` = none).
 - Never into a conversation: no target whose channel (or, for a
-  person, their DM or their latest message anywhere) had activity in
-  the last 30 minutes, and no channel where the bot spoke last.
+  person, their DM or their latest message anywhere) had a person's
+  message in the last 30 minutes, no channel where the bot spoke after
+  the last person did, and no channel where no person is known to talk.
 - Never twice without an answer: no second unprompted message to a
-  person (or a channel) until they (someone there) wrote after the last
-  one.
+  person (or a channel) until they (a person there) wrote in that same
+  DM (or channel) after the last one, or reacted to it (looked up when
+  it matters, then remembered). A message of theirs anywhere else is
+  no answer.
+- "A person" is never this bot, another bot or a webhook (the
+  history's `bot` flag, and `webhook` for messages with a
+  `webhook_id`): a feed posting in a channel answers nothing and makes
+  no conversation.
 - Never to someone who opted out (below).
 - Caps, counted from `proactive.json` (`sent`): a person at most
   `proactive.per_person_per_day` (default 1) and
@@ -505,9 +518,11 @@ owner-DM gate), and never reaches the ordinary send path:
   `reactions`, `attachments`, `settings`, `schedule` or `proactive`.
 - It carries the slot's nonce as `owner_dm_nonce` (128 random bits,
   compared in constant time). The monitor keeps it in `proactive.json`
-  and adds it to `owner_dm_nonces.json` while the slot is live and
-  unspent; the wake hook hands a slot out alone and only that wake
-  gets it. Without it the item is set aside and the slot is untouched
+  and writes it to `proactive_nonce.json` (mode 600, `{slot id:
+  nonce}`, the live unspent slot only; never `owner_dm_nonces.json`,
+  so nothing takes it for an owner DM's). The wake hook reads both
+  files the same way, hands a slot out alone and only that wake gets
+  it. Without it the item is set aside and the slot is untouched
   (a worker woken by anyone's message cannot post for a slot).
 - The slot must be fresh (15 minutes) and unspent. Its first item with
   the right nonce spends it: a `silent` item, a post, or a refused
@@ -516,7 +531,8 @@ owner-DM gate), and never reaches the ordinary send path:
   (settings, opt-outs, caps, quiet hours, the conversation rules), and
   the slot allows at most `max_messages` (1) posts.
 - The text gets the usual guardrails (`max_reply_chars`, at most 4
-  `parts`, `@everyone` / `@here` neutralized). It goes out as a plain
+  `parts`, `@everyone` / `@here` neutralized, each part clamped to
+  Discord's 2000 characters after the rewrites). It goes out as a plain
   message (a DM in a DM), with `allowed_mentions` `{"parse": []}` in a
   channel and `{"parse": [], "users": [<that person>]}` in a DM: it can
   ping at most its one person. A text with a `privacy.never_share`
@@ -527,6 +543,8 @@ owner-DM gate), and never reaches the ordinary send path:
 - Owner DMs keep their rule: an item that names no slot is judged by
   the owner-DM gate as before, so the slot's nonce opens no owner DM's
   item and no owner DM channel outside a slot post to that owner.
+- A damaged slot record never blocks the outbox: an item naming a slot
+  that cannot be checked is set aside, and every other item goes on.
 
 Unprompted posts are recorded in `proactive.json` (`sent`, 8 days), where
 the caps count them. They are not in `mention_ledger.json`, so **Why no
@@ -541,10 +559,18 @@ item (`"opt-in"` when they ask for messages again):
 
 - The person is the author of the message the item answers, from the
   monitor's own record (`item_meta`): a `mention` or `dm` from a person,
-  not a bot, still open (an item the dedup check already settled never
-  gets that far); `channel_id` must be that message's channel. There is
-  no field naming the person, so nobody can opt someone else out (or
-  in). An owner's DM keeps the nonce rule.
+  not a bot, still in the queue (waiting for this reply: not one
+  answered or settled earlier, however long ago); `channel_id` must be
+  that message's channel. There is no field naming the person.
+- The item is a visible reply to that message: it has text (not
+  `silent`, not reactions only, not `standalone`) and its `reply_to`
+  is that message or one of its burst fragments, so the person always
+  sees what was recorded for them.
+- `opt-in` only on the person's own DM (`kind` `dm`); `opt-out` in a
+  DM or a server. An owner's DM keeps the nonce rule.
+- What another run could still do, at most: attach an opt-out or
+  opt-in to a visible reply to that person's own waiting message. They
+  see it, under their own message, and an opt-in only in their DM.
 - Recorded in `proactive.json` (`opted_out`); nothing unprompted goes
   to them again until they opt back in the same way. A wrong value or a
   wrong item is set aside like any malformed item.
@@ -558,7 +584,17 @@ so a reused one is refused), `sent` (the unprompted posts: `at`,
 `channel_id`, `user_id`, `type`), `people` (who talked to the bot: last
 message time and id, their DM channel when they DMed it, a name), and
 `opted_out`. Safe to delete while the monitor is stopped, at the cost
-of the opt-outs and the caps' counts.
+of the opt-outs and the caps' counts. The owners' DM channels the bot
+opened for check-ins are kept under `owner_dm`, apart from `dm` (they
+DMed the bot first), so a former owner who never DMed it is never a
+`dm` target.
+
+A `proactive.json` that does not parse is moved to
+`proactive.json.bad-<UTC time>` (never overwritten), the owners get one
+DM saying so, and while any such file is there no heartbeat runs and no
+slot post is sent: its opt-outs are never silently lost. Fix it and
+put it back, or delete it, to resume. (If it cannot even be moved, it
+is left in place and never written.)
 
 ## Worker obligations (summary)
 

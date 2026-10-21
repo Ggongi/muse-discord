@@ -112,7 +112,9 @@ A channel takes only When it answers, Instructions, and on/off for
 images and video (`media.enabled`), for reaching out on its own
 (`proactive.enabled`) and for an installed plugin
 (`plugins.<name>.enabled`). The Friends preset turns reaching out on
-for its server; Community and Work turn it off. Nobody can be added to
+for its server whatever the server's size (in a big server, where
+Friends leaves out "anything it remembers", it still turns this on);
+Community and Work turn it off. Nobody can be added to
 the people it may DM first: only someone who DMed it, and anyone can
 tell it "stop messaging me". The values' names work too ("Only when
 @mentioned"), and so do the settings' names ("When it answers").

@@ -31,7 +31,7 @@ New:
 - Limits: at most one unprompted message to a person a day and three a
   week, one a channel a day, and 2, 5 or 10 a day in all (rarely,
   sometimes, often). Never a second one to someone who hasn't answered
-  the first. No unprompted messages during quiet hours, 22:00 to 09:00
+  the first (a reply where it wrote, or a reaction to it). No unprompted messages during quiet hours, 22:00 to 09:00
   in the time zone you set (`proactive.timezone`, UTC by default; DM it
   "my time zone is Europe/Paris").
 - Anyone can say "stop messaging me" (in a DM, or to the bot in a
