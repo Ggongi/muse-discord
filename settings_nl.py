@@ -1342,10 +1342,18 @@ def new_cli_groups(st, state, names=None):
 def notice_text(groups):
     by = sorted({g["by"] for g in groups})
     head = f"Changed by your Muse ({', '.join(by)}):"
+    if len(groups) == 1:
+        lines = [f"- {x}" for x in groups[0]["lines"]]
+        return _clip(head + "\n" + "\n".join(lines))
+    # Several groups: a numbered list whose numbers match the Undo
+    # buttons; a group of more than one change nests its lines.
     lines = []
     for i, g in enumerate(groups):
-        tag = f" [{i + 1}]" if len(groups) > 1 and g.get("token") else ""
-        lines += [f"- {x}{tag}" for x in g["lines"]]
+        if len(g["lines"]) == 1:
+            lines.append(f"{i + 1}. {g['lines'][0]}")
+        else:
+            lines.append(f"{i + 1}. {len(g['lines'])} changes at once:")
+            lines += [f"   - {x}" for x in g["lines"]]
     return _clip(head + "\n" + "\n".join(lines))
 
 
