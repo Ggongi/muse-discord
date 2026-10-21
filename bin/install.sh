@@ -13,6 +13,8 @@
 #    .venv/bin/python3, so nothing runs without the packages.
 # 3. Optional tools, listed if missing: ffmpeg/ffprobe (video frames),
 #    pdftotext (PDF text), curl (downloads).
+# 4. ~/.config/muse-discord/incoming (mode 700): where the Muse writes
+#    the pasted token for bin/connect-discord.py --token-file.
 #
 # Prints one line per check and a last line "INSTALL OK" or
 # "INSTALL FAILED: <what to do>"; exits 0 or 1.
@@ -23,8 +25,10 @@ VENV="$DIR/.venv"
 fail() { echo "INSTALL FAILED: $*"; exit 1; }
 
 # ---- Python ----
+# .venv counts only with its .muse-ok marker (written below once the
+# packages import there); the watchdog, hooks and scripts check it too.
 PY=python3
-if [ -x "$VENV/bin/python3" ]; then
+if [ -x "$VENV/bin/python3" ] && [ -e "$VENV/.muse-ok" ]; then
   PY="$VENV/bin/python3"
 fi
 command -v python3 >/dev/null 2>&1 || fail "python3 is not installed. Install Python 3.10 or newer."
@@ -49,16 +53,26 @@ elif python3 -m pip install --user -q -r "$REQ" >/dev/null 2>&1 \
   echo "OK Python packages installed with pip --user"
 else
   echo "NOTE pip cannot install into this Python; using a virtual environment in $VENV"
+  rm -f "$VENV/.muse-ok"
+  # A half-built .venv is removed, so nothing ever runs from it.
+  venv_fail() { rm -rf "$VENV"; fail "$@"; }
   if [ ! -x "$VENV/bin/python3" ]; then
     python3 -m venv "$VENV" >/dev/null 2>&1 \
-      || fail "could not create $VENV (on Debian/Ubuntu: apt-get install python3-venv), then run this again."
+      || venv_fail "could not create $VENV (on Debian/Ubuntu: apt-get install python3-venv), then run this again."
   fi
   "$VENV/bin/python3" -m pip install -q -r "$REQ" >/dev/null 2>&1 \
-    || fail "pip could not install requirements.txt into $VENV; check the network, then run this again."
-  have_pkgs "$VENV/bin/python3" || fail "the packages still don't import from $VENV."
+    || venv_fail "pip could not install requirements.txt into $VENV; check the network, then run this again."
+  have_pkgs "$VENV/bin/python3" || venv_fail "the packages still don't import from $VENV."
+  : > "$VENV/.muse-ok"
   PY="$VENV/bin/python3"
   echo "OK Python packages installed in $VENV (the watchdog, hooks and worker prompt use it)"
 fi
+
+# ---- the token drop-off ----
+INCOMING="$HOME/.config/muse-discord/incoming"
+mkdir -p "$INCOMING" && chmod 700 "$HOME/.config/muse-discord" "$INCOMING" \
+  || fail "could not make $INCOMING"
+echo "OK $INCOMING (only this account can read it)"
 
 # ---- optional tools ----
 missing=()

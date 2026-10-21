@@ -25,6 +25,7 @@ e2e/claude_worker.py renders its test prompt with render() below.
 import argparse
 import os
 import re
+import shlex
 import sys
 
 PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -80,8 +81,11 @@ def fill_seam(text, name, body):
 
 
 def package_python(pkg):
+    """.venv/bin/python3 once bin/install.sh has checked it, else
+    python3."""
     venv = os.path.join(pkg, ".venv", "bin", "python3")
-    return venv if os.access(venv, os.X_OK) else "python3"
+    ok = os.path.exists(os.path.join(pkg, ".venv", ".muse-ok"))
+    return venv if ok and os.access(venv, os.X_OK) else "python3"
 
 
 def render(template, pkg, media="none", python="python3"):
@@ -99,8 +103,11 @@ def render(template, pkg, media="none", python="python3"):
                       flags=re.S)
     if not n:
         warnings.append("GENERATION POLICY limits bullet not found")
-    if python != "python3":
-        text = text.replace("python3 <package dir>/", f"{python} {pkg}/")
+    # Commands get shell-quoted paths (a package dir may have spaces).
+    text = re.sub(r"python3 <package dir>/(bin/[\w.-]+)",
+                  lambda m: f"{shlex.quote(python)} "
+                            f"{shlex.quote(os.path.join(pkg, m.group(1)))}",
+                  text)
     text = text.replace("<package dir>", pkg)
     return text, warnings
 

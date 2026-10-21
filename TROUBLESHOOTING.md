@@ -12,14 +12,14 @@ the watchdog's alerts, and checks to run by hand.
   so run `bash bin/install.sh`.
 - **`TOKEN REJECTED` / "Discord rejected the token"**: the token was
   reset in the Developer Portal. Ask the owner for a fresh one (Bot
-  page, **Reset Token**, **Copy**) and pipe it to
-  `bin/connect-discord.py` as in SETUP.md step 3. The watchdog starts
+  page, **Reset Token**, **Copy**) and pass it to
+  `bin/connect-discord.py --token-file` as in SETUP.md step 3. The watchdog starts
   the bot on its next run (the wake hook never retries a rejected
   token by itself).
 - **`GATEWAY DISABLED (code 4014)` / "Message Content is off"**: the
   bot polls but can't see replies, follow-ups or reply-to-bot. Run
-  `bin/connect-discord.py` again with the saved token (it turns the
-  intent on), or send the owner its `OWNER STEP`. Then restart:
+  `python3 bin/connect-discord.py --saved` (it turns the intent on), or
+  send the owner its `OWNER STEP`. Then restart:
   `kill "$(cat monitor.pid)"; bash watchdog.sh`.
 - **The bot looks stuck**: its main loop stopped touching
   `monitor.heartbeat` for 10+ minutes; the watchdog restarts it, and
@@ -58,9 +58,13 @@ the watchdog's alerts, and checks to run by hand.
   Pin Messages permission. In Server Settings, Roles, the bot's role,
   switch on **Pin Messages** (or invite it again with the current link).
 - **It ignores a server it was added to**: none of the owners is in
-  that server, so it answers nobody there (a stranger may have added a
-  public bot). The owner's join DM says so; to let it talk there, they
-  press **Configure** and choose When it answers.
+  that server (or the check hasn't answered yet), so it answers nobody
+  there, and that server doesn't count as shared for DMs (a stranger
+  may have added a public bot). The owner's join DM says so; to let it
+  talk there, they press **Configure** and choose When it answers.
+- **connect-discord.py exits 6**: `config.yaml` doesn't validate, and
+  the script won't touch it (the running bot keeps its last good
+  settings). `python3 bin/settings.py validate` names each problem.
 
 ## Keeping the token somewhere else
 

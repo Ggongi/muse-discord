@@ -19,8 +19,9 @@ cd ~/muse-discord && bash bin/install.sh
 ```
 
 Commands below run in that directory (the "package dir"). `install.sh`
-checks Python 3.10+ and jq and installs the packages (falling back to
-`pip --user`, then a `.venv`). Fix what an `INSTALL FAILED` line says
+checks Python 3.10+ and jq, installs the packages (falling back to
+`pip --user`, then a `.venv`), and makes the private
+`~/.config/muse-discord/incoming/` for step 3. Fix what an `INSTALL FAILED` line says
 and rerun it. With `.venv`, run `bin/settings.py` with
 `.venv/bin/python3` later; the setup scripts find it themselves.
 
@@ -51,28 +52,37 @@ paste it into this secure box"); when it fails, a chat paste is fine.
 
 ## Step 3: Connect (you)
 
-Pipe the paste to the script; never put it in an argument:
+Write the paste, exactly as it came, to
+`~/.config/muse-discord/incoming/token` with your file-writing tool.
+Never put the token in a shell command (not as an argument, not in a
+heredoc): commands show in the process list. Then run:
 
 ```bash
-python3 bin/connect-discord.py --name "<your name>" <<'EOF'
-<the pasted token>
-EOF
+python3 bin/connect-discord.py --name "<your name>" \
+    --token-file ~/.config/muse-discord/incoming/token
 ```
 
-It checks the paste, reads the app and owner from Discord, turns on the
-Message Content intent itself, saves the token (mode 600), writes
-`config.yaml` (an existing one is kept or backed up), puts your name in
-`persona.md`, and prints the invite link. What its exit status means:
+It reads and deletes that file, checks the paste, reads the app and
+owner from Discord, turns on the Message Content intent itself, saves
+the token (mode 600), writes `config.yaml` (an existing valid one is
+kept, or backed up before the owner is added), writes your default
+persona to `persona.md`, and prints the invite link. Exit status:
 
 - **0**: done. Go on.
 - **2**: wrong paste or a reset token. Nothing was saved. Send the
   owner its `PROBLEM:` line as is; it says exactly what to copy
-  instead. Then run it again with the new paste.
-- **3**: Discord was unreachable. Wait a minute and run it again.
+  instead. Then write the new paste and run it again.
+- **3**: Discord was unreachable; nothing was saved. Wait a minute,
+  then ask for the token again (the file is gone).
 - **4**: saved, but the owner has a portal step. Send each
   `OWNER STEP:` line, and when they say it's done, run it again with
-  the saved token: `python3 bin/connect-discord.py --name "<your name>"
-  < ~/.config/muse-discord/bot_token`.
+  `--saved` instead of `--token-file`.
+- **6**: `config.yaml` is invalid; nothing was changed. Run `python3
+  bin/settings.py validate`, fix what it names, and run it again.
+
+A `NOTE:` about a Discord team or about owners already in
+`config.yaml` means the owner it set may not be them: ask "Is your
+Discord username @<name in the note>?" and fix `owners` if not.
 
 Then send (with the `INVITE:` link):
 

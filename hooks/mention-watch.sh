@@ -58,8 +58,9 @@ source "$HATCH_HOOK_RUNTIME"
 # Package dir: the folder containing this hooks/ dir's parent, unless
 # overridden. The queue lives at the package root.
 PKG_DIR="${MUSE_DISCORD_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-# The package's own Python (bin/install.sh may have made a .venv).
-if [ -x "$PKG_DIR/.venv/bin/python3" ]; then
+# The package's own Python (bin/install.sh may have made a .venv, and
+# marks it .muse-ok once the packages import there).
+if [ -x "$PKG_DIR/.venv/bin/python3" ] && [ -e "$PKG_DIR/.venv/.muse-ok" ]; then
     PATH="$PKG_DIR/.venv/bin:$PATH"
 fi
 # Proof for bin/doctor.py that this hook runs (never fails the hook).

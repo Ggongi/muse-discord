@@ -19,7 +19,8 @@ New:
 - The bot is your Muse itself by default: its name is your Muse's name
   and it is told to be itself, as in your main chat. There is no
   personality interview any more; to shape how it talks, DM it in plain
-  words. The shipped `persona.md` says this now.
+  words. Setup writes this default into `persona.md` (only while it is
+  still the shipped placeholder).
 - New scripts for your Muse: `bin/install.sh` (prerequisites, with a
   fallback when pip can't install), `bin/connect-discord.py` (checks the
   pasted token and says what to copy if it is the wrong thing, turns on
@@ -31,8 +32,10 @@ New:
   TROUBLESHOOTING.md collects the fixes.
 - Safer when someone else adds your bot: in a server none of the owners
   is in, it now answers nobody until you choose When it answers for
-  that server (the join DM's Configure button). Setup also has you make
-  the bot private, so only you can add it.
+  that server (the join DM's Configure button), and that server
+  doesn't count as shared for "DMs from people in a server with the
+  bot". **Why no reply?** says so. Setup also has you make the bot
+  private, so only you can add it.
 
 Changed:
 
@@ -48,10 +51,6 @@ token stay as they are, and nothing about setup runs again.
 
 **Action needed:**
 
-- Before step 3 of UPDATING.md: this release changes the shipped
-  `persona.md`. If yours is customized, set it aside so the merge
-  keeps it: `cp persona.md persona.md.mine && git checkout HEAD --
-  persona.md`, then after the merge `mv persona.md.mine persona.md`.
 - Render the worker prompt with `python3 bin/render-worker-prompt.py
   --media <none|images|video|images,video>` and, once, replace the wake
   hook's inline prompt with the short one in SETUP.md step 5's table,

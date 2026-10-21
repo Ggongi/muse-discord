@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -146,10 +147,19 @@ class ConnectDiscord(unittest.TestCase):
                                        "bot_token")
 
     def connect(self, paste, *args):
+        """Run it the SETUP.md way: the paste in a file in the private
+        incoming dir, named by --token-file."""
+        incoming = os.path.join(self.home, ".config", "muse-discord",
+                                "incoming")
+        os.makedirs(incoming, mode=0o700, exist_ok=True)
+        drop = os.path.join(incoming, "token")
+        with open(drop, "w") as f:
+            f.write(paste + "\n")
         r = run(self.pkg, self.home, "connect-discord.py",
-                ["--json", "--name", "Pip", *args], paste + "\n",
-                self.fake.base)
+                ["--json", "--name", "Pip", "--token-file", drop, *args],
+                "", self.fake.base)
         out = json.loads(r.stdout) if r.stdout.strip() else {}
+        self.assertFalse(os.path.exists(drop), "the drop-off file stays")
         return r, out
 
     def test_wrong_pastes_are_named_and_nothing_is_written(self):
@@ -171,6 +181,21 @@ class ConnectDiscord(unittest.TestCase):
         self.assertEqual(self.fake.requests, [])  # nothing left the box
         self.assertFalse(os.path.exists(self.token_file))
         self.assertFalse(os.path.exists(self.cfg))
+
+    def test_token_file_must_be_private(self):
+        """A drop-off file other accounts can read is refused, untouched
+        and unsent."""
+        drop = os.path.join(self.home, "token")
+        with open(drop, "w") as f:
+            f.write(TOKEN)
+        os.chmod(self.home, 0o755)
+        os.chmod(drop, 0o644)
+        r = run(self.pkg, self.home, "connect-discord.py",
+                ["--json", "--token-file", drop], "", self.fake.base)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(json.loads(r.stdout)["problem"], "token_file")
+        self.assertEqual(self.fake.requests, [])
+        self.assertFalse(os.path.exists(self.token_file))
 
     def test_rejected_token_writes_nothing(self):
         bad = TOKEN[:-4] + "zzzz"
@@ -213,6 +238,13 @@ class ConnectDiscord(unittest.TestCase):
         self.assertEqual(monitor_owners(self.cfg), {OWNER_ID})
         with open(os.path.join(self.pkg, "persona.md")) as f:
             self.assertIn("Your name is Pip.", f.read())
+        # A persona the owner wrote is never replaced.
+        mine = "# Persona\n\nYou are Pip the pirate.\n"
+        with open(os.path.join(self.pkg, "persona.md"), "w") as f:
+            f.write(mine)
+        r, _out = self.connect(TOKEN, "--name", "Other")
+        with open(os.path.join(self.pkg, "persona.md")) as f:
+            self.assertEqual(f.read(), mine)
 
     def test_intent_refused_falls_back_to_the_portal_steps(self):
         self.fake.patch_status = 403
@@ -225,28 +257,34 @@ class ConnectDiscord(unittest.TestCase):
         self.assertTrue(os.path.exists(self.cfg))
 
     def test_an_existing_config_is_never_lost(self):
+        # Invalid (a typo): left untouched, nothing written at all, so
+        # the running bot keeps its last good settings.
+        broken = ('version: 1\nowners: ["1100000000000000009"]\n'
+                  'all_servers:\n  who:\n    replies: off\n'
+                  'everywhere:\n  style:\n    lenght: brief\n')
+        with open(self.cfg, "w") as f:
+            f.write(broken)
+        r, out = self.connect(TOKEN)
+        self.assertEqual(r.returncode, 6, r.stdout + r.stderr)
+        self.assertEqual(out.get("problem"), "config")
+        with open(self.cfg) as f:
+            self.assertEqual(f.read(), broken)
+        self.assertFalse(os.path.exists(self.token_file))
+        # Valid, with another owner: backed up byte for byte, both kept.
         mine = ('version: 1\nowners: ["1100000000000000009"]\n'
                 'everywhere:\n  style:\n    length: brief\n')
-        broken = "owners: [this is not: valid\n"
-        for text in (mine, broken):
-            with self.subTest(text[:20]):
-                for f in os.listdir(self.pkg):
-                    if f.startswith("config.yaml"):
-                        os.unlink(os.path.join(self.pkg, f))
-                with open(self.cfg, "w") as f:
-                    f.write(text)
-                r, _out = self.connect(TOKEN)
-                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-                baks = [f for f in os.listdir(self.pkg)
-                        if f.startswith("config.yaml.bak-")]
-                self.assertEqual(len(baks), 1)
-                with open(os.path.join(self.pkg, baks[0])) as f:
-                    self.assertEqual(f.read(), text)
-                st = load_ms(self.pkg).load(
-                    self.cfg, os.path.join(self.pkg, "plugins"))
-                self.assertIn(OWNER_ID, st.owners)
-                if text is mine:
-                    self.assertIn("1100000000000000009", st.owners)
+        with open(self.cfg, "w") as f:
+            f.write(mine)
+        r, _out = self.connect(TOKEN)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        baks = [f for f in os.listdir(self.pkg)
+                if f.startswith("config.yaml.bak-")]
+        self.assertEqual(len(baks), 1)
+        with open(os.path.join(self.pkg, baks[0])) as f:
+            self.assertEqual(f.read(), mine)
+        st = load_ms(self.pkg).load(self.cfg,
+                                    os.path.join(self.pkg, "plugins"))
+        self.assertEqual(set(st.owners), {OWNER_ID, "1100000000000000009"})
         # Run again: the config already lists the owner, so it is kept
         # as is, with no further backup.
         with open(self.cfg) as f:
@@ -331,7 +369,20 @@ class OwnerlessServer(unittest.TestCase):
             mod.sync_guilds(st, mod.GUILDS, mod.CHANNELS)
         kind, why = mod.trigger_verdict(stranger, G2)
         self.assertIsNone(kind)
-        self.assertTrue(why)
+        self.assertEqual(mod.ledger_code("skipped", f"settings: {why}"),
+                         "ownerless")
+        # Not a shared server for DMs (who.dms_from: shared-servers).
+        mod.api.members[(G2, U1)] = []
+        mod._SHARED_SERVER.clear()
+        self.assertFalse(mod.shares_server(U1))
+        # A restart whose boot discovery fails keeps the gate.
+        with quiet():
+            mod.save_state(st)
+        again = load_monitor(base, tmp=mod.tmp)
+        with quiet():
+            st_again = again.load_state()
+            again.sync_guilds(st_again, {}, {})
+        self.assertIsNone(again.trigger_kind(stranger, G2))
         # The join DM says so, and answering in G1 is untouched.
         self.assertIn("none of you is a member", mod.api.dm_posts()[0][
             "content"])
@@ -353,6 +404,64 @@ class OwnerlessServer(unittest.TestCase):
         with quiet():
             mod3.sync_guilds(st3, mod3.GUILDS, mod3.CHANNELS)
         self.assertEqual(mod3.trigger_kind(stranger, G2), "mention")
+
+
+class OwnerChecks(unittest.TestCase):
+    def test_failing_checks_do_not_starve_the_others(self):
+        """Servers whose owner check keeps failing back off, so the
+        others (the owner's own new server here) still get checked."""
+        from settings_harness import HTTPErr, OWNER, load_monitor, quiet
+        mod = load_monitor(f'version: 1\nowners: ["{OWNER}"]\n')
+        bad = [str(610000000000000000 + i) for i in range(5)]
+        good = "690000000000000001"
+        guilds = {g: {"name": g} for g in bad + [good]}
+        st = mod.load_state()
+        real_get = mod.api_get
+
+        def get(path):
+            if any(f"/guilds/{g}/" in path for g in bad):
+                raise HTTPErr(500)
+            return real_get(path)
+        mod.api_get = get
+        mod.api.members[(good, OWNER)] = []
+        with quiet():
+            for g in bad:
+                mod.note_guild_join_for_owners(st, g)
+            mod.check_owner_presence(st, guilds)   # the 5 bad ones
+            mod.note_guild_join_for_owners(st, good)
+            mod.check_owner_presence(st, guilds)
+        self.assertIs(mod.OWNER_IN_GUILD[good], True)
+        self.assertTrue(all(mod.OWNER_IN_GUILD[g] is None for g in bad))
+
+
+class WatchdogHook(unittest.TestCase):
+    def test_an_alert_outlives_the_hook_run(self):
+        """A watchdog run slower than the hook's wait still reaches the
+        main chat, on the next hook run."""
+        from common import HOOK_RUNTIME
+        root = scratch("muse-wdh-")
+        os.makedirs(os.path.join(root, "hooks"))
+        hook = os.path.join(root, "hooks", "watchdog-hook.sh")
+        shutil.copy2(os.path.join(MUT_DIR, "hooks", "watchdog-hook.sh"),
+                     hook)
+        with open(os.path.join(root, "watchdog.sh"), "w") as f:
+            f.write("sleep 2\necho 'ALERT: monitor DOWN: test'\n")
+        env = dict(os.environ, HATCH_HOOK_RUNTIME=HOOK_RUNTIME,
+                   MUSE_WATCHDOG_HOOK_WAIT="0")
+        first = subprocess.run(["bash", hook], env=env, capture_output=True,
+                               text=True, timeout=30).stdout
+        self.assertNotIn("ALERT", first)
+        for _ in range(100):
+            if not [f for f in os.listdir(root) if f.endswith(".tmp")]:
+                break
+            time.sleep(0.1)
+        with open(os.path.join(root, "watchdog.sh"), "w") as f:
+            f.write("echo 'OK monitor alive'\n")
+        env["MUSE_WATCHDOG_HOOK_WAIT"] = "10"
+        second = subprocess.run(["bash", hook], env=env, capture_output=True,
+                                text=True, timeout=30).stdout
+        self.assertIn("WAKE:", second)
+        self.assertIn("ALERT: monitor DOWN: test", second)
 
 
 class MediaDefault(unittest.TestCase):

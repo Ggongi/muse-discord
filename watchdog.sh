@@ -59,10 +59,11 @@
 set -u
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The package's own Python: bin/install.sh makes .venv when pip cannot
-# install into the system Python. Every python3 below (and the monitor
-# and presence it starts) then has the packages.
+# install into the system Python, and marks it .muse-ok once the
+# packages import there. Every python3 below (and the monitor and
+# presence it starts) then has the packages.
 PIP_FLAGS=(--break-system-packages)
-if [ -x "$DIR/.venv/bin/python3" ]; then
+if [ -x "$DIR/.venv/bin/python3" ] && [ -e "$DIR/.venv/.muse-ok" ]; then
   PATH="$DIR/.venv/bin:$PATH"
   PIP_FLAGS=()
 fi

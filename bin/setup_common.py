@@ -12,13 +12,26 @@ import urllib.request
 
 PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Run under the package's .venv when bin/install.sh made one and this
-# Python lacks the packages, so `python3 bin/<script>` always works.
+# The package's .venv counts only once bin/install.sh has checked the
+# packages import in it (it then writes this marker).
+VENV_PYTHON = os.path.join(PKG_DIR, ".venv", "bin", "python3")
+VENV_OK = os.path.join(PKG_DIR, ".venv", ".muse-ok")
+
+
+def venv_python():
+    """.venv/bin/python3 when bin/install.sh set it up, else None."""
+    if os.access(VENV_PYTHON, os.X_OK) and os.path.exists(VENV_OK):
+        return VENV_PYTHON
+    return None
+
+
+# Run under that venv when this Python lacks the packages, so
+# `python3 bin/<script>` always works.
 try:
     import yaml  # noqa: F401
 except ImportError:
-    _venv = os.path.join(PKG_DIR, ".venv", "bin", "python3")
-    if os.access(_venv, os.X_OK) and os.path.realpath(sys.executable) \
+    _venv = venv_python()
+    if _venv and os.path.realpath(sys.executable) \
             != os.path.realpath(_venv):
         os.execv(_venv, [_venv] + sys.argv)
 
@@ -127,6 +140,12 @@ def load_settings(config_path):
     return settings_module().load(config_path, PLUGINS_DIR)
 
 
+def token_path(where):
+    """A token_from file path as the bot resolves it: ~ expanded, and a
+    relative path taken from the package dir (the bot's working dir)."""
+    return os.path.join(PKG_DIR, os.path.expanduser(where))
+
+
 def read_token(st):
     """The bot token from config.yaml's token_from (an env var or a
     file), or None. Never printed."""
@@ -135,7 +154,7 @@ def read_token(st):
             v = os.environ.get(where, "").strip()
         else:
             try:
-                with open(os.path.expanduser(where)) as f:
+                with open(token_path(where)) as f:
                     v = f.read().strip()
             except OSError:
                 v = ""
@@ -146,4 +165,4 @@ def read_token(st):
 
 def token_file(st):
     files = [p for k, p in st.token_sources() if k == "file"]
-    return os.path.expanduser(files[0]) if files else None
+    return token_path(files[0]) if files else None

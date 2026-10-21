@@ -18,9 +18,8 @@ Updates never need to overwrite these, so never discard them:
 
 - `config.yaml` (untracked), its backups, `config.discord.yaml`
   (settings changed through the bot, if any), and the token file.
-- `persona.md`: tracked as the default persona; setup writes the
-  Muse's name into it, and the owner may have rewritten it. When a
-  release changes the default, step 2 keeps theirs.
+- `persona.md`: tracked as a placeholder, written during setup.
+  Upstream never changes it, so it never conflicts.
 - Custom plugins: their own folders under `plugins/` (untracked).
 - `worker-prompt.md` (rendered from the template, untracked) and the
   hooks registered in the agent runtime.
@@ -72,17 +71,6 @@ Otherwise read the CHANGELOG diff and note every **Action needed**
 item; they are handled in step 4.
 
 ## Step 2: Decide which path
-
-First, `persona.md`. If `git status` lists it and the release changes
-the default (`git diff --quiet HEAD "$TAG" -- persona.md` fails), set
-the owner's copy aside so the merge can't touch it, and put it back
-after step 3:
-
-```bash
-cp persona.md persona.md.mine && git checkout HEAD -- persona.md
-# ... step 3a or 3b ...
-mv persona.md.mine persona.md
-```
 
 - **Clean**: `git status` lists nothing (or only `persona.md`) and
   there are no local commits. Go to 3a.
@@ -148,9 +136,10 @@ only releases, and skips any release HEAD already contains.
 
 ## Step 4: Bring the rest of the install along
 
-- **Dependencies**: if `git diff "$OLD" HEAD -- requirements.txt`
-  shows changes, run `bash bin/install.sh` (or, from a release without
-  it, `pip install -r requirements.txt`).
+- **Dependencies**: run `bash bin/install.sh` if the release has it
+  (it is quick when nothing changed); otherwise, if `git diff "$OLD"
+  HEAD -- requirements.txt` shows changes, `pip install -r
+  requirements.txt`.
 - **Config**: `git diff "$OLD" HEAD -- config.example.yaml` shows new
   settings. Every new setting has a safe default in the code, so an
   older `config.yaml` keeps working. Mention each new setting to the
@@ -258,10 +247,10 @@ If the new version misbehaves and the owner wants to roll back:
 
 ## For maintainers
 
-- `persona.md` is the owner's file. Change its shipped default only
-  for a good reason, keep the line `Your name is the name your owner
-  knows you by.` (bin/connect-discord.py fills it in), and say so in
-  the CHANGELOG; step 2 keeps installs' own copies.
+- Never edit `persona.md` upstream: it is the owner's file. The default
+  persona setup writes lives in `bin/connect-discord.py`
+  (DEFAULT_PERSONA); it replaces only the shipped placeholder, which
+  its SHIPPED_PERSONAS hash recognizes.
 - Every user-visible change gets a CHANGELOG entry, with an **Action
   needed** list whenever an existing install must do something.
 - Installs are offered releases: semver tags `vX.Y.Z` (pre-release
