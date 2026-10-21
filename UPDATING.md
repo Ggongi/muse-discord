@@ -176,6 +176,12 @@ only releases, and skips any release HEAD already contains.
   says (main chat, every 60 s, its wake prompt). From then on
   the owner can start an update from the bot's update DM. If the
   script changed and the runtime registered a copy, update the copy.
+- **Web watch hook**: if the release has `hooks/watch-due.sh` and the
+  runtime has no hook for it yet, register it as SETUP.md step 5's
+  table says (every 60 s, in a chat of its own, never the main chat or
+  the reply worker's, with its wake prompt). Without it, web watches
+  are never checked. If the script changed and the runtime registered
+  a copy, update the copy.
 
 ### Converting to the new settings layout
 

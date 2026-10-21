@@ -40,7 +40,10 @@
 #
 # Owner DMs are handed out alone (never in the same wake as anyone
 # else's message), so a server message can never share a worker's
-# context with an owner's DM. Only such a wake gets each DM's
+# context with an owner's DM. A reminder or web watch firing in an
+# owner's DM (kind "reminder" or "watch-met", settings.where "dm") is an
+# owner DM too, and never shares a run with the owner's own messages.
+# Only such a wake gets each DM's
 # owner_dm_nonce, which every outbox item for an owner DM must carry
 # (PROTOCOL.md, Owner DMs); an outbox entry for an owner DM without its
 # nonce (one the monitor will refuse) does not count as answering it.
@@ -211,10 +214,12 @@ done
 # unless the monitor has yet to mint it (then it waits, below). Read to
 # tell a real answer to an owner DM from a forged one; they reach a
 # payload only in an owner-DM-only wake.
-# An owner's own DM, or a heartbeat slot, as jq: prefixed to the
-# filters below that hand them out alone and with their nonce.
-OWNER_DM='def owner_dm: (.kind == "dm" and (.settings.speaker? // "")
-    == "owner") or .kind == "proactive";'
+# An owner's own DM, a reminder or web watch firing in one, or a
+# heartbeat slot (kind "proactive"), as jq: prefixed to the filters below
+# that hand them out alone and with their nonce.
+OWNER_DM='def owner_dm: ((.kind == "dm" or ((.kind == "reminder"
+    or .kind == "watch-met") and (.settings.where? // "") == "dm"))
+    and (.settings.speaker? // "") == "owner") or .kind == "proactive";'
 queue=$(jq -c 'if type == "array" then . else [] end' "$QUEUE" \
     2>/dev/null) || queue='[]'
 [ -n "$queue" ] || queue='[]'
@@ -233,6 +238,15 @@ if [ -f "$PKG_DIR/proactive_nonce.json" ]; then
     [ -n "$slot_nonce" ] || slot_nonce='{}'
     all_nonces=$(jq -cn --argjson a "$all_nonces" --argjson b "$slot_nonce" \
         '$a + $b')
+fi
+# The web watch capabilities ({message_id: web_nonce}, the monitor's
+# private file): an item whose author may set web watches is handed out
+# alone, with its web_nonce, so nobody else's text shares that run.
+web_nonces='{}'
+if [ -f "$PKG_DIR/web_nonces.json" ]; then
+    web_nonces=$(jq -c 'if type == "object" then . else {} end' \
+        "$PKG_DIR/web_nonces.json" 2>/dev/null) || web_nonces='{}'
+    [ -n "$web_nonces" ] || web_nonces='{}'
 fi
 
 # Open items: queued and not answered (a burst may be answered under any
@@ -282,11 +296,15 @@ fi
 # to change settings) never also reads a server message or anyone
 # else's, so text written by someone else can never share a context
 # with an owner's settings request. The rest are handed out on the
-# next run, a few seconds later (they keep no lease meanwhile). A
-# heartbeat slot never shares a run with an owner's DM: DMs first.
+# next run, a few seconds later (they keep no lease meanwhile).
+# The owner's own messages, a heartbeat slot, and the bot's notices to
+# the owners (reminders, watches: they carry text from elsewhere, such as
+# a web page's summary) never share a run either: real DMs first, else
+# one slot alone, else the notices.
 owner_dms=$(printf '%s' "$due" | jq -c "$OWNER_DM"'[.[] | select(owner_dm)]
     | if any(.[]; .kind == "dm") then map(select(.kind == "dm"))
-      else .[:1] end')
+      elif any(.[]; .kind == "proactive")
+      then map(select(.kind == "proactive"))[:1] else . end')
 nowner=$(printf '%s' "$owner_dms" | jq 'length')
 if [ "$nowner" -gt 0 ] && [ "$nowner" -lt "$ndue" ]; then
     log "owner DMs wake alone; the rest wait for the next run" \
@@ -302,6 +320,22 @@ fi
 nonces='{}'
 if [ "$nowner" -gt 0 ] && [ "$nowner" -eq "$ndue" ]; then
     nonces=$all_nonces
+fi
+# No owner DM due: an item holding a web watch capability goes alone,
+# first; the rest wait for the next run.
+wnonces='{}'
+if [ "$nowner" -eq 0 ]; then
+    solo=$(printf '%s' "$due" | jq -c --argjson wn "$web_nonces" \
+        '[.[] | select($wn[.message_id | tostring] != null)][:1]')
+    if [ "$(printf '%s' "$solo" | jq 'length')" -gt 0 ]; then
+        if [ "$ndue" -gt 1 ]; then
+            log "an item with a web watch capability wakes alone" \
+                '{"held":"'"$((ndue - 1))"'"}'
+        fi
+        due=$solo
+        ndue=1
+        wnonces=$web_nonces
+    fi
 fi
 expired=$(printf '%s' "$due" | jq --argjson w "$woken" \
     '[.[] | select($w[.message_id] != null)] | length')
@@ -354,5 +388,5 @@ else
     persona_args=(--argjson persona null)
 fi
 
-payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" --argjson nonces "$nonces" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings, proactive} + (if $nonces[.message_id] then {owner_dm_nonce: $nonces[.message_id]} else {} end)]}')
+payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" --argjson nonces "$nonces" --argjson wn "$wnonces" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings, watches, reminder, proactive} + (if $nonces[.message_id] then {owner_dm_nonce: $nonces[.message_id]} else {} end) + (if $wn[.message_id] then {web_nonce: $wn[.message_id]} else {} end)]}')
 wake "muse-discord mentions pending" "$payload"

@@ -192,6 +192,15 @@ CORE = {
                          steers=True),
     "style.notes": Spec("text", "", "EDSC", maxlen=NOTES_MAX, steers=True),
     "abilities.owner_commands": Spec("on-off", True, "ES"),
+    # Who can set reminders and watches (muse_watches.py): owners always
+    # can; a list names the others who may.
+    "abilities.reminders": Spec("people", "everyone", "EDS",
+                                values=("owners", "everyone")),
+    # Who can set web watches (checked on the web by a checker session
+    # of the owner's Muse; each check is a Muse turn): owners by default.
+    "abilities.web_watches": Spec("people", "owners", "EDS",
+                                  values=("owners", "everyone"),
+                                  risky=True),
     "privacy.memory": Spec("choice", "public-only", "EDS",
                            values=("everything", "public-only", "nothing"),
                            steers=True, risky=True),
@@ -2687,6 +2696,7 @@ BIG_FOR_CONVERSATIONAL = 500
 BIG_FOR_CAPS = 500           # members: removing a reply cap is risky
 MEDIA_PER_DAY_RISKY = 20
 BOT_EXCHANGE_RISKY = 10
+WEB_CHECKS_PER_DAY = 48    # muse_watches.WEB_PLACE_PER_DAY
 ADMIN_REPLIES = ("off", "when-addressed")
 ADMIN_QUIETER = ("Server admins can make the bot quieter, or undo their own "
                  "changes back to what the owners set; never louder.")
@@ -2901,7 +2911,8 @@ BASIC_KEYS = ("who.replies", "who.dms_from", "privacy.memory", "style.notes",
               "proactive.enabled")
 MORE_KEYS = ("who.allow", "who.ignore", "who.bots", "who.bot_exchange_limit",
              "limits.per_day", "privacy.suspicious", "media.who",
-             "media.per_day", "proactive.frequency",
+             "media.per_day", "abilities.reminders",
+             "abilities.web_watches", "proactive.frequency",
              "proactive.per_person_per_day", "proactive.per_person_per_week",
              "proactive.per_channel_per_day", "proactive.quiet_hours",
              "proactive.timezone")
@@ -2990,6 +3001,8 @@ LABELS = {
     "limits.per_day": "Replies per day (total)",
     "limits.per_person_per_day": "Replies per person per day",
     "abilities.owner_commands": "Owner requests (pin, post, react, threads)",
+    "abilities.reminders": "Who can set reminders and watches",
+    "abilities.web_watches": "Who can set web watches",
     "media.enabled": "Image and video generation",
     "media.who": "Who can ask for images and video",
     "media.per_day": "Generations per day",
@@ -3028,6 +3041,10 @@ VALUE_LABELS = {
     ("privacy.suspicious", "answer"): "Answer it (no check)",
     ("media.who", "owners"): "Only you",
     ("media.who", "everyone"): "Everyone",
+    ("abilities.reminders", "owners"): "Only you",
+    ("abilities.reminders", "everyone"): "Everyone",
+    ("abilities.web_watches", "owners"): "Only you",
+    ("abilities.web_watches", "everyone"): "Everyone",
     ("proactive.frequency", "rarely"): "Rarely (once or twice a day)",
     ("proactive.frequency", "sometimes"): "Sometimes (4-6 times a day)",
     ("proactive.frequency", "often"): "Often (about hourly)",
@@ -4353,6 +4370,17 @@ def assess(st, changes, info=None, names=None, named=()):
         out.warnings.append(f"Anyone in {_join(everyone)} can ask for "
                             f"generated images and video. Generation "
                             f"can cost real money.")
+    # Web watches: each check is a Muse turn reading web pages for
+    # someone else's condition.
+    web = [where(k) for k, sc in scopes.items() if len(k) == 1
+           and after.get("abilities.web_watches", sc) != "owners"
+           and st.get("abilities.web_watches", sc) == "owners"]
+    if web:
+        out.warnings.append(f"People other than you in {_join(web)} can "
+                            f"set web watches: your Muse then reads web "
+                            f"pages for them, a turn per check (up to "
+                            f"{WEB_CHECKS_PER_DAY} checks a day per "
+                            f"server).")
     if uncapped:
         out.warnings.append(
             f"Generations per day: more than "

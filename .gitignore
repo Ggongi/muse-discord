@@ -34,6 +34,12 @@ proactive.json
 proactive.json.bad-*
 proactive_nonce.json
 nl_journal.json
+watches.json
+watches.json.bad-*
+watches.lock
+web_watches_due.json
+web_watch_results.json
+web_nonces.json
 telemetry.json
 telemetry_id
 telemetry.wakes

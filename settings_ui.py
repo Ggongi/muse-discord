@@ -158,7 +158,9 @@ CORE_CODES = {
     "who.replies": "r", "who.dms_from": "df", "who.allow": "al",
     "who.ignore": "ig", "who.bots": "b", "who.bot_exchange_limit": "bx",
     "style.length": "ln", "style.notes": "n",
-    "abilities.owner_commands": "oc", "privacy.memory": "m",
+    "abilities.owner_commands": "oc", "abilities.reminders": "rw",
+    "abilities.web_watches": "ww",
+    "privacy.memory": "m",
     "privacy.suspicious": "su", "limits.per_day": "pd",
     "limits.per_person_per_day": "pp", "presence.status": "ps",
     "presence.kind": "pk", "updates.notify": "un",
@@ -1558,6 +1560,40 @@ def explain_outcome(R, o):
             return (f"I hit the daily limit of {n:,} replies in total."
                     f"{tip}"), None, True
         return f"I hit a daily reply limit.{tip}", None, True
+    if code == "watch-cap":
+        n, per = detail.get("cap"), detail.get("per")
+        if per == "person" and isinstance(n, int):
+            return (f"{who_m} asked for a reminder or watch, but already "
+                    f"had {n:,} going, the most I keep for one person. I "
+                    f"told them to cancel one first."), None, True
+        if per == "budget":
+            return ("I didn't set the web watch they asked for: checking "
+                    "it that often would go past the web checks I do a "
+                    "day. I told them so."), None, True
+        return ("I didn't set the reminder or watch they asked for: I "
+                "already keep as many as I can. I told them so."), \
+            None, True
+    if code == "watch-held" and detail.get("why"):
+        return (f"A reminder or watch for {who_m} came due, but I couldn't "
+                f"deliver it where they asked ({esc(str(detail['why']))}). "
+                f"I keep trying for a day."), None, True
+    if code == "watch-held":
+        key, n = detail.get("key"), detail.get("cap")
+        which = (f"the daily limit of {n:,} replies a person"
+                 if key == "limits.per_person_per_day" and isinstance(n, int)
+                 else f"the daily limit of {n:,} replies in total"
+                 if isinstance(n, int) else "a daily reply limit")
+        return (f"A reminder or watch for {who_m} came due, but they had "
+                f"hit {which} (each one counts as a reply). It is held, "
+                f"and goes out once the limit allows.{tip}"), None, True
+    if code == "watch-not-allowed":
+        cur = R.st.get("abilities.reminders", sc)
+        if cur == "everyone":
+            return ("Only owners could set reminders and watches then.\n-# "
+                    "Not any more: everyone can now."), None, False
+        return (f"Only some people can set reminders and watches in "
+                f"{where}, and {who_m} isn't one of them. I told them "
+                f"so.{tip}"), None, True
     if code == "bot-exchange":
         lim = detail.get("limit")
         return ("I'd already answered other bots "

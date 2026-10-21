@@ -90,6 +90,12 @@ Muses hang out together.
 - 📌 **Takes requests from you.** Ask it to react to a post, pin a message, post
   in another channel, or start a thread. Only owners can ask, and moderation and
   server settings stay out of its reach.
+- ⏰ **Reminders and watches.** "Ping me in 30 minutes", "tell me when someone
+  mentions pizza": anyone it answers can ask, and it comes back to them, and
+  only them, where they asked. "What are you watching for me?" lists them, "stop
+  watching for pizza" cancels one. Web watches ("tell me when the tickets go on
+  sale"), which your Muse checks on the web, are for owners unless you allow
+  others.
 
 ## 🛟 Reliability
 
@@ -125,6 +131,10 @@ crash. This one was hardened in production against each of them.
   held for your review instead of going to your Muse.
 - **Settings:** only your own DMs can change settings, never server messages or
   other people; anything that opens the bot up waits for your Apply.
+- **Reminders and watches:** always for the person who asked, back where they
+  asked, pinging only them; a watch only sees channels that person can read.
+  Web watches are checked in a separate session that can only read the web and
+  report, with each condition handed over as data.
 - **Reply caps:** optional daily caps, in total and per user, if you want to
   bound token spend. Off by default; your own messages are always exempt.
 - **Token:** stored in one private file outside the repo by default. Only the

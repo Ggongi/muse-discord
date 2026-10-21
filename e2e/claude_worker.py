@@ -75,7 +75,7 @@ PAYLOAD_FIELDS = (
     "author_id", "content", "media", "documents", "unviewable", "history",
     "may_generate", "owner_command", "reply_to", "burst",
     "burst_fragments", "from_bot", "bot_turns", "participants",
-    "follow_up", "settings", "proactive")
+    "follow_up", "settings", "watches", "reminder", "proactive")
 
 # Env vars the worker run has no business seeing. The SUT token stays:
 # bin/discord-api.py may resolve it through token_from (env:NAME).
@@ -131,11 +131,15 @@ OWNER_DM_NONCES = "owner_dm_nonces.json"
 
 
 def is_owner_dm(item):
-    """An owner's own DM, or a heartbeat slot (handed out alone, with its
-    nonce, the hook's rule)."""
+    """An owner's own DM, a reminder or web watch firing in one, or a
+    heartbeat slot (all handed out alone, with their nonce: the hook's
+    rule)."""
+    card = item.get("settings") or {}
+    notice = item.get("kind") in ("reminder", "watch-met") \
+        and card.get("where") == "dm"
     return item.get("kind") == "proactive" or (
-        item.get("kind") == "dm"
-        and (item.get("settings") or {}).get("speaker") == "owner")
+        (item.get("kind") == "dm" or notice)
+        and card.get("speaker") == "owner")
 
 
 def outbox_answers(pkg):
@@ -227,15 +231,18 @@ def persona_file(pkg, override=None):
     return os.path.join(pkg, os.path.expanduser(name or "persona.md"))
 
 
-def build_payload(items, persona, nonces=None):
+def build_payload(items, persona, nonces=None, web=None):
     """The wake payload: {count, persona, items} with the hook's fields,
     plus owner_dm_nonce on the items `nonces` has one for (the caller
-    passes nonces only for a wake of owner DMs alone)."""
+    passes nonces only for a wake of owner DMs alone), and web_nonce on
+    those `web` has one for (only for a wake of that item alone)."""
     out = []
     for item in items:
         p = {k: item.get(k) for k in PAYLOAD_FIELDS}
         if (nonces or {}).get(str(item.get("message_id"))):
             p["owner_dm_nonce"] = nonces[str(item["message_id"])]
+        if (web or {}).get(str(item.get("message_id"))):
+            p["web_nonce"] = web[str(item["message_id"])]
         out.append(p)
     return {"count": len(items), "persona": persona, "items": out}
 
@@ -480,10 +487,22 @@ class Worker:
                             and str(i["message_id"]) not in nonces)]
             owner = [i for i in due if is_owner_dm(i)]
             if owner:
-                # The owner's DMs first; a heartbeat slot alone.
+                # The hook's rule: the owner's own messages first, else a
+                # heartbeat slot alone, else the bot's notices to them.
                 dms = [i for i in owner if i.get("kind") == "dm"]
-                owner = dms or owner[:1]
+                slots = [i for i in owner if i.get("kind") == "proactive"]
+                owner = dms or slots[:1] or owner
                 due = owner
+            self.wake_web = {}
+            if not owner:
+                # An item holding a web watch capability wakes alone
+                # (the hook's rule), with its web_nonce.
+                web = read_json(os.path.join(self.pkg, "web_nonces.json"),
+                                {}) or {}
+                solo = [i for i in due if str(i["message_id"]) in web][:1]
+                if solo:
+                    due = solo
+                    self.wake_web = web
             expired = [i for i in due if i["message_id"] in self.leases]
             for i in due:
                 self.leases[i["message_id"]] = now
@@ -525,7 +544,8 @@ class Worker:
                 persona = f.read()
         except OSError:
             persona = None  # the worker then reads the file itself
-        prompt = wake_prompt(rendered, build_payload(items, persona, nonces))
+        prompt = wake_prompt(rendered, build_payload(
+            items, persona, nonces, getattr(self, "wake_web", None)))
         args = worker_args(self.pkg, self.persona)
         self.log("wake %d: start items=%s" % (n, ids))
         start = time.monotonic()
