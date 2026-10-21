@@ -120,12 +120,16 @@ class ForgedAnswersDoNotHideOwnerDms(unittest.TestCase):
             f.write("{not json")
         self.write("reply_queue.json", [item("1")])
         self.write("reply_outbox.json", [{"item": "1", "text": "x"}])
-        # No nonces known: the entry counts, as before (and the monitor
-        # refuses it, then the DM is open again).
+        # No nonce known for the owner DM: it waits (never handed out or
+        # leased without one), and no outbox entry counts as answering
+        # it; anyone else's item still goes out.
         self.assertIsNone(self.ids())
-        os.remove(os.path.join(self.pkg, "reply_outbox.json"))
-        p = self.wake()
-        self.assertNotIn("owner_dm_nonce", p["items"][0])
+        self.write("reply_queue.json", [item("1"),
+                                        item("5", "mention", "member")])
+        self.assertEqual(self.ids(), ["5"])
+        self.write("owner_dm_nonces.json", {"1": N1})
+        self.write("reply_queue.json", [item("1")])
+        self.assertEqual(self.ids(), ["1"])
 
 
 if __name__ == "__main__":

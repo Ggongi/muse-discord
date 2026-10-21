@@ -39,9 +39,14 @@ LOCK = os.path.join(PACKAGE_DIR, "reply.lock")
 NONCE_RE = re.compile(r"[0-9a-f]{32,64}")
 
 
+ID_RE = re.compile(r"[1-9][0-9]{0,19}")
+
+
 def _is_id(value):
-    return (isinstance(value, str) and value.isdigit()) \
-        or (isinstance(value, int) and not isinstance(value, bool))
+    """A Discord id in its one form the monitor takes: ASCII digits, no
+    leading zero (the monitor compares ids as strings)."""
+    return isinstance(value, (str, int)) and not isinstance(value, bool) \
+        and ID_RE.fullmatch(str(value)) is not None
 
 
 def settings_problems(item):

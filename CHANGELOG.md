@@ -26,7 +26,14 @@ Changed:
   nonce (`--for <message_id> --nonce <owner_dm_nonce>`). Server
   channels work as before.
 - The wake hook no longer counts a forged answer to your DM as an
-  answer, so it cannot keep your DM from its own run.
+  answer, so it cannot keep your DM from its own run, and never hands
+  out your DM before its nonce exists.
+- Replies under the last message of a burst you sent work however long
+  ago the burst was, and no other run can settle the burst through one
+  of its messages.
+- Ids in the outbox are taken in one form only (no leading zeros or
+  other digits), and a reply to a channel the monitor cannot place is
+  checked with Discord first and refused if it is your DM.
 - A DM of yours that is still waiting keeps its nonce (and gets a new
   one if `state.json` was lost), so it is never stuck. The nonce is
   spent once the DM is answered, not before, so a failed send's retry

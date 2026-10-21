@@ -165,6 +165,19 @@ class OwnerDmChannel(unittest.TestCase):
                 self.assertEqual(rc, 0, args)
                 self.assertTrue(writes(), args)
 
+    def test_dm_without_recipients_is_guarded(self):
+        CHANNELS["200000000000000005"] = {"id": "200000000000000005",
+                                          "type": 1}
+        rc = self.run_tool("post", "200000000000000005", "hi")
+        self.assertIn("is an owner's DM", str(rc))
+        self.assertEqual(writes(), [])
+
+    def test_non_canonical_ids_refused(self):
+        for cid in ("0" + GEN_CH, GEN_CH.replace("2", "\u0662")):
+            rc = self.run_tool("post", cid, "hi")
+            self.assertIn("not a Discord id", str(rc))
+            self.assertEqual(CALLS, [])
+
     def test_owners_unreadable_fails_closed(self):
         real = D._owners
         D._owners = lambda: None

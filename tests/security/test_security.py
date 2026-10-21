@@ -141,6 +141,10 @@ def fake_api_post(path, data):
 
 
 def fake_api_get(path):
+    # The owner-DM gate looks up a channel it cannot place: GEN_CH is a
+    # server channel.
+    if path == f"/channels/{GEN_CH}":
+        return {"id": GEN_CH, "type": 0, "guild_id": GUILD}
     raise RuntimeError("api_get stubbed: " + path)
 
 

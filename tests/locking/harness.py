@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -40,6 +41,11 @@ def fake_post(path, data):
 
 
 def fake_get(path):
+    # The owner-DM gate looks up a channel it cannot place (these tests
+    # send to made-up channels): a server text channel.
+    m = re.fullmatch(r"/channels/(\d+)", path)
+    if m:
+        return {"id": m[1], "type": 0, "guild_id": "1"}
     raise AssertionError(f"unexpected api_get {path}")
 
 

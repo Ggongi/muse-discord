@@ -460,7 +460,7 @@ class NonceLifetime(Base):
         # item_meta. Still bound (the channel is the owner's).
         self.st = state(self.mod)
         self.outbox(self.reply(m, owner_dm_nonce=old))
-        self.assertIn("names no owner DM", self.rejected()[-1]["reason"])
+        self.assertIn("bad nonce (none live", self.rejected()[-1]["reason"])
         self.assertEqual(self.sends(DM), [])
         with quiet() as buf:
             self.mod.owner_dm_upkeep(self.st, force=True)

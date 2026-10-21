@@ -59,8 +59,9 @@ ALLOWED_MENTIONS = {"parse": ["users"]}
 
 
 def snowflake(value):
-    """Return value if it is a plain Discord id, else refuse."""
-    if not re.fullmatch(r"[0-9]{17,20}", value or ""):
+    """Return value if it is a plain Discord id (ASCII digits, no leading
+    zero), else refuse."""
+    if not re.fullmatch(r"[1-9][0-9]{16,19}", value or ""):
         raise SystemExit(f"Refusing: {value!r} is not a Discord id.")
     return value
 
@@ -123,16 +124,18 @@ def guard_channel(cid):
         return
     owners = _owners()
     recips = {str((r or {}).get("id")) for r in ch.get("recipients") or []}
-    if ch.get("type") == 1 and owners is not None \
+    # A DM with someone else is not an owner's; one with no recipients
+    # listed is guarded (failing closed).
+    if ch.get("type") == 1 and owners is not None and recips \
             and not recips & owners:
-        return   # a DM with someone else: not an owner's
+        return
     mid, got = BINDING["for"], BINDING["nonce"]
     if not mid or not got:
         raise SystemExit(
             f"Refusing: {cid} is an owner's DM. Only a run handed that DM "
             f"may act there: put --for <its message_id> --nonce <its "
             f"owner_dm_nonce> before the subcommand.")
-    if not re.fullmatch(r"[0-9]{17,20}", mid):
+    if not re.fullmatch(r"[1-9][0-9]{16,19}", mid):
         raise SystemExit(f"Refusing: --for {mid!r} is not a Discord id.")
     want = _live_nonce(mid)
     if not want or not hmac.compare_digest(

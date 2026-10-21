@@ -144,8 +144,9 @@ Monitor-side guarantees on send:
   after every rewrite. Sends allow only user mentions and the reply
   ping (`allowed_mentions`): role, `@everyone` and `@here` pings
   never go out.
-- **Ids**: an item whose `channel_id` or `reply_to` is not a plain
-  Discord id is dropped (they become API paths).
+- **Ids**: an item whose `channel_id`, `reply_to` or `item` is not a
+  plain Discord id (ASCII digits, no leading zero) is rejected as
+  above (they become API paths, and are compared as strings).
 - **Sends never duplicate**: every message part carries a nonce derived
   from the reply, with Discord's `enforce_nonce`, so a retry after an
   ambiguous failure (a timeout after Discord already created the
@@ -211,7 +212,8 @@ the run that was handed them:
   author became an owner has no nonce and still answers there.)
 - Anything else is refused before the dedup check and before it is
   sent or settled: set aside in `reply_outbox.rejected.json` (nonces
-  blanked) and logged (`Refused outbox item ...: owner DM <id>: bad
+  blanked; so is any nonce-like string in an outbox file that does
+  not parse) and logged (`Refused outbox item ...: owner DM <id>: bad
   nonce (...)`), and the DM stays open for the run that holds it. So
   another run can neither answer the owner in the bot's name, nor
   silence the DM (a `silent` item, a reply under one of its
@@ -226,7 +228,23 @@ the run that was handed them:
   run gets the new nonce. An outbox item written by a worker on an
   older prompt (no nonce) is refused like a forgery, and the DM waits
   for a worker on the current prompt.
-- The wake hook counts an outbox entry as answering an owner's DM only
+- A burst fragment of a queued owner DM is that DM, however it is
+  found: the burst aliases, the queue's `burst_fragments`, or the
+  fragment ids kept with the DM's nonce (so it holds after the bounded
+  aliases have moved on, or `state.json` was lost).
+- An item that touches no owner DM goes out in a server channel the
+  bot reads, in the channel of the queued item it answers, or in a
+  known DM that is not an owner's. Any other channel is looked up
+  first (the monitor's records of the owners' DM channels are best
+  effort): an owner's DM (or a DM listing no recipients) is refused as
+  above, and so is a channel that cannot be looked up.
+- Ids are taken in one form only: ASCII digits with no leading zero
+  (the monitor compares them as strings), so `"0"` + an id is refused,
+  not sent.
+- The wake hook reads the queue before the nonces (the monitor writes
+  a DM's nonce before it queues the DM), never hands out or leases an
+  owner DM that has no nonce yet (it waits for the next run, a few
+  seconds), and counts an outbox entry as answering an owner's DM only
   when it carries that DM's nonce, so forged entries never keep the DM
   from its own run.
 - `bin/discord-api.py` refuses every subcommand on an owner's DM

@@ -475,6 +475,9 @@ class SendDeletedReplyTarget(unittest.TestCase):
         _isolate_outbox(mod)
         st = new_state(mod)
         cid, rid = sf(), sf(5)
+        # A server channel the bot reads (the owner-DM gate looks up any
+        # channel it cannot place).
+        mod.CHANNELS[cid] = {"name": "general", "guild_id": sf()}
         with open(mod.OUTBOX_FILE, "w") as f:
             json.dump([{"item": rid, "channel_id": cid, "reply_to": rid,
                         "text": "hello", "reactions": ["\U0001f44d"],

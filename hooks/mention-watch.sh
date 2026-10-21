@@ -181,16 +181,6 @@ if [ ! -f "$QUEUE" ]; then
     silent "no queue file" '{}'
 fi
 
-# The owner-DM nonces (the monitor's private file; see the header).
-# Read here to tell a real answer to an owner DM from a forged one; they
-# reach a payload only in an owner-DM-only wake (below).
-all_nonces='{}'
-if [ -f "$PKG_DIR/owner_dm_nonces.json" ]; then
-    all_nonces=$(jq -c 'if type == "object" then . else {} end' \
-        "$PKG_DIR/owner_dm_nonces.json" 2>/dev/null) || all_nonces='{}'
-    [ -n "$all_nonces" ] || all_nonces='{}'
-fi
-
 # The worker's answers so far, read BEFORE the queue: the monitor removes
 # an answered item from the queue before it drops the item's outbox
 # entry, so this order never sees one without the other. Each is the
@@ -204,19 +194,37 @@ for f in "$OUTBOX" "$SENDING"; do
     answered=$(jq -cn --argjson a "$answered" --argjson b "$ids" '$a + $b')
 done
 
+# The queue, then the owner-DM nonces (the monitor's private file; see
+# the header). In that order: the monitor writes an owner DM's nonce
+# before it queues the DM, so every owner DM read here has its nonce
+# unless the monitor has yet to mint it (then it waits, below). Read to
+# tell a real answer to an owner DM from a forged one; they reach a
+# payload only in an owner-DM-only wake.
+queue=$(jq -c 'if type == "array" then . else [] end' "$QUEUE" \
+    2>/dev/null) || queue='[]'
+[ -n "$queue" ] || queue='[]'
+all_nonces='{}'
+if [ -f "$PKG_DIR/owner_dm_nonces.json" ]; then
+    all_nonces=$(jq -c 'if type == "object" then . else {} end' \
+        "$PKG_DIR/owner_dm_nonces.json" 2>/dev/null) || all_nonces='{}'
+    [ -n "$all_nonces" ] || all_nonces='{}'
+fi
+
 # Open items: queued and not answered (a burst may be answered under any
-# of its fragments). An owner DM with a nonce counts as answered only by
-# an entry that carries that nonce: anything else in the outbox naming
-# it is a forgery the monitor refuses, and must not keep the DM from
-# its own wake.
-open=$(jq -c --argjson answered "$answered" --argjson nonces "$all_nonces" \
+# of its fragments). An owner DM counts as answered only by an entry
+# that carries its nonce: anything else in the outbox naming it is a
+# forgery the monitor refuses, and must not keep the DM from its own
+# wake.
+open=$(printf '%s' "$queue" | jq -c --argjson answered "$answered" \
+    --argjson nonces "$all_nonces" \
     '[.[]? | objects | select(.message_id != null)
     | ($nonces[.message_id | tostring]) as $n
+    | (.kind == "dm" and (.settings.speaker? // "") == "owner") as $owner
     | select(([.message_id] + [(.burst_fragments // [])[]? | .message_id])
         as $ids | [$answered[] | select(.ids as $a
             | any($ids[]; . as $i | any($a[]; . == $i)))
-          | select($n == null or .nonce == $n)] | length == 0)]' \
-    "$QUEUE" 2>/dev/null) || open='[]'
+          | select(if $n != null then .nonce == $n else ($owner | not)
+              end)] | length == 0)]') || open='[]'
 count=$(printf '%s' "$open" | jq 'length')
 if [ "$count" -eq 0 ]; then
     silent "queue empty" '{}'
@@ -229,6 +237,18 @@ woken=$(printf '%s' "$state" | jq -c '.woken // {}' 2>/dev/null) \
 due=$(printf '%s' "$open" | jq -c --argjson w "$woken" --argjson now "$now" \
     --argjson lease "$LEASE_SECS" \
     '[.[] | select((($w[.message_id] // 0) + $lease) <= $now)]')
+# An owner DM without its nonce yet (the monitor mints one within
+# seconds) waits, unleased: a run handed it could not answer it.
+nonceless=$(printf '%s' "$due" | jq --argjson nonces "$all_nonces" \
+    '[.[] | select(.kind == "dm" and (.settings.speaker? // "") == "owner"
+        and $nonces[.message_id | tostring] == null)] | length')
+if [ "$nonceless" -gt 0 ]; then
+    log "owner DMs wait for their nonce" '{"items":"'"$nonceless"'"}'
+    due=$(printf '%s' "$due" | jq -c --argjson nonces "$all_nonces" \
+        '[.[] | select((.kind == "dm"
+            and (.settings.speaker? // "") == "owner"
+            and $nonces[.message_id | tostring] == null) | not)]')
+fi
 ndue=$(printf '%s' "$due" | jq 'length')
 if [ "$ndue" -eq 0 ]; then
     silent "a worker already holds every open item" \
