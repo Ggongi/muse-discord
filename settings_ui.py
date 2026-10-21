@@ -1575,6 +1575,8 @@ def explain_outcome(R, o):
     text = {
         "quarantined": "I held it for your review; look for my DM.",
         "predates-join": "It was sent before I joined.",
+        "ownerless": "None of my owners is in this server, so I answer "
+                     "nobody here. An owner must turn replies on here.",
         "no-send": f"I can't send messages in {where}; fix it in "
                    f"Discord's channel permissions.",
         "internal": "I hit an internal error; see monitor.log.",
