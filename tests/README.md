@@ -63,6 +63,11 @@ them.
 | `presencelive` | `presence.py` following settings changes live on the open gateway session: one Presence Update per change, clearing, rate limiting, invalid edits, disabling, resumes, heartbeats. |
 | `settingsnl` | Settings requests (`settings_nl.py`): who may change settings by DM (owners' own DMs only, from the monitor's own records; forged, replayed, forwarded and stale actions refused), meaning failures (all or nothing), apply / confirm / Apply / Cancel / expiry / stale cards / Undo, the lockout guard, retries and restarts, notices for `bin/settings.py` changes, the owner alert, the card's places and `directory.json`; the wake hook's owner-DM isolation, `bin/outbox-append.py`'s shape checks and `bin/settings.py places`. |
 | `monitorfixes` | Daily-cap refusals dropped at once; declined direct messages ledgered as skipped; new threads seeded at their own id; Discord system notices (pins, thread starts) never trigger. |
+| `settingspreview` | `dev/settings-preview/serve.py`, the local `/settings` design preview: serves its page, answers `/settings`, clicks, selects (with resolved users), modals and their submits, **Why no reply?** and the join notice's Configure as `settings_ui` would in Discord, for owners, server admins, members and in DMs; local requests only; picks up edits to `settings_ui.py` without a restart and reports one that doesn't import. |
+
+To see the `/settings` pages as Discord draws them and click through
+them without a bot, run `python3 dev/settings-preview/serve.py` (see
+`dev/settings-preview/README.md`); it uses the `settingsui` fixtures.
 
 The slow suites are marked by a `SLOW` file in their directory (its
 text says why). They take 50 s to 2 min each, the rest a few seconds;
