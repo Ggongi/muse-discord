@@ -33,11 +33,14 @@ in at a few points; everything else is here:
   wake hook hands a proactive item out alone (never with anyone's
   message) and only that wake gets the nonce, as for an owner's DM.
 
-The binding, in one shape that reminders and watches share in spirit (a
-monitor-initiated queue item of its own kind, plus the places its reply
-may go): slot = {"id", "kind": "proactive", "nonce", "at", "expires",
-"targets": {channel_id: {"type", "user_id"}}, "max_posts", "posts",
-"spent"}. The worker cannot add a target, so nothing it read (other
+The binding: like a reminder or watch fire, a slot is an item the
+monitor starts (its own kind, an id from monitor.started_item_id), plus
+the places its reply may go; monitor.bind_started binds both, before the
+owner-DM gate. slot = {"id", "kind": "proactive", "nonce", "at",
+"expires", "targets": {channel_id: {"type", "user_id"}}, "max_posts",
+"posts", "spent"}. Unlike a fire's reply, a slot's post is sent here
+(through monitor.send_fragmented, pinging at most its one person) and
+never written to the mention ledger. The worker cannot add a target, so nothing it read (other
 people's messages, its memory) can steer an unprompted message to
 anyone else, and the caps bound the rest.
 
@@ -98,14 +101,6 @@ def snowflake_ts(mid):
         return ((int(mid) >> 22) + 1420070400000) / 1000.0
     except (TypeError, ValueError):
         return 0.0
-
-
-def new_slot_id(now):
-    """A queue-item id for a slot: a snowflake for now (it sorts and reads
-    like a message id and passes the outbox's id checks) whose low bits
-    are random, so it never names a real message."""
-    ms = int(now * 1000) - 1420070400000
-    return str((ms << 22) | secrets.randbits(22) | 1)
 
 
 # -- time ---------------------------------------------------------------------
@@ -265,9 +260,23 @@ class Proactive:
     def every(self, key):
         return self.st().get(key, self.m.MS.Scope.everywhere())
 
-    def quiet_now(self, now):
+    def tz_of(self, uid=None):
+        """A person's own time zone when they gave one (reminders and
+        watches: "my time zone is ..."), else proactive.timezone."""
+        if uid:
+            try:
+                tz = self.m.watch_store().read()["tz"].get(str(uid))
+                if tz:
+                    return tz
+            except Exception:
+                pass
+        return self.every("proactive.timezone")
+
+    def quiet_now(self, now, uid=None):
+        """Quiet hours now: in the person's own time zone (uid) when
+        known, else in proactive.timezone."""
         return in_quiet(now, parse_hours(self.every("proactive.quiet_hours")),
-                        zone(self.every("proactive.timezone")))
+                        zone(self.tz_of(uid)))
 
     def enabled_anywhere(self):
         st, MS = self.st(), self.m.MS
@@ -500,7 +509,7 @@ class Proactive:
 
     def target_problem(self, state, t, now):
         """Why target t (a slot's binding entry) is not eligible now."""
-        if self.quiet_now(now):
+        if self.quiet_now(now, t.get("user_id")):
             return "quiet hours"
         st, MS = self.st(), self.m.MS
         if t["type"] == "channel":
@@ -613,7 +622,10 @@ class Proactive:
             if p.get("last_mid"):
                 e = m._ledger_load()["entries"].get(p["last_mid"]) or {}
                 outcome = e.get("code")
+            tz = self.tz_of(uid)
             out.update(user_id=uid, name=name, owner=t["type"] == "owner",
+                       local_time=datetime.fromtimestamp(now, zone(tz))
+                       .strftime("%A %H:%M"), timezone=tz,
                        where=f"DM with {name}",
                        last_from_them=iso(last_them),
                        last_from_you=iso(last_you),
@@ -625,7 +637,7 @@ class Proactive:
 
     def make_slot(self, state, targets, now):
         d = self.data()
-        sid = new_slot_id(now)
+        sid = self.m.started_item_id(now)   # the fires' id scheme
         slot = {"id": sid, "kind": KIND, "nonce": secrets.token_hex(16),
                 "at": now, "expires": now + SLOT_SECS,
                 "max_posts": MAX_PER_SLOT, "spent": False, "posts": {},
@@ -725,8 +737,9 @@ class Proactive:
             elif self.blocked():
                 print("Heartbeat skipped: a bad proactive.json is set aside "
                       "(PROTOCOL.md, proactive.json).", flush=True)
-            elif self.enabled_anywhere() and not self.quiet_now(now) \
+            elif self.enabled_anywhere() \
                     and self.sent_total(now) < self.total_cap():
+                # (Quiet hours are per target: a person's own time zone.)
                 targets = self.pick_side(self.eligible(state, now))
                 if targets:
                     self.make_slot(state, targets, now)
@@ -853,18 +866,11 @@ class Proactive:
         if t.get("user_id"):
             mentions["users"] = [t["user_id"]]
         parts = post["parts"]
-        msgs = []
         try:
-            for i, part in enumerate(parts):
-                if i:
-                    self.m.send_typing(cid)
-                    time.sleep(self.rng.uniform(1.0, 2.0))
-                got = self.m.api_post(f"/channels/{cid}/messages", {
-                    "content": part, "allowed_mentions": mentions,
-                    "nonce": self.m.send_nonce(cid, sid, parts, i),
-                    "enforce_nonce": True})
-                if isinstance(got, dict) and got.get("id"):
-                    msgs.append(str(got["id"]))
+            # The monitor's one send path (plain messages: no reply_to),
+            # each part's Discord nonce seeded with the slot id.
+            msgs = self.m.send_fragmented(cid, parts, None, (),
+                                          mentions=mentions, nonce_key=sid)
         except Exception as e:
             code = getattr(e, "code", None)
             post["n"] = post.get("n", 0) + 1
@@ -909,14 +915,14 @@ class Proactive:
         if v not in OPT_VALUES:
             return f"{FIELD}: expected \"opt-out\" or \"opt-in\""
         qid = str(item.get("item") or "")
-        meta = (state.get("item_meta") or {}).get(qid)
+        index = index or {"frags": {}, "channels": {}}
+        if qid not in index["channels"]:
+            return f"{FIELD}: that message is no longer waiting for a reply"
+        meta = self.m.queued_item_meta(state, qid, index)
         if not isinstance(meta, dict) or meta.get("bot") \
                 or meta.get("kind") not in TEXT_KINDS:
             return (f"{FIELD}: goes on the reply to the person's own "
                     f"message (item: its message_id)")
-        index = index or {"frags": {}, "channels": {}}
-        if qid not in index["channels"]:
-            return f"{FIELD}: that message is no longer waiting for a reply"
         if str(item.get("channel_id")) != str(meta.get("channel_id")) \
                 or index["channels"].get(qid) != str(meta.get("channel_id")):
             return f"{FIELD}: channel_id must be that message's channel"

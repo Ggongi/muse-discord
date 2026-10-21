@@ -4267,29 +4267,38 @@ def normalize_parts(item):
 
 
 def send_fragmented(channel_id, parts, reply_to=None, attachments=(),
-                    mentions=None):
+                    mentions=None, nonce_key=None):
     """Send a reply as sequential messages, like a person thinking aloud.
 
     The first part is threaded under reply_to; follow-ups go out as plain
     messages with a typing beat between them. Attachments ride on the last
     part. Raises on the first failure; the caller retries the whole
     reply, and each part's nonce makes Discord return the parts that
-    already landed instead of posting them again.
+    already landed instead of posting them again. mentions: what the
+    parts may ping (default SEND_ALLOWED_MENTIONS); nonce_key: what the
+    nonces derive from besides the text, when not reply_to (a heartbeat
+    slot's id: its posts reply to nothing). Returns the sent messages'
+    ids.
     """
     last_idx = len(parts) - 1
+    sent = []
     for i, part in enumerate(parts):
         if i > 0:
             send_typing(channel_id)
             time.sleep(random.uniform(2.0, 4.0))
-        nonce = send_nonce(channel_id, reply_to, parts, i)
+        nonce = send_nonce(channel_id, nonce_key or reply_to, parts, i)
         kw = {"mentions": mentions} if mentions else {}
         if i == last_idx and attachments:
-            send_reply_with_files(channel_id, part, attachments,
-                                  reply_to if i == 0 else None, nonce, **kw)
+            got = send_reply_with_files(channel_id, part, attachments,
+                                        reply_to if i == 0 else None, nonce,
+                                        **kw)
         elif i == 0:
-            send_reply(channel_id, part, reply_to, nonce, **kw)
+            got = send_reply(channel_id, part, reply_to, nonce, **kw)
         else:
-            send_reply(channel_id, part, nonce=nonce, **kw)
+            got = send_reply(channel_id, part, nonce=nonce, **kw)
+        if isinstance(got, dict) and got.get("id"):
+            sent.append(str(got["id"]))
+    return sent
 
 
 ATTACH_CTYPES = {
@@ -5396,6 +5405,32 @@ def settings_card(scope, here, author_id, from_bot, channel_id,
         card["bot_exchange"] = {"count": exchange + 1,
                                 "limit": here["who.bot_exchange_limit"]}
     return card
+
+
+def queued_item_meta(state, qid, index):
+    """Who and where a still-queued item answers (author_id, author,
+    channel_id, kind, dm, bot, guild_id): its item_meta record, else
+    (state.json lost) the queue file's own entry, which only the monitor
+    writes. None when it is not in the queue (index: queue_index()).
+    A schedule action and a "stop messaging me" both bind to it."""
+    if qid not in index["channels"]:
+        return None
+    meta = (state.get("item_meta") or {}).get(qid)
+    if isinstance(meta, dict):
+        return meta
+    q = next((q for q in load_queue() if isinstance(q, dict)
+              and str(q.get("message_id")) == qid), {})
+    return {"author_id": q.get("author_id"), "author": q.get("author"),
+            "channel_id": q.get("channel_id"), "kind": q.get("kind"),
+            "dm": q.get("kind") == "dm", "bot": bool(q.get("from_bot")),
+            "guild_id": q.get("guild_id")}
+
+
+def started_item_id(now=None):
+    """The queue id of an item the monitor starts (a reminder or watch
+    fire, a heartbeat slot): a snowflake for now with random low bits,
+    so it passes every id check and never names a real message."""
+    return W.new_fire_id(now)
 
 
 def note_item_meta(state, mid, **meta):
@@ -6680,16 +6715,7 @@ def _watch_schedule(state, item, index):
     prev = store.read()["done"].get(qid)
     if prev is not None:
         return _watch_outcome(prev)
-    meta = (state.get("item_meta") or {}).get(qid)
-    if not isinstance(meta, dict) and qid in index["channels"]:
-        # No record (state.json lost): the queue file, which only the
-        # monitor writes, says who and where.
-        q = next((q for q in load_queue() if isinstance(q, dict)
-                  and str(q.get("message_id")) == qid), {})
-        meta = {"author_id": q.get("author_id"), "author": q.get("author"),
-                "channel_id": q.get("channel_id"), "kind": q.get("kind"),
-                "dm": q.get("kind") == "dm", "bot": bool(q.get("from_bot")),
-                "guild_id": q.get("guild_id")}
+    meta = queued_item_meta(state, qid, index)
     if not isinstance(meta, dict) or qid not in index["channels"] \
             or meta.get("kind") not in ("mention", "dm"):
         return ("reject", "schedule: item must be an open queue item from "
@@ -7057,7 +7083,7 @@ def _watch_fire_group(state, data, uid, cid, es, now, kind, verdicts,
     r0 = es[0][0]
     gid, dm = r0.get("guild_id"), bool(r0.get("dm"))
     name = r0.get("name") or uid
-    fid = fid or W.new_fire_id(now)
+    fid = fid or started_item_id(now)
     key = (uid, cid, gid, dm)
     if key not in verdicts:
         _watch_hold(data, fid, uid, cid, es, kind, now, now, held,

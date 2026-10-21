@@ -384,6 +384,19 @@ class Posting(Base):
         self.m.PRO.data()["slot"] = None
         self.assertIsNone(self.heartbeat())
 
+    def test_quiet_hours_in_a_persons_own_time_zone(self):
+        """A person who told the bot their time zone (reminders and
+        watches) gets quiet hours there; everyone else, in
+        proactive.timezone (UTC here)."""
+        h = time.gmtime(self.now).tm_hour
+        hours = "%02d:00-%02d:00" % ((h + 6) % 24, (h + 8) % 24)
+        self.m.PRO.every = lambda key, _e=self.m.PRO.every: (
+            hours if key == "proactive.quiet_hours" else _e(key))
+        with self.m.watch_store().edit() as d:
+            d["tz"][U1] = "Etc/GMT-6"            # UTC+6: night for U1
+        slot = self.next_slot("private", 0)
+        self.assertEqual(self.targets(slot), {OWNER_DM}, self.out)
+
     def test_slot_cannot_touch_anything_else(self):
         """The slot's item may not reply under, react to, or act on a
         message, nor carry a settings or opt-out action."""
@@ -639,6 +652,16 @@ class Hook(unittest.TestCase):
         p = wake()
         self.assertEqual([i["message_id"] for i in p["items"]], ["5"])
         self.assertNotIn(nonce, json.dumps(p))
+        # Never in one run with the bot's notices to an owner (a reminder
+        # firing in their DM): the slot alone first, then the notice.
+        os.remove(env["HOOK_STATE"])
+        notice = {"message_id": "3", "kind": "reminder", "channel_id": "8",
+                  "settings": {"where": "dm", "speaker": "owner"}}
+        write("owner_dm_nonces.json", {"3": odm})
+        write("reply_queue.json", [notice, slot])
+        self.assertEqual([i["message_id"] for i in wake()["items"]], ["7"])
+        self.assertEqual([(i["message_id"], i.get("owner_dm_nonce"))
+                          for i in wake()["items"]], [("3", odm)])
         # A forged answer (no nonce) does not hide the slot from its wake.
         os.remove(env["HOOK_STATE"])
         write("reply_queue.json", [slot])

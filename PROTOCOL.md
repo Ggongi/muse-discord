@@ -484,8 +484,11 @@ target at send time; nothing the worker writes adds a target.
   video: all servers, a server, a channel or category), `who.replies`
   not off or paused there, and a server with an owner in it (never an
   ownerless server, nor one whose owner check is pending).
-- Never in quiet hours (`proactive.quiet_hours`, default `22:00-09:00`,
-  in `proactive.timezone`, default `UTC`; `off` = none).
+- Never in quiet hours (`proactive.quiet_hours`, default `22:00-09:00`;
+  `off` = none): for a person, in their own time zone when they gave
+  one (the reminders' `tz`, Reminders and watches), else, and for
+  channels, in `proactive.timezone` (default `UTC`). A person target
+  carries its `local_time` and `timezone`.
 - Never into a conversation: no target whose channel (or, for a
   person, their DM or their latest message anywhere) had a person's
   message in the last 30 minutes, no channel where the bot spoke after
@@ -520,8 +523,11 @@ true, "owner_dm_nonce": "..."}`. All of a slot's items go in one
 append.
 
 An outbox item whose `item` (or `reply_to`) names a slot, live or
-spent, is decided by `proactive.py` before anything else (before the
-owner-DM gate), and never reaches the ordinary send path:
+spent, is decided by `proactive.py` in the monitor's binding step for
+items it started (`bind_started`, after a fire's `watch_bind`, before
+the owner-DM gate), and never reaches the ordinary send path (it is
+sent there, through the one `send_fragmented`, the nonce of each part
+seeded with the slot id):
 
 - `item` must be the slot's id; it carries no `reply_to`,
   `reactions`, `attachments`, `settings`, `schedule` or `proactive`.
@@ -863,7 +869,16 @@ looks at it (`watch_bind`):
 
 This path is generic: a fire is a queue item kind plus a binding (the
 person it answers, the place, the messages it may thread under). Other
-monitor-started items can use it.
+monitor-started items use it too: a heartbeat slot (`kind:
+"proactive"`, Unprompted messages) is a queue item kind plus a binding
+(its targets, its nonce, its caps). Every item the monitor starts gets
+its id from one helper (`started_item_id`: a snowflake for now with
+random low bits), and one step, `bind_started`, binds an outbox item
+naming a fire or a slot before the owner-DM gate. Their sends ping one
+person at most (`send_fragmented` with `mentions`). The ledger: a
+fire's reply is ledgered under the fire's id (it counts toward the
+limits) and **Why no reply?** leaves fires out; a slot's post is never
+in the ledger (its own record, `proactive.json`, carries the caps).
 
 ### Discord watches
 

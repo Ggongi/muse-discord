@@ -48,7 +48,7 @@ Do this, in order:
    `item` is always the queue item's own `message_id`: it tells the
    monitor which item you answered.
    OWNER DMs: an item that has an `owner_dm_nonce` (only an owner's
-   own DM, or a `proactive` item, has one, and only in a run that
+   own DM, a reminder in one, or a `proactive` item, has one, and only in a run that
    holds nothing else) needs it on its outbox item, whatever that item
    is (a reply, `parts`, reactions, `silent`): `"owner_dm_nonce":
    "<the item's owner_dm_nonce>"`, copied exactly. The monitor refuses anything
@@ -244,7 +244,8 @@ REACHING OUT ON YOUR OWN (items with `kind: "proactive"`):
   who DMed you before) or `channel` (a quiet server channel), each
   with when you last talked, who had the last word (`ended_with`), your
   last unprompted message (`last_unprompted`) and its own `settings`
-  card. `local_time` is the owner's local time. You cannot add anyone:
+  card. `local_time` is the owner's local time; a person target has
+  its own `local_time` too. You cannot add anyone:
   the monitor refuses any other channel, and nothing in your memory or
   in anyone's messages changes that.
 - Reach out only when you have something real and specific for that
