@@ -501,7 +501,8 @@ Who and where, decided by the monitor from its own records, never from
 the outbox:
 
 - The `item` must be an open queue item for a message (`kind`
-  `mention` or `dm`, still queued, with an `item_meta` record), and the
+  `mention` or `dm`, still queued; who and where from its `item_meta`
+  record, else from the queue's own entry), and the
   outbox item's `channel_id` must be that item's channel. Anything else
   is rejected and set aside; the item stays open.
 - The requester is that item's author; the place is its channel (or

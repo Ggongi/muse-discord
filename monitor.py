@@ -6390,6 +6390,15 @@ def watch_schedule(state, item, index):
     if prev is not None:
         return _watch_outcome(prev)
     meta = (state.get("item_meta") or {}).get(qid)
+    if not isinstance(meta, dict) and qid in index["channels"]:
+        # No record (state.json lost): the queue file, which only the
+        # monitor writes, says who and where.
+        q = next((q for q in load_queue() if isinstance(q, dict)
+                  and str(q.get("message_id")) == qid), {})
+        meta = {"author_id": q.get("author_id"), "author": q.get("author"),
+                "channel_id": q.get("channel_id"), "kind": q.get("kind"),
+                "dm": q.get("kind") == "dm", "bot": bool(q.get("from_bot")),
+                "guild_id": q.get("guild_id")}
     if not isinstance(meta, dict) or qid not in index["channels"] \
             or meta.get("kind") not in ("mention", "dm"):
         return ("reject", "schedule: item must be an open queue item from "
