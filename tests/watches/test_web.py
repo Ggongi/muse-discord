@@ -32,9 +32,12 @@ class Web(tw.Base):
     def web(self, uid=OWNER, what="tickets for the Blue Pelican on sale",
             every=3600, repeat=False):
         msg, _ = self.ask(uid)
+        n = (self.st.get("web_nonces") or {}).get(msg["id"])
+        extra = {"web_nonce": n["nonce"]} if n else {}   # its solo wake
         self.outbox(self.reply(msg, [{"op": "add", "kind": "watch",
                                       "check": "web", "what": what,
-                                      "every": every, "repeat": repeat}]))
+                                      "every": every, "repeat": repeat}],
+                               **extra))
         return msg
 
     def due(self):
@@ -163,9 +166,12 @@ class CheckerHook(unittest.TestCase):
                         HOOK_STATE=os.path.join(d, "hookstate.json"),
                         MUSE_DISCORD_DIR=self.pkg)
 
-    def entry(self, i, what="the show is sold out"):
-        return {"id": i, "key": f"{i}:1", "nonce": i[1:] * 6 + "ab",
-                "what": what, "expires": "2026-10-21T21:00:00Z"}
+    def entry(self, i, what="the show is sold out", group=None):
+        e = {"id": i, "key": f"{i}:1", "nonce": i[1:] * 6 + "ab",
+             "what": what, "expires": "2026-10-21T21:00:00Z"}
+        if group:
+            e["group"] = group
+        return e
 
     def due(self, entries):
         with open(os.path.join(self.pkg, "web_watches_due.json"), "w") as f:
@@ -204,6 +210,46 @@ class CheckerHook(unittest.TestCase):
         prompt = self.wake()                         # only the new one
         self.assertIn("wfghjk", prompt)
         self.assertNotIn("wabcde", prompt)
+
+    def test_one_requester_per_checker_run(self):
+        self.due([self.entry("wabcde", group="g1"),
+                  self.entry("wfghjk", group="g2"),
+                  self.entry("wmnpqr", group="g1")])
+        first = self.wake()
+        self.assertIn("wabcde", first)
+        self.assertIn("wmnpqr", first)                # same requester
+        self.assertNotIn("wfghjk", first)
+        self.assertNotIn("fghjk" * 6, first)          # nor their nonce
+        self.assertIn("wfghjk", self.wake())          # the next run
+
+    def test_report_summary_on_stdin(self):
+        tool = os.path.join(self.pkg, "bin", "watch-report.py")
+        e = self.entry("wabcde")
+        self.due([e])
+        r = subprocess.run([sys.executable, tool, "wabcde", e["nonce"],
+                            "met", "--stdin"], input="on sale; $(rm -rf ~)\n",
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(self.pkg, "web_watch_results.json")) as f:
+            self.assertEqual(json.load(f)[0]["summary"],
+                             "on sale; $(rm -rf ~)")       # data, as is
+
+    def test_mention_hook_wakes_a_web_capable_item_alone(self):
+        q = [{"message_id": "6", "channel_id": CH, "kind": "mention",
+              "settings": {"where": "server", "speaker": "member"}},
+             {"message_id": "5", "channel_id": CH, "kind": "mention",
+              "settings": {"where": "server", "speaker": "owner"}}]
+        for name, data in (("reply_queue.json", q),
+                           ("web_nonces.json", {"5": "c" * 32})):
+            with open(os.path.join(self.pkg, name), "w") as f:
+                json.dump(data, f)
+        r = subprocess.run(["bash", os.path.join(self.pkg, "hooks",
+                                                 "mention-watch.sh")],
+                           env=self.env, capture_output=True, text=True,
+                           timeout=30)
+        items = json.loads(r.stdout.splitlines()[1])["items"]
+        self.assertEqual([i["message_id"] for i in items], ["5"])
+        self.assertEqual(items[0]["web_nonce"], "c" * 32)
 
     def test_report_tool_needs_a_live_check(self):
         tool = os.path.join(self.pkg, "bin", "watch-report.py")

@@ -227,15 +227,18 @@ def persona_file(pkg, override=None):
     return os.path.join(pkg, os.path.expanduser(name or "persona.md"))
 
 
-def build_payload(items, persona, nonces=None):
+def build_payload(items, persona, nonces=None, web=None):
     """The wake payload: {count, persona, items} with the hook's fields,
     plus owner_dm_nonce on the items `nonces` has one for (the caller
-    passes nonces only for a wake of owner DMs alone)."""
+    passes nonces only for a wake of owner DMs alone), and web_nonce on
+    those `web` has one for (only for a wake of that item alone)."""
     out = []
     for item in items:
         p = {k: item.get(k) for k in PAYLOAD_FIELDS}
         if (nonces or {}).get(str(item.get("message_id"))):
             p["owner_dm_nonce"] = nonces[str(item["message_id"])]
+        if (web or {}).get(str(item.get("message_id"))):
+            p["web_nonce"] = web[str(item["message_id"])]
         out.append(p)
     return {"count": len(items), "persona": persona, "items": out}
 
@@ -485,6 +488,16 @@ class Worker:
                 owner = [i for i in owner if i.get("kind") == "dm"]
             if owner:
                 due = owner
+            self.wake_web = {}
+            if not owner:
+                # An item holding a web watch capability wakes alone
+                # (the hook's rule), with its web_nonce.
+                web = read_json(os.path.join(self.pkg, "web_nonces.json"),
+                                {}) or {}
+                solo = [i for i in due if str(i["message_id"]) in web][:1]
+                if solo:
+                    due = solo
+                    self.wake_web = web
             expired = [i for i in due if i["message_id"] in self.leases]
             for i in due:
                 self.leases[i["message_id"]] = now
@@ -526,7 +539,8 @@ class Worker:
                 persona = f.read()
         except OSError:
             persona = None  # the worker then reads the file itself
-        prompt = wake_prompt(rendered, build_payload(items, persona, nonces))
+        prompt = wake_prompt(rendered, build_payload(
+            items, persona, nonces, getattr(self, "wake_web", None)))
         args = worker_args(self.pkg, self.persona)
         self.log("wake %d: start items=%s" % (n, ids))
         start = time.monotonic()

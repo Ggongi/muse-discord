@@ -1316,7 +1316,7 @@ _LEDGER_CODES = (
     # Reminders and watches (muse_watches.REASON_*): a request refused.
     ("reminders: limit reached", "watch-cap"),
     ("reminders: not allowed", "watch-not-allowed"),
-    ("reminder held: daily cap reached", "watch-held"),
+    ("reminder held", "watch-held"),
 )
 
 
@@ -3270,6 +3270,8 @@ def redact_nonces(item):
     out = dict(item)
     if OWNER_DM_NONCE_FIELD in out:
         out[OWNER_DM_NONCE_FIELD] = "(redacted)"
+    if "web_nonce" in out:
+        out["web_nonce"] = "(redacted)"
     if isinstance(out.get("settings"), dict) \
             and "nonce" in out["settings"]:
         out["settings"] = dict(out["settings"], nonce="(redacted)")
@@ -5574,6 +5576,11 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     # set one here (abilities.reminders).
     item["watches"] = watch_card(author_id, guild_id, dm, from_bot, here,
                                  author_matches)
+    if item["watches"].get("can_web") \
+            and not (dm and str(author_id) in OWNER_USER_IDS):
+        # Who may set web watches is woken alone with this capability,
+        # so nobody else's text shares that run (watch_web_nonce).
+        watch_mint_web_nonce(state, msg["id"])
     queue.append(item)
     burst_note = f" (+{len(fragments)} fragment(s))" if fragments else ""
     # An owner's own DM: every outbox item that answers it, settles it
@@ -5816,6 +5823,58 @@ def _log_latency(state, qid, picked, sent):
 # minutes, and past that a retry of a send that actually landed would
 # post it twice.
 SEND_RETRY_SECS = 90
+# A poison outbox item: one whose processing raises (a bug) would stay in
+# reply_outbox.processing.json and stop every later pass at the same
+# place, so no reply would ever go out again. outbox_pass counts the
+# failures per item and sets one aside after OUTBOX_POISON_TRIES.
+OUTBOX_POISON_TRIES = 3
+_OUTBOX_CURRENT = {"key": None}
+_OUTBOX_POISON = {}
+
+
+def _outbox_key(item):
+    try:
+        return hashlib.sha256(json.dumps(item, sort_keys=True,
+                                         default=str).encode()).hexdigest()
+    except Exception:
+        return None
+
+
+def outbox_pass(state):
+    """process_outbox for the main loop: when it raises while handling
+    an item, that item's failure is counted, and after
+    OUTBOX_POISON_TRIES it is taken out of the outbox files and set
+    aside in reply_outbox.rejected.json; then the error is raised on."""
+    _OUTBOX_CURRENT["key"] = None
+    try:
+        process_outbox(state)
+    except Exception as e:
+        key = _OUTBOX_CURRENT["key"]
+        _OUTBOX_CURRENT["key"] = None
+        if key:
+            n = _OUTBOX_POISON[key] = _OUTBOX_POISON.get(key, 0) + 1
+            if n >= OUTBOX_POISON_TRIES:
+                _set_aside_poison(key, e)
+        raise
+
+
+def _set_aside_poison(key, exc):
+    gone = []
+    with shared_lock():
+        for path in (OUTBOX_PROCESSING_FILE, OUTBOX_FILE):
+            items = _outbox_load(path)
+            if not items:
+                continue
+            keep = [i for i in items if _outbox_key(i) != key]
+            gone += [i for i in items if _outbox_key(i) == key]
+            if len(keep) != len(items):
+                atomic_write(path, keep)
+    _OUTBOX_POISON.pop(key, None)
+    if gone:
+        why = f"processing it failed {OUTBOX_POISON_TRIES} times " \
+              f"({exc.__class__.__name__})"
+        print(f"Set aside an outbox item: {why}.", flush=True)
+        _reject_outbox([(redact_nonces(i), why) for i in gone[:1]])
 
 
 def process_outbox(state):
@@ -5856,6 +5915,7 @@ def process_outbox(state):
     index = queue_index(state)
     frags = index["frags"]
     for item in outbox:
+        _OUTBOX_CURRENT["key"] = _outbox_key(item)  # see outbox_pass
         problem = _outbox_problem(item)
         if problem:
             where = item.get("channel_name") if isinstance(item, dict) \
@@ -5869,6 +5929,12 @@ def process_outbox(state):
         # requester, in its place, under their message: bound here, from
         # the monitor's record, whatever the item says (watch_bind).
         fire = watch_bind(item)
+        if isinstance(fire, dict) and fire.get("gone"):
+            print(f"Outbox item for reminder {fire['gone']}: it was "
+                  f"settled already; nothing sent.", flush=True)
+            # (Its ledger entry already says how it ended.)
+            settled.append({"item": fire["gone"]})
+            continue
         if isinstance(fire, str):
             print(f"Refused outbox item for "
                   f"{item.get('channel_name') or '?'}: {fire} (set aside "
@@ -6100,6 +6166,7 @@ def process_outbox(state):
                   f"nonce): {e}", flush=True)
             remaining.append(item)
 
+    _OUTBOX_CURRENT["key"] = None
     # The queue items the settled replies answer. Matched on the outbox
     # item's "item" first; an older worker's item without it matches on
     # reply_to, its burst trigger, or a burst fragment it replied under.
@@ -6116,6 +6183,10 @@ def process_outbox(state):
     for qid in done_ids & set(nonces):
         del nonces[qid]   # answered: its capability is spent
     nl_write_nonces(state)
+    web = state.get("web_nonces") or {}
+    for qid in done_ids & set(web):
+        del web[qid]      # the same for a web watch capability
+    watch_write_web_nonces(state)
 
     def answered(q):
         return q.get("message_id") in done_ids or any(
@@ -6201,18 +6272,29 @@ def watch_note_guild(gid, gobj):
                          "owner_id": str(gobj.get("owner_id") or "")}
 
 
+WATCH_MEMBER_TTL_SECS = 120   # (no member-update events without the
+WATCH_MEMBER_FAIL_SECS = 60   # privileged intent: a short cache instead)
+
+
 def watch_member_roles(gid, uid):
     """uid's role ids in guild gid, or None when they are not a member
-    (404). Raises when it cannot tell."""
+    (404). Raises when it cannot tell (a failure is remembered for
+    WATCH_MEMBER_FAIL_SECS, so a flood of checks makes no requests)."""
     key = (str(gid), str(uid))
     hit = _WATCH_MEMBERS.get(key)
-    if hit and time.time() - hit[1] < MEMBER_ROLES_TTL_SECS:
+    now = time.time()
+    if hit and hit[0] == "error" and now - hit[1] < WATCH_MEMBER_FAIL_SECS:
+        raise RuntimeError("member lookup failed recently")
+    if hit and hit[0] != "error" and now - hit[1] < WATCH_MEMBER_TTL_SECS:
         return hit[0]
+    if rest_backing_off():
+        raise RuntimeError("REST is backing off")
     try:
         m = api_get(f"/guilds/{gid}/members/{uid}")
         roles = {str(r) for r in (m or {}).get("roles") or []}
     except Exception as e:
         if getattr(e, "code", None) != 404:
+            _WATCH_MEMBERS[key] = ("error", now)
             raise
         roles = None
     _WATCH_MEMBERS[key] = (roles, time.time())
@@ -6233,6 +6315,29 @@ def _watch_channel(gid, cid):
     if chan not in _CHANNEL_OVERWRITES:
         return None
     return chan, bool(info.get("private"))
+
+
+def watch_perm_event(ev):
+    """Gateway CHANNEL_* / GUILD_ROLE_* events keep the permission data
+    watches use current between discoveries."""
+    t, d = ev.get("t"), ev.get("d") or {}
+    try:
+        if t.startswith("CHANNEL_"):
+            if d.get("id") and d.get("guild_id"):
+                _CHANNEL_OVERWRITES[str(d["id"])] = \
+                    d.get("permission_overwrites") or []
+            return
+        g = _GUILD_PERMS.get(str(d.get("guild_id")))
+        if g is None:
+            return
+        if t == "GUILD_ROLE_DELETE":
+            g["roles"].pop(str(d.get("role_id")), None)
+        else:
+            role = d.get("role") or {}
+            g["roles"][str(role.get("id"))] = int(role.get("permissions")
+                                                   or 0)
+    except (TypeError, ValueError, AttributeError) as e:
+        print(f"Permission event {t} not applied: {e}", flush=True)
 
 
 def user_channel_perms(gid, uid, cid):
@@ -6268,13 +6373,24 @@ def user_can_view(gid, uid, cid):
 
 
 def channel_public(gid, cid):
-    """Everyone in the server can read cid (fails closed)."""
+    """Everyone in the server can read cid: @everyone may view it, and
+    no role or member overwrite there denies View Channel (permissions
+    only add up, so then nobody is shut out, and any channel's audience
+    is a subset of its). Fails closed."""
     g = _GUILD_PERMS.get(gid)
     ch = _watch_channel(gid, cid)
     if not g or ch is None or ch[1]:
         return False
-    p = _channel_perms(gid, g["roles"].get(gid, 0),
-                       _CHANNEL_OVERWRITES[ch[0]], set(), member_id="-")
+    ows = _CHANNEL_OVERWRITES[ch[0]]
+    for ow in ows or []:
+        try:
+            denies = int(ow.get("deny") or 0) & PERM_VIEW_CHANNEL
+        except (TypeError, ValueError):
+            return False
+        if denies and ow.get("id") != gid:
+            return False
+    p = _channel_perms(gid, g["roles"].get(gid, 0), ows, set(),
+                       member_id="-")
     return bool(p & PERM_VIEW_CHANNEL)
 
 
@@ -6303,6 +6419,82 @@ def watch_can_web(uid, from_bot, here, matches):
         return bool(matches(here["abilities.web_watches"]))
     except Exception:
         return False
+
+
+# Web watch capability. Anyone's message can share a wake with other
+# people's, so a fooled worker could put a stranger's condition on the
+# item of someone who may set web watches (an owner in a server). Each
+# such item (not an owner's DM: its owner_dm_nonce does this already)
+# gets a random web_nonce, kept in state and web_nonces.json (mode 600,
+# read by the wake hook only), which the hook hands only to a wake that
+# holds nothing but that item; a schedule action adding a web watch must
+# echo it. Spent when the item settles.
+WEB_NONCES_FILE = os.path.join(BASE_DIR, "web_nonces.json")
+_WEB_NONCES_WRITTEN = {"body": None, "path": None}
+
+
+def watch_mint_web_nonce(state, mid):
+    n = state.setdefault("web_nonces", {})
+    n[str(mid)] = {"nonce": secrets.token_hex(16), "at": time.time()}
+    watch_write_web_nonces(state)
+
+
+def watch_write_web_nonces(state):
+    n = state.get("web_nonces") or {}
+    now = time.time()
+    for k in [k for k, v in n.items() if not isinstance(v, dict)
+              or now - v.get("at", 0) > 86400]:
+        del n[k]
+    for k in list(n)[:-300]:
+        del n[k]
+    body = {k: v["nonce"] for k, v in n.items()}
+    if body == _WEB_NONCES_WRITTEN["body"] \
+            and _WEB_NONCES_WRITTEN["path"] == WEB_NONCES_FILE:
+        return
+    if not body and not os.path.exists(WEB_NONCES_FILE):
+        _WEB_NONCES_WRITTEN.update(body=body, path=WEB_NONCES_FILE)
+        return
+    try:
+        _write_private(WEB_NONCES_FILE, body)
+        _WEB_NONCES_WRITTEN.update(body=body, path=WEB_NONCES_FILE)
+    except OSError as e:
+        print(f"Could not write web_nonces.json: {e}", flush=True)
+
+
+def watch_web_nonce_problem(state, item, qid, meta):
+    """None when a web watch may be added from this outbox item: it
+    answers an owner's own DM (owner_dm_gate checked its nonce), or it
+    carries the item's live web_nonce. Else why not."""
+    if _meta_owner_dm(meta):
+        return None
+    want = ((state.get("web_nonces") or {}).get(qid) or {}).get("nonce")
+    got = item.get("web_nonce")
+    if not want or not isinstance(got, str) or not hmac.compare_digest(
+            want.encode(), got.encode("utf-8", "replace")):
+        return ("schedule: a web watch needs the item's web_nonce (only a "
+                "wake that holds just that item has it)")
+    return None
+
+
+def watch_web_nonce_upkeep(state):
+    """A queued item that may set web watches always holds a live web
+    nonce (minted again when state.json was lost)."""
+    try:
+        queue = load_queue()
+    except (OSError, ValueError):
+        return
+    n = state.setdefault("web_nonces", {})
+    for q in queue:
+        if not isinstance(q, dict) or q.get("kind") not in ("mention", "dm") \
+                or not (q.get("watches") or {}).get("can_web") \
+                or _queued_owner_dm(state, q):
+            continue
+        mid = str(q.get("message_id"))
+        if isinstance(n.get(mid), dict):
+            n[mid]["at"] = time.time()
+        else:
+            n[mid] = {"nonce": secrets.token_hex(16), "at": time.time()}
+    watch_write_web_nonces(state)
 
 
 def watch_card(uid, guild_id, dm, from_bot, here, matches):
@@ -6378,6 +6570,27 @@ def _watch_outcome(rec):
 
 
 def watch_schedule(state, item, index):
+    """_watch_schedule, failing closed: whatever goes wrong deciding an
+    action (a bug, a value nothing expected) refuses it, nothing
+    changed, and is logged; it never escapes into process_outbox, where
+    it would leave the item in the processing file for every pass."""
+    try:
+        return _watch_schedule(state, item, index)
+    except Exception as e:
+        qid = str(item.get("item") or "")
+        print(f"Reminders and watches for item {qid}: refused, an error "
+              f"deciding it ({e.__class__.__name__}: {e})", flush=True)
+        try:
+            with watch_store().edit() as data:
+                if qid and qid not in data["done"]:
+                    W.remember_done(data, qid, {"ok": False,
+                                                "line": W.LINES["unknown"]})
+        except Exception:
+            pass
+        return ("refused", W.LINES["unknown"], None, None)
+
+
+def _watch_schedule(state, item, index):
     """Decide an outbox item's schedule action, all or nothing and once
     per queue item: None when it was done (now, or on an earlier pass of
     a retried send: the worker's reply goes out), ("refused", line,
@@ -6409,6 +6622,7 @@ def watch_schedule(state, item, index):
         return ("reject", "schedule: channel_id must be the item's own "
                           "channel (reminders go back where they were "
                           "asked)")
+
     uid = str(meta.get("author_id") or "")
     dm = bool(meta.get("dm"))
     gid = None if dm else (meta.get("guild_id")
@@ -6421,6 +6635,13 @@ def watch_schedule(state, item, index):
         def matches(who):
             return people_match(who, uid, lambda: member_roles(gid, uid))
         can = watch_can_set(uid, False, here, matches)
+        can_web = can and watch_can_web(uid, False, here, matches)
+        if can_web and any(c.get("op") == "add" and c.get("check") == "web"
+                           for c in changes):
+            # (Without the right, decide refuses it in plain words.)
+            problem = watch_web_nonce_problem(state, item, qid, meta)
+            if problem:
+                return ("reject", problem)
         resolved = {}
         if can:
             for c in changes:
@@ -6432,9 +6653,7 @@ def watch_schedule(state, item, index):
         req = W.Request(uid, meta.get("author") or _USER_NAMES.get(uid)
                         or uid, uid in OWNER_USER_IDS, gid, cid, dm, qid,
                         _snowflake_ts(qid), can, watch_where(gid, cid, dm),
-                        resolved.__getitem__,
-                        can_web=can and watch_can_web(uid, False, here,
-                                                      matches))
+                        resolved.__getitem__, can_web=can_web)
         with store.edit() as data:
             prev = data["done"].get(qid)
             if prev is None:
@@ -6533,30 +6752,53 @@ def watch_enqueue(state, q):
           flush=True)
 
 
+WATCH_FIRES_MAX = 500           # fires waiting for an answer, at most
+WATCH_HELD_MAX = 500            # held ones, at most (the oldest go)
+WATCH_FIRES_PER_SERVER_TICK = 5   # after downtime: spread over ticks
+WATCH_REFUSED_GRACE = 24 * 3600   # a place refusing a fire: retried this long
+
+
 def watch_tick(state, now=None):
     """Main loop: fire due reminders and watch matches (grouped per
     person and place: several at once are one message), end expired
-    watches, and (every WATCH_UPKEEP_SECS) settle or re-queue fires."""
+    watches, and (every WATCH_UPKEEP_SECS) settle or re-queue fires.
+
+    Two phases, so no Discord request is ever made under the store's
+    lock (bin/watches.py and bin/watch-report.py wait on it) or inline
+    in classify_message: first, with no lock, the candidate matches
+    classify_message found are checked against what their requester
+    can read, and whether the bot would answer each person in each
+    place that has something to fire; then, under the lock, what is due
+    is fired. A fire whose place was not checked in the first phase is
+    held until the next tick."""
     now = time.time() if now is None else now
     if now < _WATCH_TICK["next"] and not _WATCH_MATCHES:
         return
     _WATCH_TICK["next"] = now + WATCH_TICK_SECS
     store = watch_store()
     data = store.read()
+    cands = list(_WATCH_MATCHES)
+    del _WATCH_MATCHES[:]
+    matches = [(wid, m) for wid, m, ctx in cands
+               if _watch_match_ok(data, wid, ctx)]
+    verdicts = {}
+    for key, name in _watch_places_due(data, matches, now).items():
+        verdicts[key] = watch_fire_allowed(key[0], name, *key[1:])
     queued = []
-    held_due = any(h.get("next", 0) <= now
+    held_due = any(isinstance(h, dict) and h.get("next", 0) <= now
                    for h in (data.get("held") or {}).values())
-    if _WATCH_MATCHES or W.due_reminders(data, now) \
+    if matches or W.due_reminders(data, now) \
             or W.expired_watches(data, now) or held_due:
         with store.edit() as data:
-            queued += _watch_release_held(state, data, now)
+            counts = {}
+            queued += _watch_release_held(state, data, now, verdicts,
+                                          counts)
             entries = []
-            for i, r in W.due_reminders(data, now):
+            for i, r in sorted(W.due_reminders(data, now),
+                               key=lambda ir: ir[1].get("due", 0)):
                 del data["items"][i]
                 entries.append((r["requester"], r["channel_id"],
                                 (r, W.fire_entry(i, r, now))))
-            matches = list(_WATCH_MATCHES)
-            del _WATCH_MATCHES[:]
             for wid, matched in matches:
                 r = data["items"].get(wid)
                 if not r or r.get("until", 0) <= now \
@@ -6572,89 +6814,209 @@ def watch_tick(state, now=None):
             for wid in W.expired_watches(data, now):
                 del data["items"][wid]
                 print(f"Watch {wid} ended (its time ran out).", flush=True)
-            queued += _watch_make_fires(state, data, entries, now)
+            queued += _watch_make_fires(state, data, entries, now,
+                                        verdicts, counts)
     if os.path.exists(WEB_RESULTS_FILE) or W.web_work(data, now):
         with store.edit() as data:
-            queued += _web_tick(state, data, now)
+            queued += _web_tick(state, data, now, verdicts)
     watch_write_due(store.read(), now)
     for q in queued:
         watch_enqueue(state, q)
     if now >= _WATCH_TICK["upkeep"]:
         _WATCH_TICK["upkeep"] = now + WATCH_UPKEEP_SECS
         watch_fire_upkeep(state, now)
+        watch_web_nonce_upkeep(state)
 
 
-def _watch_make_fires(state, data, entries, now, kind="reminder"):
+def _watch_place(r):
+    return (r["requester"], r["channel_id"], r.get("guild_id"),
+            bool(r.get("dm")))
+
+
+def _watch_places_due(data, matches, now):
+    """{(requester, channel, guild, dm): name} of every place that has
+    something to fire this tick (reminders due, matches, held fires
+    due), for watch_tick's first phase."""
+    out = {}
+    recs = [r for _, r in W.due_reminders(data, now)]
+    recs += [data["items"][w] for w, _ in matches if w in data["items"]]
+    for h in (data.get("held") or {}).values():
+        if isinstance(h, dict) and h.get("next", 0) <= now and h.get("es"):
+            recs.append(h["es"][0][0])
+    # Web watches that may fire this tick: reports waiting (read, not
+    # taken: the tool writes the file atomically), and expired checks.
+    try:
+        with open(WEB_RESULTS_FILE) as f:
+            reps = json.load(f)
+    except (OSError, ValueError):
+        reps = []
+    ids = {r.get("id") for r in reps if isinstance(r, dict)} \
+        if isinstance(reps, list) else set()
+    for i, r in data["items"].items():
+        chk = r.get("check") if isinstance(r, dict) else None
+        if i in ids or (chk and chk.get("expires", 0) <= now):
+            recs.append(r)
+    for r in recs:
+        if isinstance(r, dict) and r.get("requester"):
+            out[_watch_place(r)] = r.get("name") or r["requester"]
+    return out
+
+
+def _watch_match_ok(data, wid, ctx):
+    """A candidate match (classify_message): the watch is still there,
+    its requester can read the channel now, and when the notice goes to
+    a server channel, the match is in that channel (or a thread of it)
+    or in one everyone in the server can read (channel_public). Fails
+    closed."""
+    r = data["items"].get(wid)
+    if not isinstance(r, dict):
+        return False
+    gid, cid, parent = ctx.get("gid"), ctx.get("cid"), ctx.get("parent")
+    try:
+        if not user_can_view(gid, r["requester"], cid):
+            return False
+        return bool(r.get("dm")) or r.get("channel_id") in (cid, parent) \
+            or channel_public(gid, cid)
+    except Exception as e:
+        print(f"Watch check error: {e}", flush=True)
+        return False
+
+
+def _watch_make_fires(state, data, entries, now, verdicts, counts,
+                      kind="reminder"):
     """Fires for entries [(requester, place, (record, fire entry))], one
     per person and place, recorded in data["fires"] (under the store's
     lock); returns their queue items (queued by the caller after the
     store is written, so a fire is never queued without its record)."""
     out = []
     for (uid, cid), es in W.group(entries).items():
-        q = _watch_fire_group(state, data, uid, cid, es, now, kind)
+        q = _watch_fire_group(state, data, uid, cid, es, now, kind,
+                              verdicts, counts)
         if q:
             out.append(q)
     return out
 
 
-def _watch_release_held(state, data, now):
-    """Fires a reply cap held back (see _watch_fire_group): tried again
-    every HELD_RETRY_SECS, going out (marked late) once the cap allows;
-    dropped after HELD_KEEP_SECS."""
+def _watch_release_held(state, data, now, verdicts, counts):
+    """Held fires (see _watch_fire_group) whose time came: tried again.
+    One held past its grace (a day when the place refused it, a week for
+    a reply cap) is dropped and ledgered."""
     out = []
     held = data.setdefault("held", {})
-    for fid, h in list(held.items()):
-        if h.get("next", 0) > now:
+    for fid, h in sorted(held.items(), key=lambda kv: kv[1].get("at", 0)):
+        if not isinstance(h, dict) or h.get("next", 0) > now:
             continue
         del held[fid]
-        if now - h.get("at", now) > W.HELD_KEEP_SECS:
-            print(f"Reminder {fid} held too long by a reply cap; dropped.",
-                  flush=True)
-            ledger_record(fid, "skipped", "reminder dropped: held too long",
+        grace = WATCH_REFUSED_GRACE if h.get("why") else W.HELD_KEEP_SECS
+        if now - h.get("at", now) > grace:
+            why = h.get("why") or "a reply cap"
+            print(f"Reminder {fid} could not go out for too long "
+                  f"({why}); dropped.", flush=True)
+            ledger_record(fid, "skipped", f"reminder dropped: {why}",
                           channel_id=h.get("cid"), author_id=h.get("uid"))
             continue
         es = [(r, dict(e, late=True)) for r, e in h.get("es") or []]
         q = _watch_fire_group(state, data, h["uid"], h["cid"], es, now,
-                              h.get("kind") or "reminder", fid=fid,
-                              held_at=h.get("at", now))
+                              h.get("kind") or "reminder", verdicts, counts,
+                              fid=fid, held=h)
         if q:
             out.append(q)
     return out
 
 
-def _watch_fire_group(state, data, uid, cid, es, now, kind, fid=None,
-                      held_at=None):
+def _watch_hold(data, fid, uid, cid, es, kind, now, next_at, held=None,
+                why=None):
+    """Keep a fire for later (data["held"]). Into one already held for
+    the same person, place and kind it folds: the same watch again
+    counts as `more` on its entry ("3 more mentions"), never a second
+    notice. Returns the held record's id."""
+    held_all = data.setdefault("held", {})
+    for hid, h in held_all.items():
+        if hid != fid and isinstance(h, dict) and h.get("uid") == uid \
+                and h.get("cid") == cid and h.get("kind") == kind:
+            have = {e.get("id"): e for _, e in h["es"]}
+            for r, e in es:
+                old = have.get(e.get("id"))
+                if old is not None and e.get("kind") != "remind":
+                    old["more"] = old.get("more", 0) + 1 + e.get("more", 0)
+                    if e.get("matched"):
+                        old["matched"] = e["matched"]
+                elif len(h["es"]) < W.PER_PERSON_MAX:
+                    h["es"].append([r, e])
+            return hid
+    rec = dict(held or {})
+    rec.update({"at": (held or {}).get("at", now), "next": next_at,
+                "kind": kind, "uid": uid, "cid": cid,
+                "es": [[r, e] for r, e in es],
+                "tries": (held or {}).get("tries", 0) + 1})
+    rec.pop("why", None)
+    if why:
+        rec["why"] = why
+    held_all[fid] = rec
+    if len(held_all) > WATCH_HELD_MAX:
+        for old in sorted(held_all, key=lambda k: held_all[k].get("at", 0))[
+                :len(held_all) - WATCH_HELD_MAX]:
+            print(f"Reminder {old} dropped: too many held.", flush=True)
+            del held_all[old]
+    return fid
+
+
+def _watch_fire_group(state, data, uid, cid, es, now, kind, verdicts,
+                      counts, fid=None, held=None):
     """One fire for es [(record, fire entry)] of one person in one
-    place, or None. Not when the bot would no longer answer them there
-    (dropped). For anyone but the owners it counts as a reply toward the
-    limits (limits.per_day, limits.per_person_per_day) where it fires;
-    over a cap it is held (data["held"], ledgered skipped, "reminder
-    held") and tried again later, never lost."""
+    place, or None when it is held for later instead:
+    - the place was not checked this tick (verdicts): the next tick;
+    - the bot would not answer them there now (who.replies, the
+      ownerless-server gate, who.allow / who.ignore, DMs, or they can no
+      longer read it): retried with a growing gap for a day, ledgered
+      ("reminder held: <why>"), then dropped;
+    - too many fires this tick in that server, or waiting overall:
+      spread over the next ticks;
+    - for anyone but the owners, a fire counts as a reply toward the
+      limits (limits.per_day, limits.per_person_per_day) where it fires;
+      over a cap it is held, ledgered ("reminder held: daily cap
+      reached", Why no reply? explains it), and tried every
+      HELD_RETRY_SECS. Never lost while held."""
     r0 = es[0][0]
     gid, dm = r0.get("guild_id"), bool(r0.get("dm"))
     name = r0.get("name") or uid
-    why = watch_fire_allowed(uid, name, cid, gid, dm)
-    if why:
-        print(f"Reminder for {name} in {cid} not sent ({why}).", flush=True)
-        return None
     fid = fid or W.new_fire_id(now)
+    key = (uid, cid, gid, dm)
+    if key not in verdicts:
+        _watch_hold(data, fid, uid, cid, es, kind, now, now, held,
+                    (held or {}).get("why"))
+        return None
+    why = verdicts[key]
+    if why:
+        tries = (held or {}).get("tries", 0)
+        hid = _watch_hold(data, fid, uid, cid, es, kind, now,
+                          now + min(3600, 30 * 2 ** tries), held, why)
+        if held is None and hid == fid:
+            print(f"Reminder for {name} in {cid} held ({why}).", flush=True)
+            ledger_record(fid, "skipped", f"reminder held: {why}",
+                          channel_id=cid, author=name, author_id=uid,
+                          detail={"why": why})
+        return None
+    if counts.get(gid, 0) >= WATCH_FIRES_PER_SERVER_TICK \
+            or len(data["fires"]) >= WATCH_FIRES_MAX:
+        _watch_hold(data, fid, uid, cid, es, kind, now,
+                    now + WATCH_TICK_SECS, held)
+        return None
     scope = scope_for(gid, cid, dm)
     capped = rate_block(state, uid, cid, scope)
     if capped:
-        data.setdefault("held", {})[fid] = {
-            "at": held_at or now, "next": now + W.HELD_RETRY_SECS,
-            "kind": kind, "uid": uid, "cid": cid,
-            "es": [[r, e] for r, e in es]}
-        if held_at is None:
+        hid = _watch_hold(data, fid, uid, cid, es, kind, now,
+                          now + W.HELD_RETRY_SECS, held)
+        if held is None and hid == fid:
             print(f"Reminder for {name} in {cid} held: a reply cap is "
                   f"reached ({capped['key']}).", flush=True)
-            ledger_record(fid, "skipped",
-                          "reminder held: daily cap reached",
+            ledger_record(fid, "skipped", "reminder held: daily cap reached",
                           channel_id=cid, author=name, author_id=uid,
                           detail=capped)
         return None
     rate_record(state, uid, scope)
-    if held_at is not None:
+    counts[gid] = counts.get(gid, 0) + 1
+    if held is not None:
         ledger_record(fid, "queued", channel_id=cid, author=name,
                       author_id=uid)   # no longer held
     ents = [dict(e, asked=msg_link(gid, cid, r["message_id"]))
@@ -6665,7 +7027,8 @@ def _watch_fire_group(state, data, uid, cid, es, now, kind, fid=None,
         "id": fid, "at": now, "requester": uid, "channel_id": cid,
         "guild_id": gid, "dm": dm,
         "originals": sorted({r["message_id"] for r, _ in es}, key=int),
-        "item": q}
+        # (Its history is the place's, re-read if it is queued again.)
+        "item": dict(q, history=[])}
     W.note_fired(data, fid, now)
     return q
 
@@ -6689,12 +7052,13 @@ def _web_take_results():
     return reps if isinstance(reps, list) else []
 
 
-def _web_tick(state, data, now):
+def _web_tick(state, data, now, verdicts):
     """Web watches, under the store's lock: apply the checker's reports
     (only with a live check's nonce, for an active watch; anything else
     changes nothing), expire and issue checks, and make the fires:
     "watch-met" for a met result, a refused one, or a watch that gave
-    up."""
+    up. A summary that looks like prompt injection (is_suspicious) is
+    withheld from the worker."""
     out = []
     for rep in _web_take_results():
         res, i, rec = W.web_apply(data, rep, now)
@@ -6707,16 +7071,23 @@ def _web_tick(state, data, now):
             # The requester hears once: it happened, it could not be
             # checked, or the checker would not check it.
             m = {"result": res}
-            if res in ("met", "refused"):
-                m["summary"] = rep.get("summary") or ""
-            out.append((rec["requester"], rec["channel_id"],
-                        (rec, W.fire_entry(i, rec, now, m))))
+            summary = str(rep.get("summary") or "")
+            withheld = bool(summary) and bool(is_suspicious(summary))
+            if res in ("met", "refused") and not withheld:
+                m["summary"] = summary
+            e = W.fire_entry(i, rec, now, m)
+            if withheld:
+                print(f"Web watch {i}: its summary looked like prompt "
+                      f"injection; withheld.", flush=True)
+                e["summary_withheld"] = True
+            out.append((rec["requester"], rec["channel_id"], (rec, e)))
     for i, rec in W.web_issue(data, now):
         print(f"Web watch {i}: no answer {W.WEB_MAX_FAILS} times; ended.",
               flush=True)
         out.append((rec["requester"], rec["channel_id"],
                     (rec, W.fire_entry(i, rec, now, {"result": "gave-up"}))))
-    return _watch_make_fires(state, data, out, now, kind="watch-met")
+    return _watch_make_fires(state, data, out, now, verdicts, {},
+                             kind="watch-met")
 
 
 def watch_write_due(data, now=None):
@@ -6750,7 +7121,7 @@ def watch_fire_upkeep(state, now=None):
     except (OSError, ValueError):
         return
     entries = _ledger_load()["entries"]
-    drop, lost = [], []
+    drop, lost, stale = [], [], set()
     for fid, f in data["fires"].items():
         e = entries.get(fid) or {}
         if e.get("status") in LEDGER_TERMINAL:
@@ -6758,15 +7129,30 @@ def watch_fire_upkeep(state, now=None):
                 continue  # never_share: kept for Send anyway (24 h)
             drop.append(fid)
         elif now - f.get("at", now) > W.FIRE_KEEP_SECS:
+            # Nobody answered it in a day: it leaves the queue too (else
+            # every later answer is refused and it is woken for forever).
             drop.append(fid)
+            stale.add(fid)
             print(f"Reminder {fid} was never answered; dropped.",
                   flush=True)
+            ledger_record(fid, "skipped", "reminder never answered",
+                          channel_id=f.get("channel_id"),
+                          author_id=f.get("requester"))
         elif fid not in queued and isinstance(f.get("item"), dict):
-            lost.append(f["item"])
+            q = dict(f["item"])
+            q["history"] = ((state.get("history") or {}).get(
+                q.get("channel_id")) or [])[-HISTORY_ATTACHED:]
+            lost.append(q)
     if drop:
         with watch_store().edit() as d:
             for fid in drop:
                 d["fires"].pop(fid, None)
+    if stale:
+        queue_edit(drop=lambda q: str(q.get("message_id")) in stale)
+        nonces = state.get("nl_nonces") or {}
+        for fid in stale:
+            nonces.pop(fid, None)
+        nl_write_nonces(state)
     for q in lost:
         print(f"Reminder {q['message_id']} was not in the queue; queued "
               f"again.", flush=True)
@@ -6783,13 +7169,14 @@ def watch_scan(msg, guild_id):
 
 
 def _watch_scan(msg, guild_id):
-    """Cheap first (words), then the requester's view of the channel:
-    a match counts only when they can read it now, it is not their own
-    message (nor the bot's), it came after the watch was set, the watch
-    has not fired within DEBOUNCE_SECS, and, when the notice goes to a
-    server channel (everyone there reads it), the match is in that
-    channel (or its threads) or in one everyone in the server can read.
-    The notice links the message; it never quotes it."""
+    """The cheap part, with no Discord request: a candidate match is a
+    message that is not the requester's own (nor the bot's), came after
+    the watch was set, while the watch has not fired within
+    DEBOUNCE_SECS, in the watch's scope, with one of its words. Whether
+    the requester can read that channel, and whether the notice may go
+    where they asked, watch_tick checks before firing
+    (_watch_match_ok). The notice links the message; it never quotes
+    it."""
     if not guild_id:
         return
     items = watch_store().read()["items"]
@@ -6807,7 +7194,7 @@ def _watch_scan(msg, guild_id):
     parent = info.get("parent_id") if info.get("thread") else None
     ts = _snowflake_ts(msg.get("id"))
     now = time.time()
-    pending = {w for w, _ in _WATCH_MATCHES}
+    pending = {c[0] for c in _WATCH_MATCHES}
     for wid, r in items.items():
         if not isinstance(r, dict) or r.get("kind") != "watch" \
                 or wid in pending or aid == r.get("requester") \
@@ -6819,15 +7206,13 @@ def _watch_scan(msg, guild_id):
         hit = W.match_text(r.get("words") or [], text)
         if not hit:
             continue
-        if not user_can_view(guild_id, r["requester"], cid):
-            continue
-        if not r.get("dm") and r.get("channel_id") not in (cid, parent) \
-                and not channel_public(guild_id, cid):
-            continue
+        if len(_WATCH_MATCHES) >= 1000:
+            return   # a flood: the rest of this tick's matches wait
         _WATCH_MATCHES.append((wid, {
             "words": hit, "link": msg_link(guild_id, cid, msg.get("id")),
             "channel": "#" + str(info.get("name") or cid),
-            "author": author.get("username") or "someone"}))
+            "author": author.get("username") or "someone"},
+            {"gid": guild_id, "cid": cid, "parent": parent}))
 
 
 # -- answering a fire -------------------------------------------------------
@@ -6848,7 +7233,9 @@ def watch_bind(item):
         return None
     f = data["fires"].get(fid)
     if f is None:
-        return f"reminder {fid}: already answered"
+        # Settled, or dropped unanswered: nothing is ever sent for it
+        # (unbound), and its queue item, if any, is settled.
+        return {"gone": fid}
     if item.get("item") and str(item["item"]) != fid:
         return f"reminder {fid}: item must be the reminder's message_id"
     if "schedule" in item or "settings" in item:
@@ -7101,6 +7488,14 @@ async def _gateway_run(token, inbox, status):
                                 "id": d.get("id"),
                                 "joined_at": d.get("joined_at"),
                                 "member_count": d.get("member_count")}})
+                        elif t in ("CHANNEL_CREATE", "CHANNEL_UPDATE",
+                                   "GUILD_ROLE_CREATE", "GUILD_ROLE_UPDATE",
+                                   "GUILD_ROLE_DELETE"):
+                            # Overwrites and role permissions, for what
+                            # a watch's requester can read (GUILDS
+                            # intent; applied by drain_gateway).
+                            inbox.put({"_perm_event": {"t": t,
+                                                       "d": pkt["d"]}})
                         elif t == "INTERACTION_CREATE":
                             # A button click (or command): answered by
                             # the interaction thread at once, within
@@ -7203,6 +7598,9 @@ def drain_gateway(state, inbox, channels):
             break
         if "_guild_event" in m:
             on_guild_event(state, m["_guild_event"])
+            continue
+        if "_perm_event" in m:
+            watch_perm_event(m["_perm_event"])
             continue
         if "_typing" in m:
             note_activity(m["_typing"].get("channel_id"),
@@ -8098,7 +8496,7 @@ def main():
         try:
             # Send any replies drafted by the worker
             outbox_pass_at = time.time()
-            process_outbox(state)
+            outbox_pass(state)
             save_state(state)
         except Exception as e:
             print(f"Outbox error: {e}", flush=True)

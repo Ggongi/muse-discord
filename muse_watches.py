@@ -38,6 +38,7 @@ Security properties (PROTOCOL.md, Reminders and watches):
 import hmac
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -53,6 +54,8 @@ KINDS = ("remind", "watch")       # an `add`'s kind (a web watch is a
 # Limits (PROTOCOL.md, Reminders and watches).
 REMIND_MIN_SECS = 60                    # at least a minute away
 REMIND_MAX_SECS = 366 * 86400           # at most a year away
+AFTER_MAX = 100 * REMIND_MAX_SECS       # a sane number (decide refuses
+                                        # past a year, with its line)
 WATCH_DEFAULT_SECS = 7 * 86400          # a watch runs a week by default
 WATCH_MAX_SECS = 30 * 86400             # and 30 days at most
 WATCH_MIN_SECS = 60
@@ -146,11 +149,13 @@ def parse_utc(value):
         v = v[:-1] + "+00:00"
     try:
         dt = datetime.fromisoformat(v)
-    except ValueError:
+        if dt.tzinfo is None or dt.utcoffset().total_seconds() != 0:
+            return None
+        ts = dt.timestamp()
+    except (ValueError, OverflowError, OSError, TypeError):
         return None
-    if dt.tzinfo is None or dt.utcoffset().total_seconds() != 0:
-        return None
-    return dt.timestamp()
+    # Only times the protocol could ever take (decide checks the range).
+    return ts if 0 < ts < 4102444800 else None   # before 2100
 
 
 def iso(ts):
@@ -230,8 +235,9 @@ def _change_problems(c, where):
                 out.append(f'{where}.at must be an ISO-8601 UTC time such '
                            f'as "2026-10-21T21:36:00Z"')
             elif "after" in c and not (_int(c["after"])
-                                       and c["after"] > 0):
-                out.append(f"{where}.after is a whole number of seconds")
+                                       and 0 < c["after"] <= AFTER_MAX):
+                out.append(f"{where}.after is a whole number of seconds "
+                           f"(a reminder is at most a year away)")
             for k in ("match", "until"):
                 if k in c:
                     out.append(f"{where}: a reminder takes no {k}")
@@ -844,8 +850,10 @@ def web_issue(data, now=None):
 
 def web_due(data, now=None):
     """What web_watches_due.json lists: every live check, as data for the
-    checker (the condition, the id, the nonce, when it expires) and the
-    hook's lease key. Nothing about who asked or where."""
+    checker (the condition, the id, the nonce, when it expires), the
+    hook's lease key, and `group`, an opaque tag per requester: the hook
+    never hands two requesters' checks (and nonces) to one checker run,
+    so one person's page cannot report on another's watch."""
     now = time.time() if now is None else now
     out = []
     for i, r in sorted(data["items"].items()):
@@ -853,6 +861,9 @@ def web_due(data, now=None):
         if r.get("kind") == "watch-web" and chk \
                 and chk.get("expires", 0) > now:
             out.append({"id": i, "key": f"{i}:{int(chk['issued'])}",
+                        "group": hashlib.sha256(
+                            str(r.get("requester")).encode()).hexdigest()[
+                            :16],
                         "nonce": chk["nonce"], "what": r.get("what"),
                         "expires": iso(chk["expires"])})
     return out

@@ -129,6 +129,11 @@ package dir's absolute path for `<pkg>`:
 | `hooks/update-watch.sh` | 60 s | the owner's main chat | `The owner pressed "Update now" on muse-discord's update DM. Update <pkg> to the release in the payload by following <pkg>/UPDATING.md with the owner in this chat. When done, or if you stop early, delete <pkg>/update_request.json and report the version running, or what waits on the owner.` | The bot's **Update now** button does nothing. |
 | `hooks/watch-due.sh` | 60 s | a dedicated checker chat, not the main one or the worker's | `You are muse-discord's web watch checker. The wake payload below is your whole task: follow it exactly.` | Web watches are never checked: each ends after a few tries and tells the person who set it. |
 
+For `hooks/watch-due.sh`'s chat, allow only web search and fetch and
+one command, by exact prefix: `python3 <pkg>/bin/watch-report.py ` (or
+`<pkg>/.venv/bin/python3 <pkg>/bin/watch-report.py ` when bin/install.sh
+made a .venv), if the runtime can limit a chat's tools.
+
 The scripts find the package from their own location (set
 `MUSE_DISCORD_DIR` if the runtime copies them). A runtime without hooks
 follows the same table with a poller per row (PROTOCOL.md specifies the

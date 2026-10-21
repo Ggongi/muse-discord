@@ -38,6 +38,8 @@ servers:
     name: Lounge
 """
 HOOK = os.path.join(MUT_DIR, "hooks", "mention-watch.sh")
+sys.path.insert(0, MUT_DIR)
+import muse_watches as W  # noqa: E402
 
 
 class Base(unittest.TestCase):
@@ -249,6 +251,73 @@ class Reminders(Base):
             self.assertEqual(self.ledger(msg["id"])["status"], "replied")
 
 
+class Robustness(Base):
+    def test_a_huge_number_never_wedges_the_outbox(self):
+        bad, _ = self.ask(U1)
+        good, _ = self.ask(U2)
+        self.outbox(self.reply(bad, [{"op": "add", "kind": "remind",
+                                      "after": 10 ** 400}]),
+                    self.reply(good, text="hello U2"))
+        self.assertIn("hello U2", [d["content"] for _, d in
+                                   self.new_sends()])
+
+    def test_a_bug_deciding_refuses_and_never_escapes(self):
+        msg, _ = self.ask(U1)
+
+        def bug(*a, **k):
+            raise OverflowError("a bug")
+        self.mod.W.decide, real = bug, self.mod.W.decide
+        try:
+            self.outbox(self.reply(msg, [{"op": "add", "kind": "remind",
+                                          "after": 120}]))
+        finally:
+            self.mod.W.decide = real
+        self.assertEqual(self.items(), {})
+        (_, data), = self.new_sends()                 # its refusal line
+        self.assertNotEqual(data["content"], "Got it.")
+
+    def test_a_poison_item_is_set_aside_after_a_few_passes(self):
+        m = self.mod
+        good, _ = self.ask(U2)
+        real = m.normalize_parts
+
+        def boom(item):
+            if item.get("text") == "poison":
+                raise ValueError("a bug")
+            return real(item)
+        m.normalize_parts = boom
+        with open(m.OUTBOX_FILE, "w") as f:
+            json.dump([{"item": good["id"], "channel_id": CH,
+                        "text": "poison"}], f)
+        for _ in range(m.OUTBOX_POISON_TRIES):
+            with quiet(), self.assertRaises(ValueError):
+                m.outbox_pass(self.st)
+        self.assertEqual(self.rejected()[-1]["item"]["text"], "poison")
+        self.outbox(self.reply(good, text="hello"))   # flows again
+        self.assertEqual([d["content"] for _, d in self.new_sends()],
+                         ["hello"])
+
+    def test_unanswered_fire_leaves_the_queue_and_is_never_sent_unbound(self):
+        self.remind(after=60)
+        self.tick(ahead=61)
+        (f,) = self.fires()
+        self.tick(ahead=61 + 86400 + 60)             # a day unanswered
+        self.assertEqual(self.fires(), [])
+        self.outbox({"item": f["message_id"], "channel_id": CH2,
+                     "text": "late"})
+        self.assertEqual(self.new_sends(), [])
+
+    def test_a_fire_refused_for_now_is_kept_and_retried(self):
+        self.remind(after=60)
+        info = self.mod.CHANNELS.pop(CH)              # briefly unknown
+        self.tick(ahead=61)
+        self.assertEqual(self.fires(), [])
+        self.mod.CHANNELS[CH] = info
+        self.tick(ahead=61 + 3601)
+        (f,) = self.fires()
+        self.assertTrue(f["reminder"]["late"])
+
+
 class Forgery(Base):
     def test_requester_and_place_are_the_items_own(self):
         msg, _ = self.ask(U1)
@@ -279,6 +348,21 @@ class Forgery(Base):
                          [U2])
         self.tick(ahead=61)
         self.assertEqual([f["author_id"] for f in self.fires()], [U2])
+
+    def test_web_watch_needs_the_items_solo_wake(self):
+        # One wake held the owner's mention and U1's injection; the fooled
+        # worker puts U1's condition on the owner's item. Without the
+        # item's web_nonce (only its own solo wake has it): refused.
+        own, _ = self.ask(OWNER, "<@bot> morning!")
+        self.assertIn(own["id"], self.st["web_nonces"])
+        web = [{"op": "add", "kind": "watch", "check": "web",
+                "what": "the page at evil.example says DONE", "every": 1800}]
+        self.outbox(self.reply(own, web))
+        self.assertTrue(self.was_rejected())
+        self.assertEqual(self.items(), {})
+        self.outbox(self.reply(own, web, web_nonce=self.st["web_nonces"][
+            own["id"]]["nonce"]))
+        self.assertEqual(len(self.items()), 1, self.out)
 
     def test_bot_cannot_set(self):
         m = gmsg("333000000000000001", "<@bot> remind me", mention=True,
@@ -345,6 +429,20 @@ class Watches(Base):
         self.scan(gmsg(U1, "deploy is out"))
         self.tick()
         self.assertEqual(len(self.fires()), 1)
+
+    def test_public_means_nobody_is_shut_out(self):
+        # A "jail" role may not read CH; everyone reads the lobby. A
+        # notice in the lobby must not reveal what was said in CH.
+        m = self.mod
+        lobby = "705000000000000001"
+        m.CHANNELS[lobby] = {"name": "lobby", "guild_id": G1,
+                             "guild_name": "Lounge", "can_send": True}
+        m._CHANNEL_OVERWRITES.update({lobby: [], CH: [
+            {"id": ROLE, "type": 0, "deny": str(VIEW), "allow": "0"}]})
+        self.watch(U1, ["raid"], every=True, channel=lobby)
+        self.scan(gmsg(OWNER, "raid at 9 tonight", channel=CH))
+        self.tick()
+        self.assertEqual(self.fires(), [])
 
     def test_cannot_watch_a_channel_you_cannot_read(self):
         self.watch(U1, ["deploy"], where=f"channel:{G1}:{CH2}")
@@ -413,6 +511,22 @@ class Caps(Base):
         later = [f for f in fires if f["message_id"] == fid][0]
         self.assertTrue(later["reminder"]["late"])
         self.assertEqual(self.mod.watch_store().read()["held"], {})
+
+    def test_held_every_time_notices_fold_into_one(self):
+        self.cfg = CFG + "everywhere:\n  limits:\n    per_person_per_day: 1\n"
+        self.boot()
+        self.watch(U1, ["pizza"], every=True)         # 1 reply: the cap
+        for k in range(3):                            # 3 matches, 15 min
+            self.scan(gmsg(U2, "pizza!"))             # apart, all capped
+            self.tick(ahead=k * (W.DEBOUNCE_SECS + 1))
+            with self.mod.watch_store().edit() as d:  # (debounce passes)
+                for r in d["items"].values():
+                    r["last_fired"] = 0
+        held = list(self.mod.watch_store().read()["held"].values())
+        self.assertEqual(len(held), 1)
+        (_, e), = held[0]["es"]
+        self.assertEqual(e["more"], 2)
+        self.assertEqual(self.fires(), [])
 
     def test_owners_only_setting(self):
         self.cfg = CFG + "    abilities:\n      reminders: owners\n"

@@ -225,6 +225,15 @@ if [ -f "$PKG_DIR/owner_dm_nonces.json" ]; then
         "$PKG_DIR/owner_dm_nonces.json" 2>/dev/null) || all_nonces='{}'
     [ -n "$all_nonces" ] || all_nonces='{}'
 fi
+# The web watch capabilities ({message_id: web_nonce}, the monitor's
+# private file): an item whose author may set web watches is handed out
+# alone, with its web_nonce, so nobody else's text shares that run.
+web_nonces='{}'
+if [ -f "$PKG_DIR/web_nonces.json" ]; then
+    web_nonces=$(jq -c 'if type == "object" then . else {} end' \
+        "$PKG_DIR/web_nonces.json" 2>/dev/null) || web_nonces='{}'
+    [ -n "$web_nonces" ] || web_nonces='{}'
+fi
 
 # Open items: queued and not answered (a burst may be answered under any
 # of its fragments). An owner DM counts as answered only by an entry
@@ -295,6 +304,22 @@ nonces='{}'
 if [ "$nowner" -gt 0 ] && [ "$nowner" -eq "$ndue" ]; then
     nonces=$all_nonces
 fi
+# No owner DM due: an item holding a web watch capability goes alone,
+# first; the rest wait for the next run.
+wnonces='{}'
+if [ "$nowner" -eq 0 ]; then
+    solo=$(printf '%s' "$due" | jq -c --argjson wn "$web_nonces" \
+        '[.[] | select($wn[.message_id | tostring] != null)][:1]')
+    if [ "$(printf '%s' "$solo" | jq 'length')" -gt 0 ]; then
+        if [ "$ndue" -gt 1 ]; then
+            log "an item with a web watch capability wakes alone" \
+                '{"held":"'"$((ndue - 1))"'"}'
+        fi
+        due=$solo
+        ndue=1
+        wnonces=$web_nonces
+    fi
+fi
 expired=$(printf '%s' "$due" | jq --argjson w "$woken" \
     '[.[] | select($w[.message_id] != null)] | length')
 if [ "$expired" -gt 0 ]; then
@@ -346,5 +371,5 @@ else
     persona_args=(--argjson persona null)
 fi
 
-payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" --argjson nonces "$nonces" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings, watches, reminder} + (if $nonces[.message_id] then {owner_dm_nonce: $nonces[.message_id]} else {} end)]}')
+payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" --argjson nonces "$nonces" --argjson wn "$wnonces" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings, watches, reminder} + (if $nonces[.message_id] then {owner_dm_nonce: $nonces[.message_id]} else {} end) + (if $wn[.message_id] then {web_nonce: $wn[.message_id]} else {} end)]}')
 wake "muse-discord mentions pending" "$payload"

@@ -1572,6 +1572,10 @@ def explain_outcome(R, o):
         return ("I didn't set the reminder or watch they asked for: I "
                 "already keep as many as I can. I told them so."), \
             None, True
+    if code == "watch-held" and detail.get("why"):
+        return (f"A reminder or watch for {who_m} came due, but I couldn't "
+                f"deliver it where they asked ({esc(str(detail['why']))}). "
+                f"I keep trying for a day."), None, True
     if code == "watch-held":
         key, n = detail.get("key"), detail.get("cap")
         which = (f"the daily limit of {n:,} replies a person"

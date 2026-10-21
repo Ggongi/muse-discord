@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """watch-report.py -- the web watch checker's only write.
 
-    python3 bin/watch-report.py <id> <nonce> met|not-met|unknown|refused '<summary>'
+    python3 bin/watch-report.py <id> <nonce> met|not-met|unknown|refused --stdin <<'END_<token>'
+    <summary>
+    END_<token>
+
+(or the summary as the last argument instead of --stdin). The checker
+prompt gives the heredoc's end marker, random for every run, so text
+from a web page cannot end the heredoc and run as a command.
 
 Reports one web watch check (an entry of the checker's data block): its
 id and nonce exactly as given, the result, and a short summary in plain
@@ -51,10 +57,12 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if len(argv) != 4:
         print("usage: watch-report.py <id> <nonce> "
-              "met|not-met|unknown|refused '<summary>'", file=sys.stderr)
+              "met|not-met|unknown|refused --stdin|'<summary>'",
+              file=sys.stderr)
         return 2
+    summary = sys.stdin.read(4096) if argv[3] == "--stdin" else argv[3]
     rep = {"id": argv[0], "nonce": argv[1], "result": argv[2],
-           "summary": argv[3].strip(), "at": time.time()}
+           "summary": " ".join(summary.split()), "at": time.time()}
     problems = W.report_problems(rep)
     if problems:
         print("error: nothing reported; fix these and run it again:",

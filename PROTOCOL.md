@@ -500,6 +500,12 @@ again by the monitor, which rejects the item as in Validation above):
 Who and where, decided by the monitor from its own records, never from
 the outbox:
 
+- Numbers are bounded in the shape (`after` up to about a century,
+  times between 1970 and 2100, `every` as below), and deciding fails
+  closed: any error refuses the action (logged), nothing changed. An
+  outbox item whose processing keeps raising is set aside after 3
+  passes (`reply_outbox.rejected.json`), so no item can stop the
+  outbox for good.
 - The `item` must be an open queue item for a message (`kind`
   `mention` or `dm`, still queued; who and where from its `item_meta`
   record, else from the queue's own entry), and the
@@ -590,13 +596,35 @@ item of its own (a *fire*), which wakes the worker like any other:
 - Before a fire is queued the monitor checks again that it would
   answer the requester there now (`who.replies`, the ownerless-server
   gate, `who.allow` / `who.ignore`, the DM rules) and, in a server,
-  that they can still read the channel; otherwise it is dropped and
-  logged.
+  that they can still read the channel. When it would not, the fire is
+  held, not dropped: ledgered `skipped`, `reminder held: <why>`, code
+  `watch-held` (`detail` `{why}`), retried after 30 seconds and then
+  with a doubling gap (at most an hour), and dropped (ledgered) only
+  after a day.
+- Held fires of one person in one place fold together: the same watch
+  again only counts as `more` on its entry ("and 3 more mentions"),
+  never a second notice. At most 500 fires wait for an answer and 500
+  are held (the oldest held go first), and at most 5 fires go out per
+  server per tick (2 seconds), so a backlog after downtime is spread
+  out.
+- watch_tick works in two phases, so no Discord request is made while
+  `watches.lock` is held or inside `classify_message`: first, with no
+  lock, the candidate matches are checked against what their
+  requester can read, and whether the bot would answer each person in
+  each place with something to fire; then, under the lock, what is
+  due is fired. A fire whose place was not checked first waits for the
+  next tick. Member lookups for this are cached 2 minutes, and a
+  failed one 1 minute (failing closed).
+- A fire's stored copy keeps no history: re-queued, it gets the
+  place's current history.
 - A fire is recorded in `watches.json` (`fires`) before it is queued,
   and dropped once the ledger settles it (a fire held under
   `never_share` is kept for **Send anyway**). One missing from the
   queue (a stop between the two writes) is queued again within 15
-  seconds; one nobody answers in a day is dropped.
+  seconds; one nobody answers in a day is dropped, leaves the queue,
+  and is ledgered `skipped`. An answer to a fire that is gone
+  (answered, or dropped) is settled without sending anything: no reply
+  is ever sent unbound.
 - A fire in an owner's DM is an owner DM: it gets a nonce like one,
   and the wake hook hands it out with the owner's DMs only, but never
   in the same run as the owner's own messages (they go first): a
@@ -639,12 +667,14 @@ test first:
 - one of the watch's words or phrases, matched case-insensitively as
   whole words (escaped literals, never a pattern from the request);
 - the requester can read that channel now (below; re-checked for every
-  match);
+  match, in watch_tick's first phase, never inline);
 - when the notice goes to a server channel (the watch was set there,
   where everyone in it reads the notice): the match is in that channel
-  or one of its threads, or in a channel everyone in the server can
-  read (`@everyone` has View Channel after the channel's overwrite).
-  A watch set in a DM has no such limit.
+  or one of its threads, or in a channel nobody in the server is shut
+  out of (`@everyone` has View Channel after the channel's `@everyone`
+  overwrite, and no role or member overwrite there denies it:
+  permissions only add up, so then every audience is a subset of that
+  channel's). A watch set in a DM has no such limit.
 
 A match fires as above. A watch ends at its `until`, or after its first
 notice unless `every` is true.
@@ -655,7 +685,11 @@ the gateway is looked up at once): the server's roles and their
 permissions and its owner (`GET /guilds/<id>`), the channel's
 permission overwrites (`GET /guilds/<id>/channels`; a thread uses its
 parent's), and the requester's roles (`GET
-/guilds/<id>/members/<user>`, cached 10 minutes). Base permissions are
+/guilds/<id>/members/<user>`, cached 2 minutes: role changes of a
+member raise no event without the privileged members intent).
+Channel overwrites and role permissions are also kept current between
+discoveries from the gateway's `CHANNEL_CREATE` / `CHANNEL_UPDATE` and
+`GUILD_ROLE_CREATE` / `UPDATE` / `DELETE` events. Base permissions are
 `@everyone`'s plus their roles'; Administrator or owning the server
 allows everything; then the `@everyone` overwrite, the role overwrites
 together, and their own member overwrite. They can read when View
@@ -681,26 +715,39 @@ checker --bin/watch-report.py--> web_watch_results.json --> monitor
   every `every` seconds. The monitor issues each due check with a fresh
   nonce (128 bits, `secrets`), live for 15 minutes, and lists the live
   ones in `web_watches_due.json` (written atomically, mode 600, only
-  when it changes): `[{"id", "key": "<id>:<issued>", "nonce", "what",
-  "expires"}]`. Nothing about who asked or where.
+  when it changes): `[{"id", "key": "<id>:<issued>", "group", "nonce",
+  "what", "expires"}]`, `group` an opaque tag per requester (a hash of
+  their id). Nothing else about who asked or where.
 - **The hook** (`hooks/watch-due.sh`, every 60 s, in a chat of its own;
   SETUP.md step 5): when the file lists checks that no lease in its hook
   state covers (a lease lasts 15 minutes, keyed by `key`), it wakes ONE
-  checker session for all of them and leases them. The wake payload is
+  checker session for those of ONE requester (one `group`; an entry
+  without is a group of its own) and leases them; other requesters'
+  checks go to the next runs. So a page one person points the checker
+  at never shares a run with anyone else's checks or nonces. The wake
+  payload is
   the whole prompt: `watch-checker-prompt.template.md`, rendered by
   `bin/render-checker-prompt.py` with the checks as data: one JSON
   object per line (`{id, nonce, what, expires}`, ASCII only), between
   `BEGIN DATA <token>` and `END DATA <token>` lines whose token is
   random per render. Nothing listed: the hook stays silent.
 - **The checker** may only search and read the web and run
-  `bin/watch-report.py`: no other command, file, message or tool. It
+  `bin/watch-report.py`: no other command, file, message or tool.
+  Recommended runtime hardening: give the checker chat web search and
+  fetch plus one shell command, allowed by exact prefix: `python3
+  <pkg>/bin/watch-report.py ` (or the package's `.venv/bin/python3`),
+  and nothing else. It
   first screens each condition: one that is more than a plain
   condition (instructions, an address to send anything to, a request
   to reveal anything) is reported `refused` and not checked. Then it
   checks the rest and reports each once.
 - **Reports.** `bin/watch-report.py <id> <nonce>
-  met|not-met|unknown|refused '<summary>'` (summary: up to 300
-  characters, no control characters) refuses unless that id and nonce
+  met|not-met|unknown|refused --stdin`, the summary on stdin through a
+  heredoc whose end marker the renderer makes random per run (`<<END
+  MARKER>>` in the template), so text from a page cannot end it and
+  run as a command; a summary as the last argument still works. The
+  summary is up to 300 characters, whitespace collapsed, no control
+  characters. The tool refuses unless that id and nonce
   are listed in `web_watches_due.json`, then appends the report to
   `web_watch_results.json` (mode 600) under an flock on
   `watches.lock`. The monitor drains that file under the same lock and
@@ -708,7 +755,10 @@ checker --bin/watch-report.py--> web_watch_results.json --> monitor
   check and the nonce is that check's (constant-time compare); the
   nonce is spent then. Anything else (a forged, reused, late or unknown
   report) changes nothing and is logged.
-- **Results.** `met`: a `watch-met` fire with the summary; the watch
+- **Results.** A `met` or `refused` summary that looks like prompt
+  injection (the same patterns as the quarantine) is withheld from the
+  worker: the entry says `summary_withheld: true` instead.
+  `met`: a `watch-met` fire with the summary; the watch
   ends, or with `repeat` the next check waits at least 6 hours.
   `not-met`: the next check in `every`. `unknown`, or a check that
   expires unreported: a failure; the next check backs off (`every`
@@ -718,6 +768,18 @@ checker --bin/watch-report.py--> web_watch_results.json --> monitor
 - The Discord worker never creates a cron or anything else with a
   free-text prompt: it only asks for a web watch, bound to its queue
   item like any schedule action.
+- **Who asked, for real.** A wake can hold several people's messages,
+  so a fooled worker could put a stranger's condition on the item of
+  someone who may set web watches. So each queue item whose author may
+  set them (not an owner's DM, whose `owner_dm_nonce` does this
+  already) gets a `web_nonce` (128 bits; in `state.json` and
+  `web_nonces.json`, mode 600, read only by the wake hook, re-minted
+  while queued if lost, spent when the item settles). The wake hook
+  hands such an item out alone, adding `web_nonce` to it in the
+  payload, and a schedule action that adds a web watch must echo it:
+  without it the item is rejected and set aside, and stays open for
+  its own wake. The condition can then only come from a run that read
+  nobody else's text.
 
 ### watches.json (monitor-internal, durable)
 

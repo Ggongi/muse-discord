@@ -9,6 +9,8 @@ hooks/watch-due.sh runs this on every wake) to stdout, or to --out:
 
 - drops the installer notes above the template's first `---` line;
 - runs bin/ tools with the package's own Python and absolute path;
+- replaces every `<<END MARKER>>` with a random heredoc end marker for
+  the report tool's summary (watch-report.py --stdin);
 - replaces the `<<DUE CHECKS>>` line with the due checks as a data
   block: one JSON object per line ({id, nonce, what, expires}, ASCII
   only, so no entry spans lines), between `BEGIN DATA <token>` and
@@ -29,6 +31,7 @@ import sys
 PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATE = "watch-checker-prompt.template.md"
 DATA_LINE = "<<DUE CHECKS>>"
+END_MARKER = "<<END MARKER>>"
 FIELDS = ("id", "nonce", "what", "expires")
 
 
@@ -62,6 +65,9 @@ def render(template, pkg, entries, python="python3", token=None):
                             f"{shlex.quote(os.path.join(pkg, m.group(1)))}",
                   text)
     text = text.replace("<package dir>", pkg)
+    # The report's heredoc end marker: random per render, so no page
+    # text the checker copies can end it early.
+    text = text.replace(END_MARKER, "END_" + secrets.token_hex(8))
     # The data goes in last, so nothing above rewrites inside it.
     return text.replace(DATA_LINE, data_block(entries, token))
 
