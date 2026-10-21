@@ -44,6 +44,12 @@
 # owner_dm_nonce, which every outbox item for an owner DM must carry
 # (PROTOCOL.md, Owner DMs); an outbox entry for an owner DM without its
 # nonce (one the monitor will refuse) does not count as answering it.
+# An owner's command in a server (owner_command: true) wakes alone too,
+# apart from owner DMs and from everyone else's messages, and only an
+# owner-only wake gets each item's owner_command_nonce, which
+# bin/discord-api.py needs for anything but its two lookups. So a
+# stranger's message never shares the run that holds owner-command
+# power.
 #
 # This script targets Muse's hook runtime (it sources
 # $HATCH_HOOK_RUNTIME for the silent/wake/log/hook_state helpers and is
@@ -216,6 +222,17 @@ if [ -f "$PKG_DIR/owner_dm_nonces.json" ]; then
         "$PKG_DIR/owner_dm_nonces.json" 2>/dev/null) || all_nonces='{}'
     [ -n "$all_nonces" ] || all_nonces='{}'
 fi
+# The owner-command nonces (the monitor's private owner_items.json,
+# written before the item is queued): handed only to an owner-only wake.
+# No file at all: a monitor from before it existed (nothing waits).
+cmd_nonces='{}'
+cmd_file=0
+if [ -f "$PKG_DIR/owner_items.json" ]; then
+    cmd_file=1
+    cmd_nonces=$(jq -c 'if type == "object" then . else {} end' \
+        "$PKG_DIR/owner_items.json" 2>/dev/null) || cmd_nonces='{}'
+    [ -n "$cmd_nonces" ] || cmd_nonces='{}'
+fi
 
 # Open items: queued and not answered (a burst may be answered under any
 # of its fragments). An owner DM counts as answered only by an entry
@@ -256,6 +273,18 @@ if [ "$nonceless" -gt 0 ]; then
             and (.settings.speaker? // "") == "owner"
             and $nonces[.message_id | tostring] == null) | not)]')
 fi
+# Likewise an owner's command whose owner_command_nonce is not written
+# yet.
+cmdless=0
+[ "$cmd_file" -eq 0 ] || cmdless=$(printf '%s' "$due" \
+    | jq --argjson c "$cmd_nonces" '[.[] | select(.owner_command == true
+        and $c[.message_id | tostring] == null)] | length')
+if [ "$cmdless" -gt 0 ]; then
+    log "owner commands wait for their nonce" '{"items":"'"$cmdless"'"}'
+    due=$(printf '%s' "$due" | jq -c --argjson c "$cmd_nonces" \
+        '[.[] | select((.owner_command == true
+            and $c[.message_id | tostring] == null) | not)]')
+fi
 ndue=$(printf '%s' "$due" | jq 'length')
 if [ "$ndue" -eq 0 ]; then
     silent "a worker already holds every open item" \
@@ -275,6 +304,20 @@ if [ "$nowner" -gt 0 ] && [ "$nowner" -lt "$ndue" ]; then
     due=$owner_dms
     ndue=$nowner
 fi
+# Then the owners' commands (their server messages), apart from
+# everyone else's: such a wake holds owner-command power (below).
+ncmd=0
+if [ "$nowner" -eq 0 ]; then
+    owner_cmds=$(printf '%s' "$due" | jq -c \
+        '[.[] | select(.owner_command == true)]')
+    ncmd=$(printf '%s' "$owner_cmds" | jq 'length')
+    if [ "$ncmd" -gt 0 ] && [ "$ncmd" -lt "$ndue" ]; then
+        log "owner commands wake alone; the rest wait for the next run" \
+            '{"owner_commands":"'"$ncmd"'","held":"'"$((ndue - ncmd))"'"}'
+        due=$owner_cmds
+        ndue=$ncmd
+    fi
+fi
 # A wake of owner DMs only carries each item's owner_dm_nonce (the
 # capability every outbox item for an owner DM must echo; PROTOCOL.md).
 # The monitor keeps the nonces out of the queue file, in a private file
@@ -283,6 +326,12 @@ fi
 nonces='{}'
 if [ "$nowner" -gt 0 ] && [ "$nowner" -eq "$ndue" ]; then
     nonces=$all_nonces
+fi
+# Each owner command's owner_command_nonce, only in a wake that holds
+# nothing but owner items (owner DMs, or owner commands).
+cmds='{}'
+if [ "$nowner" -eq "$ndue" ] || [ "$ncmd" -eq "$ndue" ]; then
+    cmds=$cmd_nonces
 fi
 expired=$(printf '%s' "$due" | jq --argjson w "$woken" \
     '[.[] | select($w[.message_id] != null)] | length')
@@ -335,5 +384,5 @@ else
     persona_args=(--argjson persona null)
 fi
 
-payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" --argjson nonces "$nonces" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings} + (if $nonces[.message_id] then {owner_dm_nonce: $nonces[.message_id]} else {} end)]}')
+payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" --argjson nonces "$nonces" --argjson cmds "$cmds" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings} + (if $nonces[.message_id] then {owner_dm_nonce: $nonces[.message_id]} else {} end) + (if .owner_command == true and $cmds[.message_id] then {owner_command_nonce: $cmds[.message_id]} else {} end)]}')
 wake "muse-discord mentions pending" "$payload"

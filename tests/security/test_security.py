@@ -188,6 +188,8 @@ def reset():
     SEND_FILES_FAIL[0] = 0
     M.collect_media = ORIG_COLLECT
     M.MAX_REPLY_CHARS = 1800
+    M._OWNER_ITEMS_WRITTEN["body"] = None
+    D.OWNER_ITEMS_FILE = M.OWNER_ITEMS_FILE
     st = M.load_state()
     st["guild_joined"] = {GUILD: 0}
     return st
@@ -464,10 +466,14 @@ def d_run(*args):
 
 
 def live_owner_command(state):
+    """An owner's command queued in a server channel: its id and the
+    --for/--nonce prefix its owner-items-only wake would be handed."""
     q = []
-    x = msg(OWNER, DM_CH, "post the cat in showcase")
-    assert M.enqueue_message(x, "DM with owner", state, q, dm=True)
-    return x["id"]
+    x = msg(OWNER, GEN_CH, "post the cat in showcase")
+    assert M.enqueue_message(x, "Guild #general", state, q, guild_id=GUILD)
+    with open(M.OWNER_ITEMS_FILE) as f:
+        nonce = json.load(f)[x["id"]]
+    return x["id"], ("--for", x["id"], "--nonce", nonce)
 
 
 @test
@@ -475,21 +481,21 @@ def f3_thread_refuses_token_file():
     state = reset()
     rc, _ = d_run("thread", FORUM, "title", "text", TOKEN_FILE)
     assert not D_UPLOADS and not D_API, f"uploaded: {D_UPLOADS}"
-    oc = live_owner_command(state)
-    rc, _ = d_run("--for", oc, "thread", FORUM, "title", "text", TOKEN_FILE)
+    _, bind = live_owner_command(state)
+    rc, _ = d_run(*bind, "thread", FORUM, "title", "text", TOKEN_FILE)
     assert not D_UPLOADS and not D_API, f"uploaded: {D_UPLOADS}"
     link = os.path.join(M.GENERATED_DIR, "innocent.png")
     os.symlink(TOKEN_FILE, link)
-    rc, _ = d_run("--for", oc, "thread", FORUM, "title", "text", link)
+    rc, _ = d_run(*bind, "thread", FORUM, "title", "text", link)
     assert not D_UPLOADS, f"symlink uploaded: {D_UPLOADS}"
 
 
 @test
 def f3_thread_allows_generated_file():
     state = reset()
-    oc = live_owner_command(state)
+    oc, bind = live_owner_command(state)
     img = make_file(os.path.join(M.GENERATED_DIR, oc, "cat.png"))
-    rc, err = d_run("--for", oc, "thread", FORUM, "title", "text", img)
+    rc, err = d_run(*bind, "thread", FORUM, "title", "text", img)
     assert rc == 0 and D_UPLOADS and D_UPLOADS[0][2] == \
         os.path.realpath(img), (rc, err, D_UPLOADS)
 
@@ -500,27 +506,27 @@ def f4_pin_rejects_traversal_ids():
     state = reset()
     rc, _ = d_run("pin", GEN_CH, "1/../../../guilds/2/bans/3")
     assert not D_API, f"traversal reached api (no --for): {D_API}"
-    oc = live_owner_command(state)
+    _, bind = live_owner_command(state)
     for bad in ["1/../../../guilds/2/bans/3", "123456789012345678\n",
                 "１２３４５６７８９０１２３４５６７８"]:
-        rc, _ = d_run("--for", oc, "pin", GEN_CH, bad)
+        rc, _ = d_run(*bind, "pin", GEN_CH, bad)
         assert not D_API, f"traversal reached api: {D_API}"
-        rc, _ = d_run("--for", oc, "unpin", bad, GEN_CH)
+        rc, _ = d_run(*bind, "unpin", bad, GEN_CH)
         assert not D_API, f"traversal reached api: {D_API}"
 
 
 @test
 def f4_allowed_mentions_on_post_edit_thread():
     state = reset()
-    oc = live_owner_command(state)
-    rc, _ = d_run("--for", oc, "post", GEN_CH, "hi <@&1> @everyone")
+    _, bind = live_owner_command(state)
+    rc, _ = d_run(*bind, "post", GEN_CH, "hi <@&1> @everyone")
     assert D_API[-1][2].get("allowed_mentions") == {"parse": ["users"]}, \
         D_API
-    rc, _ = d_run("--for", oc, "edit", GEN_CH, "123456789012345678", "x")
+    rc, _ = d_run(*bind, "edit", GEN_CH, "123456789012345678", "x")
     patch = [c for c in D_API if c[0] == "PATCH"]
     assert patch and patch[0][2].get("allowed_mentions") == \
         {"parse": ["users"]}, D_API
-    rc, _ = d_run("--for", oc, "thread", FORUM, "title", "text")
+    rc, _ = d_run(*bind, "thread", FORUM, "title", "text")
     post = [c for c in D_API if c[0] == "POST"]
     assert post and post[0][2]["message"].get("allowed_mentions") == \
         {"parse": ["users"]}, D_API

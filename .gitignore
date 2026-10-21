@@ -30,6 +30,7 @@ update_check.json
 update_request.json
 directory.json
 owner_dm_nonces.json
+owner_items.json
 nl_journal.json
 telemetry.json
 telemetry_id

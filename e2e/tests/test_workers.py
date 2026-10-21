@@ -225,7 +225,7 @@ QUEUE = [
     {"message_id": "1001", "channel_id": "500", "channel_name": "T #e2e",
      "guild_id": "400", "kind": "mention", "author": "driver-a",
      "author_id": "11", "content": "<@99> hello", "media": [],
-     "history": [], "owner_command": True, "queued_at": 1},
+     "history": [], "owner_command": False, "queued_at": 1},
     {"message_id": "1002", "channel_id": "500", "channel_name": "T #e2e",
      "guild_id": "400", "kind": "mention", "author": "driver-b",
      "author_id": "12", "content": "one\ntwo", "burst": True,
@@ -286,7 +286,9 @@ class ClaudeWorker(ClaudeBase):
                                        re.M).group(1)),
                          claude_worker.LEASE_SECS)
         for rule in ("owner_dm_nonces.json", "{owner_dm_nonce: $nonces",
-                     '.kind == "dm"', '.settings.speaker'):
+                     '.kind == "dm"', '.settings.speaker',
+                     "owner_items.json", ".owner_command == true",
+                     "{owner_command_nonce: $cmds"):
             self.assertIn(rule, hook)
         p = claude_worker.build_payload(QUEUE, "persona!")
         self.assertEqual(set(p["items"][0]), set(claude_worker.PAYLOAD_FIELDS))
@@ -299,14 +301,14 @@ class ClaudeWorker(ClaudeBase):
         self.addCleanup(w.shutdown)
         write_json(self.pkg, "reply_queue.json", QUEUE + [OWNER_DM])
         # No nonce yet: the DM waits; the others go, without nonces.
-        items, nonces = w.due()
+        items, nonces, _ = w.due()
         self.assertEqual([i["message_id"] for i in items], ["1001", "1002"])
         self.assertEqual(nonces, {})
         w.leases.clear()
         write_json(self.pkg, claude_worker.OWNER_DM_NONCES,
                    {"2001": NONCE})
         # Now the DM wakes alone, with its nonce; the rest wait.
-        items, nonces = w.due()
+        items, nonces, _ = w.due()
         self.assertEqual([i["message_id"] for i in items], ["2001"])
         p = claude_worker.build_payload(items, None, nonces)
         self.assertEqual(p["items"][0]["owner_dm_nonce"], NONCE)
@@ -324,6 +326,38 @@ class ClaudeWorker(ClaudeBase):
              "owner_dm_nonce": NONCE}])
         items, _ = claude_worker.open_items(self.pkg)
         self.assertNotIn("2001", [i["message_id"] for i in items])
+
+    def test_owner_commands_wake_alone_with_their_nonce(self):
+        self.use_fake("hang")
+        w = claude_worker.Worker(self.pkg, os.path.join(self.tmp, "log"),
+                                 timeout=30)
+        self.addCleanup(w.shutdown)
+        own = dict(QUEUE[0], message_id="1005", owner_command=True)
+        write_json(self.pkg, "reply_queue.json", QUEUE + [own])
+        # No owner_items.json at all (an older monitor): it wakes alone,
+        # without a nonce.
+        items, _, cmds = w.due()
+        self.assertEqual(([i["message_id"] for i in items], cmds),
+                         (["1005"], {}))
+        w.leases.clear()
+        # No nonce yet: the command waits; the others go, without one.
+        write_json(self.pkg, claude_worker.OWNER_ITEMS, {})
+        items, _, cmds = w.due()
+        self.assertEqual([i["message_id"] for i in items], ["1001", "1002"])
+        self.assertEqual(cmds, {})
+        w.leases.clear()
+        write_json(self.pkg, claude_worker.OWNER_ITEMS, {"1005": NONCE})
+        items, _, cmds = w.due()
+        self.assertEqual([i["message_id"] for i in items], ["1005"])
+        p = claude_worker.build_payload(items, None, {}, cmds)
+        self.assertEqual(p["items"][0]["owner_command_nonce"], NONCE)
+        # Never on anyone else's item, nor in a mixed wake.
+        self.assertNotIn("owner_command_nonce", json.dumps(
+            claude_worker.build_payload(QUEUE, None, {}, {"1001": NONCE})))
+        # The rest go on the next poll, without it.
+        items, _, cmds = w.due()
+        self.assertEqual(([i["message_id"] for i in items], cmds),
+                         (["1001", "1002"], {}))
 
     def test_answers_each_item_once(self):
         self.use_fake("append")

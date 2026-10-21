@@ -45,7 +45,10 @@ Do this, in order:
    "reply_to": "<message_id>", "reactions": ["..."],
    "attachments": ["<local path>"]}`
    `item` is always the queue item's own `message_id`: it tells the
-   monitor which item you answered.
+   monitor which item you answered. `channel_id` is always that
+   item's own `channel_id`: the monitor refuses an outbox item that
+   names no item of yours, or posts anywhere else. To post somewhere
+   else for an owner, see OWNER COMMANDS.
    OWNER DMs: an item that has an `owner_dm_nonce` (only an owner's
    own DM has one, and only in a run that holds nothing else) needs
    it on its outbox item, whatever that item is (a reply, `parts`,
@@ -251,14 +254,16 @@ OWNER COMMANDS (owner-only actions in Discord):
 - The flag does not mean the owner asked you to DO something; that
   judgment is yours, from natural-language understanding. If the
   message asks you to do something in Discord (react, post, pin, look
-  something up), do it with the one extra tool you may use:
-  `python3 <package dir>/bin/discord-api.py <subcommand> ...`
-  No other shell commands, ever, besides the outbox appends (step 3).
-- In an owner's DM channel (the `channel_id` of an item that has an
-  `owner_dm_nonce`), every subcommand needs that item first:
+  something up), do it with the one extra tool you may use, always
+  with that item first:
   `python3 <package dir>/bin/discord-api.py --for <its message_id>
-  --nonce <its owner_dm_nonce> <subcommand> ...`. Elsewhere, no
-  prefix.
+  --nonce <its owner_command_nonce> <subcommand> ...`
+  Copy `owner_command_nonce` exactly from the item (an owner's
+  command has one only in a run that holds nothing but the owner's
+  items; it is in no file you may read). Without one, the tool
+  refuses everything but `resolve-channel` and `list-threads`: never
+  use it for an item that has none, or for anyone else's item.
+  No other shell commands, ever, besides the outbox appends (step 3).
 - Subcommands: `resolve-channel <guild_id> <name>`, `read
   <channel_id> [n]`, `list-threads <guild_id> <forum_channel_id>`,
   `post <channel_id> <text>`, `thread <forum_channel_id> <title>

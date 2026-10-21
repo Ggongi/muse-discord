@@ -7,6 +7,19 @@ and ONLY for a queue item the monitor stamped with owner_command=true
 verified user IDs). It is how "react to your post in #showcase" actually
 does something instead of getting a chatter reply.
 
+Every subcommand that acts in or reads a channel (read, post, thread,
+react, pin, unpin, edit, delete-own) needs a leading `--for <the item's
+message_id> --nonce <its owner_command_nonce>`, checked in constant
+time against owner_items.json: the monitor's private file (mode 600,
+read here and never printed) of the open owner-command items and their
+nonces (an owner DM's is its owner_dm_nonce). The wake hook hands the
+nonce only to a wake that holds nothing but owner items, so a worker
+woken by someone else's message (and maybe their prompt injection)
+cannot read anyone's DMs or post anywhere through this tool, even when
+it knows the owner's message id. Only resolve-channel and list-threads
+(names and ids of a server's channels and active threads; no message
+content) work without it.
+
 Every id argument must be a plain Discord id (ids are interpolated into
 API paths, so "1/../../guilds/2/bans/3" must never get through), files
 can only be uploaded from the package's generated/ dir, and messages
@@ -19,10 +32,8 @@ DM, when the owners cannot be read from the config) needs a leading
 constant time against owner_dm_nonces.json (the monitor's private file,
 read here and never printed) and against the API (that message must be
 in that channel). The wake hook hands a nonce only to a wake that holds
-nothing but owner DMs, so a worker woken by someone else's message (and
-maybe their prompt injection) cannot post, edit, delete, react, pin or
-read in an owner's DM through this tool. Server channels need no
---for, which is accepted and ignored there.
+nothing but owner DMs, so a run handed an owner's server message cannot
+act in the owner's DM either.
 
 Subcommands are a deliberate allowlist. Moderation (ban/kick/timeout),
 server settings, webhooks, roles, and anything else are NOT implemented:
@@ -49,6 +60,7 @@ import uuid
 PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GENERATED_DIR = os.path.join(PACKAGE_DIR, "generated")
 OWNER_DM_NONCES_FILE = os.path.join(PACKAGE_DIR, "owner_dm_nonces.json")
+OWNER_ITEMS_FILE = os.path.join(PACKAGE_DIR, "owner_items.json")
 DM_TYPES = (1, 3)   # DM, group DM
 # --for / --nonce from the command line (main), for guard_channel.
 BINDING = {"for": None, "nonce": None}
@@ -106,14 +118,33 @@ def _owners():
         return None
 
 
-def _live_nonce(message_id):
+def _live_nonce(message_id, path=None):
     try:
-        with open(OWNER_DM_NONCES_FILE) as f:
+        with open(path or OWNER_DM_NONCES_FILE) as f:
             data = json.load(f)
     except (OSError, ValueError):
         return None
     want = data.get(message_id) if isinstance(data, dict) else None
     return want if isinstance(want, str) and want else None
+
+
+def require_owner_command():
+    """Refuse unless --for names an open owner-command queue item and
+    --nonce is its owner_command_nonce (see the module docstring)."""
+    mid, got = BINDING["for"], BINDING["nonce"]
+    if not mid or not got:
+        raise SystemExit(
+            "Refusing: this subcommand is for an owner's command only. "
+            "Put --for <the item's message_id> --nonce <its "
+            "owner_command_nonce> before the subcommand.")
+    if not re.fullmatch(r"[1-9][0-9]{16,19}", mid):
+        raise SystemExit(f"Refusing: --for {mid!r} is not a Discord id.")
+    want = _live_nonce(mid, OWNER_ITEMS_FILE)
+    if not want or not hmac.compare_digest(
+            want.encode(), got.encode("utf-8", "replace")):
+        raise SystemExit(
+            f"Refusing: {mid} is not an open owner command, or --nonce "
+            f"is not its owner_command_nonce.")
 
 
 def guard_channel(cid):
@@ -379,6 +410,11 @@ def cmd_delete_own(args):
     print(f"deleted {mid}")
 
 
+# Lookups any run may make: a server's channel and active-thread names
+# and ids, never message content. Every other subcommand needs an owner
+# command (require_owner_command).
+UNGATED = {"resolve-channel", "list-threads"}
+
 COMMANDS = {
     "resolve-channel": (cmd_resolve_channel, 2),
     "read": (cmd_read, 1),
@@ -395,22 +431,26 @@ COMMANDS = {
 
 def main(argv):
     args = argv[1:]
-    # Leading --for <message_id> and --nonce <owner_dm_nonce>: needed
-    # only in an owner's DM (guard_channel); elsewhere --for is accepted
-    # and ignored, for worker prompts written when the tool required it.
+    # Leading --for <message_id> and --nonce <its owner_command_nonce
+    # (an owner DM's owner_dm_nonce)>: required by every subcommand but
+    # resolve-channel and list-threads (require_owner_command), and in
+    # an owner's DM checked as that DM's nonce too (guard_channel).
     BINDING.update({"for": None, "nonce": None})
     while len(args) >= 2 and args[0] in ("--for", "--nonce"):
         BINDING[args[0][2:]] = args[1]
         args = args[2:]
     if not args or args[0] not in COMMANDS:
         print("usage: discord-api.py [--for <message_id> --nonce "
-              "<owner_dm_nonce>] <" + "|".join(sorted(COMMANDS)) + "> ...",
+              "<owner_command_nonce>] <" + "|".join(sorted(COMMANDS))
+              + "> ...",
               file=sys.stderr)
         return 2
     fn, min_args = COMMANDS[args[0]]
     if len(args) - 1 < min_args:
         print(fn.__doc__.strip(), file=sys.stderr)
         return 2
+    if args[0] not in UNGATED:
+        require_owner_command()
     fn(args[1:])
     return 0
 

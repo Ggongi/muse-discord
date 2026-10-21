@@ -2999,6 +2999,7 @@ def nl_write_nonces(state):
               > NL.MAX_AGE]:
         del n[k]
     body = {k: v["nonce"] for k, v in n.items()}
+    owner_items_write(state)   # an owner DM's command uses its nonce
     if body == _NL_NONCES_WRITTEN["body"]:
         return
     try:
@@ -3296,7 +3297,75 @@ def owner_dm_upkeep(state, force=False):
             n[mid]["fragments"] = frags
         print(f"Owner DM {mid} had no nonce; minted one for its next "
               f"wake.", flush=True)
+    owner_items_upkeep(state, queue, now)
     nl_write_nonces(state)
+
+
+# ---------------------------------------------------------------------------
+# Owner commands are bound to their wake too. bin/discord-api.py acts in
+# a channel (read, post, thread, react, pin, unpin, edit, delete-own)
+# only for an open queue item the monitor stamped owner_command (an
+# owner's own message, where abilities.owner_commands is on), with that
+# item's owner_command_nonce: 128 random bits kept in state.json
+# (owner_items) and in owner_items.json (mode 600, the open
+# owner-command items only), never in reply_queue.json. An owner's DM
+# uses its owner_dm_nonce. The wake hook hands the nonce only to a run
+# that holds nothing but owner items (they wake alone), so a run woken
+# by someone else's message cannot act through the tool even when it
+# knows the owner's message id (it is in the channel history).
+# ---------------------------------------------------------------------------
+OWNER_ITEMS_FILE = os.path.join(BASE_DIR, "owner_items.json")
+_OWNER_ITEMS_WRITTEN = {"body": None}
+# A new owner item is kept this long even before the queue file shows
+# it (it is noted before the queue write).
+OWNER_ITEM_GRACE_SECS = 120
+
+
+def note_owner_item(state, mid, dm=False):
+    """Queue item mid is an owner's command: mint its nonce (an owner
+    DM's is its owner_dm_nonce) and write owner_items.json."""
+    e = state.setdefault("owner_items", {})
+    e[str(mid)] = {"at": time.time()} if dm else {
+        "nonce": secrets.token_hex(16), "at": time.time()}
+    for old in list(e)[:-300]:
+        del e[old]
+    owner_items_write(state)
+
+
+def owner_items_write(state):
+    """owner_items.json = {message_id: owner_command_nonce} for the
+    open owner-command items (written only when that changed)."""
+    nl = state.get("nl_nonces") or {}
+    body = {}
+    for mid, e in (state.get("owner_items") or {}).items():
+        n = e.get("nonce") if isinstance(e, dict) else None
+        n = n or (nl.get(mid) or {}).get("nonce")
+        if n:
+            body[mid] = n
+    if body == _OWNER_ITEMS_WRITTEN["body"]:
+        return
+    try:
+        _write_private(OWNER_ITEMS_FILE, body)
+        _OWNER_ITEMS_WRITTEN["body"] = body
+    except OSError as e:
+        print(f"Could not write owner_items.json: {e}", flush=True)
+
+
+def owner_items_upkeep(state, queue, now):
+    """(owner_dm_upkeep) Drop owner items no longer queued; mint one for
+    a queued owner command that has none (state.json lost)."""
+    e = state.setdefault("owner_items", {})
+    queued = {str(q["message_id"]): q for q in queue
+              if isinstance(q, dict) and q.get("message_id")}
+    for mid in [m for m, v in e.items() if m not in queued and (
+            not isinstance(v, dict)
+            or now - v.get("at", 0) > OWNER_ITEM_GRACE_SECS)]:
+        del e[mid]
+    for mid, q in queued.items():
+        if mid not in e and q.get("owner_command") is True \
+                and str(q.get("author_id")) in OWNER_USER_IDS:
+            note_owner_item(state, mid, dm=_queued_owner_dm(state, q))
+    owner_items_write(state)
 
 
 def is_forwarded(msg):
@@ -5540,6 +5609,7 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     note_item_meta(state, msg["id"], author_id=author_id,
                    channel_id=msg["channel_id"], bot=from_bot, dm=dm,
                    kind=item["kind"], owner_dm=owner_dm,
+                   owner_command=owner_command,
                    # Settings requests: never from a forwarded message;
                    # attachments or a reply to someone else's message
                    # always need the owner's Apply.
@@ -5551,6 +5621,9 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         # before the item reaches the queue file).
         nl_mint_nonce(state, msg["id"], msg["channel_id"],
                       [f["id"] for f in fragments])
+    if owner_command:
+        # bin/discord-api.py's capability for this owner's command.
+        note_owner_item(state, msg["id"], dm=owner_dm)
     print(f"Queued {item['kind']}{' (follow-up)' if item['follow_up'] else ''}"
           f" from {msg['author'].get('username')} in "
           f"{cname}{burst_note}: {content[:80]}", flush=True)
@@ -6060,6 +6133,8 @@ def process_outbox(state):
     nonces = state.get("nl_nonces") or {}
     for qid in done_ids & set(nonces):
         del nonces[qid]   # answered: its capability is spent
+    for qid in done_ids & set(state.get("owner_items") or {}):
+        del state["owner_items"][qid]
     nl_write_nonces(state)
 
     def answered(q):

@@ -4,11 +4,16 @@ monitor queued (item, else reply_to, through burst fragments), in that
 message's own channel. A run woken by anyone (and maybe prompt-injected)
 can no longer post under a made-up item, or under a real item into some
 other channel: an ownerless or paused server, a place where replies are
-off, or a DM. Normal and multi-part replies, threads, bursts and
-released never_share holds work as before.
+off, or a DM. Owner commands that post elsewhere go through
+bin/discord-api.py with the item's owner_command_nonce, which the
+monitor writes to owner_items.json (mode 600) for owner-command items
+only. Normal and multi-part replies, threads, bursts and released
+never_share holds work as before.
 
 Usage: [MUT_DIR=<tree>] python3 tests/ownerdm/test_replies_bound.py"""
+import json
 import os
+import stat
 import sys
 import unittest
 
@@ -134,6 +139,51 @@ class StillWorks(_B):
         self.process()
         self.assertEqual([x["content"] for x in self.sends(CH)],
                          ["project falcon is"], self.out)
+
+
+class OwnerItems(_B):
+    """What bin/discord-api.py reads: the open owner-command items."""
+
+    def items_file(self):
+        with open(self.mod.OWNER_ITEMS_FILE) as f:
+            return json.load(f)
+
+    def test_owner_commands_only_and_spent_on_answer(self):
+        own = self.queue(gmsg(OWNER, "<@bot> pin that", mention=True),
+                         dm=False, guild=G1)
+        s = self.stranger_mention()
+        meta = self.st["item_meta"]
+        self.assertIs(meta[own["id"]]["owner_command"], True)
+        self.assertIs(meta[s["id"]]["owner_command"], False)
+        data = self.items_file()
+        self.assertEqual(list(data), [own["id"]])
+        self.assertRegex(data[own["id"]], r"^[0-9a-f]{32}$")
+        mode = os.stat(self.mod.OWNER_ITEMS_FILE).st_mode
+        self.assertEqual(stat.S_IMODE(mode), 0o600)
+        with open(self.mod.QUEUE_FILE) as f:
+            self.assertNotIn(data[own["id"]], f.read())
+        self.outbox(self.reply(own, "Pinned."))
+        self.assertEqual(self.items_file(), {})
+
+    def test_owner_dm_uses_its_dm_nonce(self):
+        m = self.owner_dm("pin my last message in #general")
+        self.assertEqual(self.items_file(), {m["id"]: self.nonce(m["id"])})
+
+    def test_upkeep_restores_and_prunes(self):
+        own = self.queue(gmsg(OWNER, "<@bot> post this", mention=True),
+                         dm=False, guild=G1)
+        self.st["owner_items"] = {"1" + "0" * 17: {"nonce": "a" * 32,
+                                                  "at": 0}}
+        with quiet():
+            self.mod.owner_dm_upkeep(self.st, force=True)
+        self.assertEqual(list(self.items_file()), [own["id"]])
+
+    def test_off_where_owner_commands_are_off(self):
+        self.config("everywhere:\n  abilities:\n    owner_commands: off\n")
+        self.queue(gmsg(OWNER, "<@bot> pin that", mention=True),
+                   dm=False, guild=G1)
+        self.assertEqual(self.items_file() if os.path.exists(
+            self.mod.OWNER_ITEMS_FILE) else {}, {})
 
 
 if __name__ == "__main__":
