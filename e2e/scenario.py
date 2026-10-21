@@ -198,8 +198,10 @@ def _validate_send(s, where, labels, fixtures_dir, threads=(),
     (None: the channel); this send's label is added to it."""
     located = {} if located is None else located
     _need_map(s, where)
-    _only_keys(s, ("as", "text", "label", "reply_to", "attach", "in"),
-               where, required=("as",))
+    _only_keys(s, ("as", "text", "label", "reply_to", "attach", "in",
+                   "typing"), where, required=("as",))
+    if "typing" in s and not isinstance(s["typing"], bool):
+        _fail(f"{where}.typing", "expected true or false")
     if s["as"] not in DRIVERS:
         _fail(f"{where}.as", f"expected one of {', '.join(DRIVERS)}, got "
                              f"{s['as']!r}")

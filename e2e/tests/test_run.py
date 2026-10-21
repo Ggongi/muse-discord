@@ -194,6 +194,9 @@ class FakeBot:
     def me(self):
         return {"id": self.uid, "username": f"bot{self.uid}"}
 
+    def typing(self, cid):
+        return None
+
     def send(self, cid, content, reply_to=None, files=None):
         if self.guild.no_thread_send and any(
                 t[2] == cid for t in self.guild.threads):

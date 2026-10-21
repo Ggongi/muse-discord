@@ -7,6 +7,9 @@
 # own "ack 1" under it, each at gateway speed (a reply normally lands
 # in ~3 s; 20 s leaves CI headroom and still fails a stalled
 # pipeline). Every fragment is settled by the one reply.
+# A types before each follow-up, as a person does: Discord sometimes
+# delays a driver's post by 2 s or more, past the 1.5 s quiet gap, and
+# typing is what holds a real person's burst open across such a pause.
 # Catches: a lost mention, a double send, a reply posted unthreaded,
 # one reply per fragment or a partial burst ("ack 1"/"ack 2"), the
 # reply under the first fragment, and two authors folded together.
@@ -15,8 +18,8 @@ tier: 1
 title: "A burst gets one reply under its last fragment; a second person's mention gets its own"
 steps:
   - send: { as: a, text: "<@SUT> quick question", label: q1 }
-  - send: { as: a, text: "about the release", label: q2 }
-  - send: { as: a, text: "is it out yet?", label: q3 }
+  - send: { as: a, text: "about the release", label: q2, typing: true }
+  - send: { as: a, text: "is it out yet?", label: q3, typing: true }
   - send: { as: b, text: "<@SUT> question from B", label: qb }
   - wait_for: { sut_messages: 2, timeout: 60 }
 expect:
