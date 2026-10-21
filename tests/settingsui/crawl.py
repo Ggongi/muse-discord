@@ -212,8 +212,7 @@ def clicks_for(c):
                 [([H.SAM], H.resolved_for(7, [H.SAM]))]
         return [([H.SAM], H.resolved_for(7, [H.SAM]))]
     if ct == 8:
-        target = H.LOBBY if "welcome" in cid else H.GENERAL
-        return [([target], H.resolved_for(8, [target]))]
+        return [([H.GENERAL], H.resolved_for(8, [H.GENERAL]))]
     return []
 
 

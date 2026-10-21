@@ -60,7 +60,7 @@ class Base(unittest.TestCase):
         """Classify and stage msg the way the poll / gateway do."""
         with quiet() as buf:
             kind = self.m.classify_message(self.st, msg, cname, guild)
-            if kind and kind != "join":
+            if kind:
                 self.m.stage_found(self.st, msg, cname, guild, kind)
         return kind, buf.getvalue()
 
@@ -224,7 +224,7 @@ class RefusedStaysRefused(Base):
         inbox.put(dm)
         with quiet():
             self.assertEqual(m.drain_gateway(self.st, inbox,
-                                             m.CHANNELS)[2], [])
+                                             m.CHANNELS)[1], [])
         self.assertEqual(self.ledger(dm["id"])["status"], "skipped")
         # A stranger's declined DM stays unrecorded.
         stranger = dmsg(U1, "hello", channel="400000000000000078")
@@ -304,7 +304,7 @@ class NewThreads(Base):
     def poll(self, tid):
         with quiet():
             return self.m.check_channel(
-                tid, "Lounge #general > plans", self.st, G1)[0]
+                tid, "Lounge #general > plans", self.st, G1)
 
     def test_new_thread_mention_staged_once(self):
         # The refresh lists the thread before its gateway event is
@@ -394,7 +394,7 @@ class SystemNotices(Base):
         inbox.put(pin)
         with quiet():
             self.assertEqual(m.drain_gateway(self.st, inbox,
-                                             m.CHANNELS)[2], [])
+                                             m.CHANNELS)[1], [])
         m.api.history[DM_CH] = [pin]
         self.assertEqual(self.sweep({}, dms=True), [])
 

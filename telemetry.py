@@ -250,9 +250,7 @@ def features(st, ms):
         raw["update_notices"] = onoff(st.updates_notify)
     except Exception:
         pass
-    # Media may be a plugin (plugins.media.*) or core (media.*).
-    for name, keys in (("media", ("media.enabled",
-                                  "plugins.media.enabled")),):
+    for name, keys in (("media", ("media.enabled",)),):
         for key in keys:
             try:
                 if st.spec(key) is None:

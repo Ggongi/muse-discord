@@ -67,24 +67,22 @@ fields:
 
 | field                      | meaning                                                                                                                                                                 |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `message_id`               | Discord ID of the triggering message (join message ID for welcomes)                                                                                                     |
-| `channel_id`               | Channel to reply in (resolved welcome channel for welcomes)                                                                                                             |
+| `message_id`               | Discord ID of the triggering message                                                                                                                                    |
+| `channel_id`               | Channel to reply in                                                                                                                                                     |
 | `channel_name`             | Guild-qualified display, e.g. `"My Server #general"`, or `"DM with <name>"`                                                                                             |
 | `guild_id`                 | Guild ID, or null for DMs                                                                                                                                               |
-| `kind`                     | `"mention"` (direct address: @mention or reply to the bot), `"dm"`, or `"welcome"`                                                                                      |
-| `author`, `author_id`      | Triggering user (the new member, for welcomes)                                                                                                                          |
+| `kind`                     | `"mention"` (direct address: @mention or reply to the bot) or `"dm"`                                                                                                    |
+| `author`, `author_id`      | Triggering user                                                                                                                                                         |
 | `content`                  | Message text; for bursts, all fragments joined oldest-first with newlines                                                                                               |
 | `timestamp`                | ISO timestamp of the trigger                                                                                                                                            |
 | `media`                    | Downloaded viewable media: `[{path, content_type, source}]`. Video attachments/GIF embeds are represented as sampled still frames (`source` starts with `video-frame:`) |
 | `documents`                | Extracted attachment text: `[{name, content_type, text}]` (text truncated)                                                                                              |
 | `unviewable`               | Names of attachments the monitor could not make viewable                                                                                                                |
 | `history`                  | Up to 8 recent channel messages before the trigger: `[{id, author, author_id, bot, display?, text, ts}]`                                                                |
-| `may_generate`             | Permission flag set by the media_generation plugin (see Plugins). Permission, not a decision                                                                            |
+| `may_generate`             | Permission flag from the media settings (`media.*`, see Attachment / generation rules). Permission, not a decision                                                      |
 | `owner_command`            | True only when stamped from an owner's verified user ID                                                                                                                 |
 | `burst`, `burst_fragments` | Burst coalescing: `burst_fragments` is `[{message_id, content, timestamp}]`                                                                                             |
 | `reply_to`                 | When the trigger used Discord's reply feature: `{author, author_id, content, is_bot}`, else null                                                                        |
-| `welcome`                  | True on welcome items                                                                                                                                                   |
-| `welcome_prompt`           | Welcome items only: the plugin's rendered prompt for this join                                                                                                          |
 | `from_bot`                 | True when the trigger's author is another bot (allowed by `who.bots: when-addressed`)                                                                                   |
 | `bot_turns`                | Consecutive bot messages in the channel's rolling history (last 12), ending at the trigger, since a human last spoke (0 for humans)                                     |
 | `participants`             | People and agents in the conversation: `[{name, display?, id, bot, you?}]`. Address them as `<@id>`                                                                     |
@@ -102,13 +100,13 @@ back ahead of whatever was appended meanwhile. Item fields:
 
 | field          | meaning                                                                                                                                                |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `item`         | The `message_id` of the queue item this answers. The monitor removes that queue item once it settles this one. Set it on every item, welcomes included |
+| `item`         | The `message_id` of the queue item this answers. The monitor removes that queue item once it settles this one. Set it on every item                    |
 | `channel_id`   | Where to send (required)                                                                                                                               |
 | `channel_name` | Display name, used in logs                                                                                                                             |
 | `author`       | Who is being replied to, used in logs                                                                                                                  |
 | `text`         | The reply, OR use `parts` instead (never both)                                                                                                         |
 | `parts`        | The reply as 2-4 sequential messages (fragmented delivery)                                                                                             |
-| `reply_to`     | Message ID to thread under. Omit for welcome items (system messages cannot be replied to)                                                              |
+| `reply_to`     | Message ID to thread under                                                                                                                             |
 | `reactions`    | Optional list of emoji to add to the `reply_to` message. A react-only item may have empty text                                                         |
 | `attachments` | Optional list of local file paths to attach. Only files in the replied-to item's `generated/<message_id>/` are sent, per the generation rules below     |
 | `silent`     | True = deliberately no reply: the monitor records it so the sweep does not requeue the message. Needs `reply_to` or `item`                               |
@@ -166,8 +164,9 @@ Monitor-side guarantees on send:
 Generation is gated in code, not by prompt wording, and every file is
 bound to the queue item it was made for:
 
-1. The media_generation plugin (when enabled) grants `may_generate`
-   on queue items from allowed users. At that moment the monitor
+1. Where `media.enabled` is on, the monitor grants `may_generate` on
+   queue items from the people `media.who` allows there, while no
+   `media.per_day` cap along the place is reached. At that moment it
    records a single-use approval in its state, keyed by the trigger
    message ID and bound to the item's channel, valid for 1 hour.
 2. The worker generates (or not) by its own context judgment, writing
@@ -183,9 +182,9 @@ bound to the queue item it was made for:
    the item's channel. There is no fallback: a file anywhere else, or
    without an approval, is never sent. Files over Discord's 8 MB
    upload cap are compressed with ffmpeg when possible, else dropped.
-4. The approval is consumed, and the `generation_sent` hook (the
-   plugin's daily cap) runs, only after the send succeeds; a retried
-   send re-attaches the same files.
+4. The approval is consumed, and the reply counts toward
+   `media.per_day` (in each scope where a cap is set), only after the
+   send succeeds; a retried send re-attaches the same files.
 
 ### Owner DMs
 
@@ -319,7 +318,8 @@ only the poll advances it), `gw_seen` (ids the gateway already handled
 above that watermark, so the poll skips them), `replied_to` (bounded),
 rate-limit counters, rolling per-channel `history`, staged coalescing
 bursts (`pending`, including their retry bookkeeping), generation
-approvals and sent-file records, plugin state under `plugins`, and the
+approvals, sent-file records and today's `media.per_day` counts
+(`media_sent`), plugin state under `plugins`, and the
 server-safety records below: `guild_joined` (per-guild join watermark,
 epoch seconds), `guild_first_seen` (fallback watermark when Discord
 has not reported the join time), `known_guilds` and `join_notices`
@@ -352,7 +352,7 @@ Enforced by the monitor before anything reaches the queue:
   @mention, a reply to the bot, or a DM, plus follow-ups where
   `who.replies` is `conversational` (the default; see below). Other
   bots count as direct address too (`who.bots: when-addressed`),
-  never for welcomes or follow-ups. Before queueing, these apply:
+  never for follow-ups. Before queueing, these apply:
   `who.replies: off`, `who.allow`, `who.ignore`,
   `who.bot_exchange_limit`, the `limits`, and `privacy.suspicious`.
 - **Join watermark.** A message older than the bot's join time in its
@@ -360,8 +360,8 @@ Enforced by the monitor before anything reaches the queue:
   catch-up, late channel discovery, sweep). It can still appear in a
   later trigger's `history`.
 - **New servers.** Every server passes through `all_servers`, which
-  ships careful: replies only when addressed (or as a follow-up),
-  welcomes off. A server with no entry under `servers` gets exactly
+  ships careful: replies only when addressed (or as a follow-up), and
+  plugins not marked safe for new servers off. A server with no entry under `servers` gets exactly
   that. On joining a new server the bot DMs the owners its name, ID,
   and visible channels.
 
@@ -398,8 +398,8 @@ it every time:
    items.
 2. Append each outbox item under the lock (`bin/outbox-append.py`)
    as soon as it is drafted, so a slow item never delays the rest:
-   DMs and mentions first, then welcomes and other plugin items, but
-   items in the same channel in queue order. Never rewrite the outbox,
+   DMs and mentions first, then any other kind, but items in the
+   same channel in queue order. Never rewrite the outbox,
    and never edit the monitor's files (state, ledger, quarantine).
 3. Never hold or request the bot token. Your only Discord write path
    is the outbox, plus `bin/discord-api.py` on items stamped
@@ -453,7 +453,8 @@ replace, never merge; only `style.notes` concatenates (the server's,
 then the channel's). Servers and channels are keyed by quoted
 Discord ids; a `name:` beside one is a label (the engine only warns
 when it is stale). A channel or category may set only `replies`,
-`notes`, and `plugins.<id>.enabled`. In an owner's own DM, memory is
+`notes`, `media.enabled` and `plugins.<id>.enabled`. In an owner's
+own DM, memory is
 always `everything` and limits never apply; that is fixed, not a
 setting. Both files are re-read when they change; no restart.
 
@@ -699,7 +700,7 @@ state.json); a request over 24 hours old is refused. Outcomes:
 | A change that does not make sense (unknown or wrong server's channel, a thread or category, a key not offered there, a setting only config.yaml changes) | Nothing is applied: "I couldn't change that, so nothing changed: ..." |
 | Already in force | "Nothing to change: ..." (or listed as "(already so)" beside the rest) |
 | Safe (judged by outcome, as /settings does) | Applied at once as one undo group `nl-<item>` by the owner's id: "Done: In #general in Work, When it answers: Chatty → Only when @mentioned." with **Undo** |
-| Risky by outcome, free text (Instructions, the status line, welcome notes: set or add), over an hour old, from a message with attachments or a reply to someone else's message, or turning DMs off (then the owner could not undo it by message) | Nothing yet: what it would do and the warnings, with **Apply** and **Cancel**; it expires after 10 minutes. The card never carries the worker's text |
+| Risky by outcome, free text (Instructions, the status line: set or add), over an hour old, from a message with attachments or a reply to someone else's message, or turning DMs off (then the owner could not undo it by message) | Nothing yet: what it would do and the warnings, with **Apply** and **Cancel**; it expires after 10 minutes. The card never carries the worker's text |
 
 Places are ids only (from the card's `places`); the monitor names
 every one in its reply ("#general in Work"), so a wrong pick shows,
@@ -808,7 +809,7 @@ and refuses to write when there is one, except the new
 | `bot.token_file`, `bot.token_env`     | `token_from`: the path, or `env:NAME`                            |
 | `bot.guild_ids`                       | `engine.guild_ids`                                               |
 | `behavior.respond_to`                 | none: @mentions and replies to the bot always count              |
-| `behavior.active_guild_ids`           | each listed server gets `servers."<id>".plugins.welcome.enabled` |
+| `behavior.active_guild_ids`           | none (only welcomes used it)                                     |
 | `behavior.bots`: `direct` / `off`     | `who.bots`: `when-addressed` / `ignore`                          |
 | `behavior.dm_policy`: `owner_only`    | `dms.who.dms_from: owners`                                       |
 | `behavior.dm_policy`: `open`          | `dms.who.dms_from: anyone`                                       |
@@ -820,24 +821,34 @@ and refuses to write when there is one, except the new
 | `safety.per_user_daily_cap`           | `limits.per_person_per_day` (`null` = `none`)                    |
 | `presence.status_text`, `status_kind` | `presence.status`, `presence.kind`                               |
 | `updates.check`                       | `updates.notify`                                                 |
-| `plugins.welcome.channel`, `prompt`   | `plugins.welcome.channel`, `notes`, per server                   |
-| `plugins.media_generation`            | `plugins.media`                                                  |
-| `media_generation.allowed_user_ids`   | `plugins.media.who` (empty = `owners`)                           |
-| `media_generation.daily_cap`          | `plugins.media.per_day` (`null` = `none`)                        |
+| `plugins.media_generation`            | `media`                                                          |
+| `media_generation.allowed_user_ids`   | `media.who` (empty = `owners`)                                   |
+| `media_generation.daily_cap`          | `media.per_day` (`null` = `none`)                                |
 
-Three old values have no everyday equivalent and map to hidden
+Two old values have no everyday equivalent and map to hidden
 settings, so an old config behaves exactly as before:
 `safety.injection_quarantine: false` maps to
-`privacy.suspicious: answer` (no check), `presence.enabled: false`
-to a hidden `presence.enabled: off`, and the welcome plugin's
-`prompt`, `daily_cap` and `max_age_hours` stay plugin settings of
-the same names (not editable from Discord).
+`privacy.suspicious: answer` (no check), and `presence.enabled: false`
+to a hidden `presence.enabled: off`.
+
+Settings that moved since:
+
+- Image and video generation was the `media_generation` plugin
+  (settings id `media`); it is built in now. `plugins.media.*` (and
+  the older `plugins.media_generation.*` names) in config.yaml still
+  mean `media.*`, and so do config.discord.yaml entries and their
+  undo history under the old keys (the file is rewritten with the
+  new keys on its next change).
+- The welcome plugin was removed. Its settings in config.yaml are
+  ignored (one line in monitor.log says so), and its Discord-side
+  changes are dropped.
 
 ## Plugin hooks
 
 Plugins live in `plugins/<name>/` with `plugin.py` (exposing
 `register(api) -> {hook: callable}`) and `plugin.yaml` (declaring its
-settings manifest). A plugin's hooks run only for events in places
+settings manifest). No plugin ships today; `plugins/README.md` shows a
+minimal one. A plugin's hooks run only for events in places
 where `plugins.<id>.enabled` resolves to `on` (it scopes like any
 setting, down to a channel). The `api` object passed to `register`
 gives the plugin its own resolved settings for the event's place,
@@ -850,8 +861,7 @@ Hooks the core calls:
 
 | hook              | signature                              | semantics                                                                                                                  |
 | ----------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `gate_message`    | `(ctx, msg, guild_id) -> dict \| None` | During enqueue. Returned dicts merge into the queue item. ctx: `{state, owners}`                                           |
-| `member_join`     | `(ctx, msg, guild_id) -> item \| None` | A member joined (system message type 7). Return a complete queue item to append, or None. ctx: `{state, channels, guilds}` |
+| `gate_message`    | `(ctx, msg, guild_id) -> dict \| None` | During enqueue. Returned dicts merge into the queue item (never `may_generate`). ctx: `{state, owners}`                    |
 | `generation_sent` | `(ctx, outbox_item)`                   | A generated attachment was actually sent. ctx: `{state}`                                                                   |
 
 A failing plugin hook is caught and logged; it never breaks the
@@ -863,7 +873,7 @@ pipeline.
 they validate and scope like core settings:
 
 ```yaml
-# a media plugin's plugin.yaml (excerpt)
+# a plugin's plugin.yaml (excerpt)
 settings:
   who:
     type: people

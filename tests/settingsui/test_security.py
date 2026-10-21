@@ -58,7 +58,6 @@ class AdminForgery(Base):
                 (f"mdset:2:val:c{G1}.{MUSECHAT}:r:conversational:q", None),
                 (f"mdset:2:set:s{G1}:r", ["conversational"]),
                 (f"mdset:2:val:s{G1}:~media.enabled:on:q", None),
-                (f"mdset:2:val:s{G1}:~welcome.enabled:on:q", None),
                 (f"mdset:2:set:s{G1}:m", ["everything"]),
                 (f"mdset:2:val:s{G1}:pd:=:q", None),
                 (f"mdset:2:val:s{G1}:al:everyone:q", None),

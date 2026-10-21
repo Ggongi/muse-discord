@@ -658,7 +658,7 @@ class AdminDigest(unittest.TestCase):
                                      "conversational", "off")
         c.notify_owners_admin_change(G1, "222000000000000009", "who.ignore",
                                      [], [U1])
-        c.notify_owners_admin_change(G2, U1, "plugins.welcome.enabled",
+        c.notify_owners_admin_change(G2, U1, "media.enabled",
                                      True, False)
         with quiet():
             self.assertEqual(self.mod.flush_admin_digests(), 0)

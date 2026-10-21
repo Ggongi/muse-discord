@@ -74,12 +74,11 @@ everywhere:
     per_person_per_day: none
                           # replies per day to any one person. Owners are
                           # never limited.
-  plugins:
-    media:                # images and video, if your Muse can make
+  media:                  # images and video, if your Muse can make
                           # them; off by default
-      enabled: off
-      who: owners         # owners, everyone, or a list like allow
-      per_day: none       # generated replies per day: a number, or none
+    enabled: off
+    who: owners           # owners, everyone, or a list like allow
+    per_day: none         # generated replies per day: a number, or none
 
 # --- Direct messages ----------------------------------------------
 dms:
@@ -102,9 +101,6 @@ all_servers:
                           #   just replied to when they keep talking
                           #   within ~2 minutes without @mentioning it.
                           # off: stays quiet.
-  plugins:
-    welcome:
-      enabled: off        # greet new members; turn it on per server
 
 # --- One server at a time (example: remove the # marks to use) ----
 # servers:
@@ -114,12 +110,8 @@ all_servers:
 #       notes: "Friendly community. Playful is fine."
 #     limits:
 #       per_day: 200
-#     plugins:
-#       welcome:
-#         enabled: on
-#         channel: "300000000000000001"   # or system: the server's
-#                                         # system channel
-#         notes: "Point newcomers to #rules."
+#     media:
+#       who: everyone             # anyone here may ask for images
 #     channels:                   # a channel or a whole category
 #       "300000000000000002":
 #         name: "#announcements"
