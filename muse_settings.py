@@ -2636,7 +2636,7 @@ BIG_FOR_CONVERSATIONAL = 500
 BIG_FOR_CAPS = 500           # members: removing a reply cap is risky
 MEDIA_PER_DAY_RISKY = 20
 BOT_EXCHANGE_RISKY = 10
-WEB_CHECKS_PER_DAY = 200   # muse_watches.WEB_TOTAL_PER_DAY
+WEB_CHECKS_PER_DAY = 48    # muse_watches.WEB_PLACE_PER_DAY
 ADMIN_REPLIES = ("off", "when-addressed")
 ADMIN_QUIETER = ("Server admins can make the bot quieter, or undo their own "
                  "changes back to what the owners set; never louder.")
@@ -4301,7 +4301,8 @@ def assess(st, changes, info=None, names=None, named=()):
         out.warnings.append(f"People other than you in {_join(web)} can "
                             f"set web watches: your Muse then reads web "
                             f"pages for them, a turn per check (up to "
-                            f"{WEB_CHECKS_PER_DAY} checks a day).")
+                            f"{WEB_CHECKS_PER_DAY} checks a day per "
+                            f"server).")
     if uncapped:
         out.warnings.append(
             f"Generations per day: more than "

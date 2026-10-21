@@ -56,10 +56,13 @@ REMIND_MAX_SECS = 366 * 86400           # at most a year away
 WATCH_DEFAULT_SECS = 7 * 86400          # a watch runs a week by default
 WATCH_MAX_SECS = 30 * 86400             # and 30 days at most
 WATCH_MIN_SECS = 60
-PER_PERSON = {"remind": 10, "watch": 5}
-OWNER_PER_PERSON = {"remind": 100, "watch": 50}
-PER_PLACE = 100       # active items set in one server (DMs: one pool)
-TOTAL_MAX = 2000      # everything, a bound on the file
+# Owners have no limits. Everyone else: one silent ceiling across all
+# kinds (a backstop against trolls and bad parses, not a setting), and
+# each fire counts as a reply toward limits.* where it fires (monitor).
+PER_PERSON_MAX = 25
+TOTAL_MAX = 2000      # everyone but the owners, a bound on the file
+HELD_RETRY_SECS = 600   # a fire held by a reply cap is tried this often
+HELD_KEEP_SECS = 7 * 86400
 LATE_SECS = 3600      # a reminder this overdue fires once, marked late
 DEBOUNCE_SECS = 15 * 60   # one notification per watch per 15 minutes
 FIRE_KEEP_SECS = 24 * 3600  # a fire nobody answers is dropped after this
@@ -74,9 +77,9 @@ TZ_MAX_USERS = 5000
 # Web watches.
 WEB_EVERY_MIN = 1800            # checked at most every 30 minutes
 WEB_EVERY_MAX = 7 * 86400
-WEB_PER_PERSON, WEB_OWNER_PER_PERSON = 3, 20
 WEB_PLACE_PER_DAY = 48          # checks a day for non-owners, per place
-WEB_TOTAL_PER_DAY = 200         # checks a day in all
+WEB_TOTAL_PER_DAY = 500         # checks a day in all (owners' too): a
+                                # safety budget, checked when issuing
 WEB_CHECK_SECS = 15 * 60        # a check's nonce lives this long
 WEB_MAX_FAILS = 5               # unknown / no report in a row: it ends
 WEB_REPEAT_SECS = 6 * 3600      # "every time": quiet this long after one
@@ -103,14 +106,8 @@ LINES = {
     "not-allowed": "Only my owners can set reminders and watches here, "
                    "so nothing changed.",
     "bot": "I don't set reminders or watches for bots.",
-    "cap-remind": "I can't set that: you already have {cap} reminders "
-                  "going, the most I keep for one person. Ask me what "
-                  "I'm watching for you to see or cancel some.",
-    "cap-watch": "I can't set that: you already have {cap} watches going, "
-                 "the most I keep for one person. Ask me what I'm "
-                 "watching for you to see or cancel some.",
-    "cap-place": "I can't set that: I already keep as many reminders and "
-                 "watches as I can for this place.",
+    "cap-person": "You have {cap} reminders and watches going; cancel "
+                  "one first.",
     "cap-total": "I can't set that: I'm keeping as many reminders and "
                  "watches as I can right now.",
     "time": "I couldn't set that: a reminder has to be between a minute "
@@ -126,8 +123,6 @@ LINES = {
     "unknown": "I couldn't set that, so nothing changed.",
     "web-not-allowed": "Only my owners can set web watches here, so "
                        "nothing changed.",
-    "cap-watch-web": "I can't set that: you already have {cap} web "
-                     "watches going, the most I keep for one person.",
     "web-budget": "I can't set that: checking it that often would go "
                   "past how many web checks I do a day. Nothing changed; "
                   "a longer gap between checks may fit.",
@@ -348,7 +343,7 @@ def shape_problems(item):
 # ---------------------------------------------------------------------------
 def empty():
     return {"v": VERSION, "items": {}, "fires": {}, "done": {}, "tz": {},
-            "fired": {}, "web": {}}
+            "fired": {}, "web": {}, "held": {}}
 
 
 def _clean(data):
@@ -449,7 +444,8 @@ def active(data, now=None):
 
 
 def place_key(rec):
-    """Where an item counts toward PER_PLACE: its server, or "dm"."""
+    """Where a web watch's checks count (WEB_PLACE_PER_DAY): its server,
+    or "dm"."""
     return "dm" if rec.get("dm") else f"server:{rec.get('guild_id')}"
 
 
@@ -553,7 +549,8 @@ def decide(data, req, changes, now=None):
                         "every": c["every"], "repeat": bool(c.get("repeat")),
                         "owner": req.owner, "next_check": now,
                         "check": None, "fails": 0, "checks": 0})
-            _web_budget_fits(live, rec)
+            if not req.owner:
+                _web_budget_fits(live, rec)
         else:
             m = c["match"]
             until = parse_utc(c["until"]) if "until" in c \
@@ -566,23 +563,17 @@ def decide(data, req, changes, now=None):
                         "words": [w.strip() for w in m["words"]],
                         "every": bool(m.get("every")),
                         "last_fired": 0, "fired": 0})
-        mine = [r for r in live.values() if r.get("requester") ==
-                req.requester and r.get("kind") == kind]
-        if kind == "watch-web":
-            cap = WEB_OWNER_PER_PERSON if req.owner else WEB_PER_PERSON
-        else:
-            cap = (OWNER_PER_PERSON if req.owner else PER_PERSON)[kind]
-        if len(mine) >= cap:
-            raise Refused(LINES[f"cap-{kind}"].format(cap=cap), REASON_CAP,
-                          {"kind": kind, "cap": cap, "per": "person"})
-        here = place_key(rec)
-        if not req.owner and sum(1 for r in live.values()
-                                 if place_key(r) == here) >= PER_PLACE:
-            raise Refused(LINES["cap-place"], REASON_CAP,
-                          {"kind": kind, "cap": PER_PLACE, "per": "place"})
-        if len(live) >= TOTAL_MAX:
-            raise Refused(LINES["cap-total"], REASON_CAP,
-                          {"kind": kind, "cap": TOTAL_MAX, "per": "total"})
+        if not req.owner:
+            mine = sum(1 for r in live.values()
+                       if r.get("requester") == req.requester)
+            if mine >= PER_PERSON_MAX:
+                raise Refused(LINES["cap-person"].format(cap=PER_PERSON_MAX),
+                              REASON_CAP, {"kind": kind, "cap": PER_PERSON_MAX,
+                                           "per": "person"})
+            if len(live) >= TOTAL_MAX:
+                raise Refused(LINES["cap-total"], REASON_CAP,
+                              {"kind": kind, "cap": TOTAL_MAX,
+                               "per": "total"})
         rid = new_id({"items": items}, kind)
         items[rid] = rec
         live[rid] = rec
@@ -781,9 +772,10 @@ def _per_day(rec):
 
 
 def _web_budget_fits(live, rec):
-    """A new web watch must fit the daily check budgets as planned (every
-    active web watch checked on its schedule): non-owners' per place,
-    everyone's in total."""
+    """A non-owner's new web watch must fit the daily check budgets as
+    planned (every active web watch checked on its schedule): non-owners'
+    per place, and the total. (Owners' are never refused; the total
+    still paces their checks, in web_issue.)"""
     web = [r for r in live.values() if r.get("kind") == "watch-web"]
     total = sum(_per_day(r) for r in web) + _per_day(rec)
     here = place_key(rec)

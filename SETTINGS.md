@@ -99,7 +99,7 @@ What the owner says, and the key and values to use:
 | Instructions / house rules | `style.notes` | text, up to 500 characters |
 | What it may say about you | `privacy.memory` | `everything`, `public-only`, `nothing` |
 | Possible prompt injection | `privacy.suspicious` | `hold-for-review`, `ignore` |
-| Replies per day / per person per day | `limits.per_day`, `limits.per_person_per_day` | a number, `none` |
+| Replies per day / per person per day (a reminder or watch coming due counts as a reply) | `limits.per_day`, `limits.per_person_per_day` | a number, `none` |
 | Images and video | `media.enabled`, `media.who`, `media.per_day` | on/off; `owners`, `everyone`, ids; a number, `none` |
 | Status line, update notices (`defaults`) | `presence.status`, `updates.notify` | text up to 128; on/off |
 | Anonymous usage stats (`defaults`; README, Privacy and usage stats) | `telemetry.usage_stats` | on/off |

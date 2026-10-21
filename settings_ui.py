@@ -1561,15 +1561,26 @@ def explain_outcome(R, o):
         return f"I hit a daily reply limit.{tip}", None, True
     if code == "watch-cap":
         n, per = detail.get("cap"), detail.get("per")
-        what = "reminders" if detail.get("kind") == "remind" else "watches"
         if per == "person" and isinstance(n, int):
             return (f"{who_m} asked for a reminder or watch, but already "
-                    f"had {n:,} {what} going, the most I keep for one "
-                    f"person. I told them so."), None, True
+                    f"had {n:,} going, the most I keep for one person. I "
+                    f"told them to cancel one first."), None, True
+        if per == "budget":
+            return ("I didn't set the web watch they asked for: checking "
+                    "it that often would go past the web checks I do a "
+                    "day. I told them so."), None, True
         return ("I didn't set the reminder or watch they asked for: I "
-                "already keep as many as I can"
-                + (" for this place." if per == "place" else ".")
-                + " I told them so."), None, True
+                "already keep as many as I can. I told them so."), \
+            None, True
+    if code == "watch-held":
+        key, n = detail.get("key"), detail.get("cap")
+        which = (f"the daily limit of {n:,} replies a person"
+                 if key == "limits.per_person_per_day" and isinstance(n, int)
+                 else f"the daily limit of {n:,} replies in total"
+                 if isinstance(n, int) else "a daily reply limit")
+        return (f"A reminder or watch for {who_m} came due, but they had "
+                f"hit {which} (each one counts as a reply). It is held, "
+                f"and goes out once the limit allows.{tip}"), None, True
     if code == "watch-not-allowed":
         cur = R.st.get("abilities.reminders", sc)
         if cur == "everyone":

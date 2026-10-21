@@ -369,24 +369,50 @@ class Watches(Base):
 
 
 class Caps(Base):
-    def test_per_person_cap_ledgered_and_owner_higher(self):
+    def test_one_ceiling_for_others_none_for_owners(self):
         add = {"op": "add", "kind": "remind", "after": 600}
-        for _ in range(2):
+        watch = {"op": "add", "kind": "watch",
+                 "match": {"words": ["pizza"], "in": "here"}}
+        for changes in ([add] * 5, [add] * 5, [add] * 5, [watch] * 5,
+                        [add] * 5):
             msg, _ = self.ask(U1)
-            self.outbox(self.reply(msg, [add] * 5))
-        self.assertEqual(len(self.items()), 10, self.out)
+            self.outbox(self.reply(msg, changes))
+        self.assertEqual(len(self.items()), 25, self.out)
         msg, _ = self.ask(U1)
-        self.outbox(self.reply(msg, [add], text="Done, set!"))
-        self.assertEqual(len(self.items()), 10)
+        self.outbox(self.reply(msg, [watch], text="Done, set!"))
+        self.assertEqual(len(self.items()), 25)
         (_, data), = self.new_sends()
         self.assertNotEqual(data["content"], "Done, set!")
         e = self.ledger(msg["id"])
         self.assertEqual((e["status"], e["code"]), ("skipped", "watch-cap"))
         self.assertEqual(e["detail"]["per"], "person")
-        for _ in range(3):
+        for _ in range(7):                            # owners: no limit
             msg, _ = self.ask(OWNER)
             self.outbox(self.reply(msg, [add] * 5))
-        self.assertEqual(len(self.items()), 25)
+        self.assertEqual(len(self.items()), 60)
+
+    def test_a_fire_counts_as_a_reply_and_waits_when_capped(self):
+        self.cfg = CFG + "everywhere:\n  limits:\n    per_person_per_day: 2\n"
+        self.boot()
+        msg, _ = self.ask(U1)                         # 1 reply today
+        self.outbox(self.reply(msg, [
+            {"op": "add", "kind": "remind", "after": 60},
+            {"op": "add", "kind": "remind", "after": 120}]))
+        self.tick(ahead=61)                           # 2: at the cap
+        self.assertEqual(len(self.fires()), 1)
+        self.tick(ahead=121)                          # over it: held
+        self.assertEqual(len(self.fires()), 1)
+        held = self.mod.watch_store().read()["held"]
+        (fid,) = held
+        self.assertEqual(self.ledger(fid)["code"], "watch-held")
+        self.assertEqual(self.items(), {})            # not lost: held
+        self.st["rate"]["day"] = ""                   # a new day
+        self.tick(ahead=121 + 601)
+        fires = self.fires()
+        self.assertEqual(len(fires), 2, self.out)
+        later = [f for f in fires if f["message_id"] == fid][0]
+        self.assertTrue(later["reminder"]["late"])
+        self.assertEqual(self.mod.watch_store().read()["held"], {})
 
     def test_owners_only_setting(self):
         self.cfg = CFG + "    abilities:\n      reminders: owners\n"

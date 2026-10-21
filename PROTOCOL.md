@@ -527,14 +527,17 @@ after a restart never applies it twice):
 | Case | What happens |
 | --- | --- |
 | Done | The worker's reply goes out as written |
-| Refused for a limit | Nothing changes; the monitor's own one-line explanation goes out instead of the worker's text; ledgered `skipped`, `reminders: limit reached`, code `watch-cap`, `detail` `{kind, cap, per}` (`per`: `person`, `place`, `total`, or `budget` for web checks) |
+| Refused for a limit | Nothing changes; the monitor's own one-line explanation goes out instead of the worker's text; ledgered `skipped`, `reminders: limit reached`, code `watch-cap`, `detail` `{kind, cap, per}` (`per`: `person`, `total`, or `budget` for web checks) |
 | Refused by `abilities.*` | The same, code `watch-not-allowed` |
 | Anything else that makes no sense (a time out of range, a place they can't read, an id that is not theirs, an unknown time zone) | Nothing changes; the monitor's line goes out; ledgered `replied` |
 
-Limits (constants in `muse_watches.py`): 10 reminders, 5 watches and 3
-web watches a person (owners: 100, 50 and 20); 100 active items set
-in one server (DMs share one pool; owners' items are not counted
-against it); 2000 in all.
+Limits (constants in `muse_watches.py`, not settings): the owners have
+none. Anyone else may have 25 active reminders and watches of all
+kinds together (refused past that: "You have 25 reminders and watches
+going; cancel one first"), and there are 2000 in all for everyone but
+the owners. Each fire counts as a reply toward the reply limits where
+it fires (Fires, below), and web watches have a daily check budget
+(Web watches).
 
 ### What the worker sees
 
@@ -576,6 +579,14 @@ item of its own (a *fire*), which wakes the worker like any other:
 - Several due at once for one person in one place are one item (after
   downtime too: never a burst). A reminder more than an hour overdue is
   marked `late`, and fires once.
+- For anyone but the owners, a fire counts as one reply toward
+  `limits.per_day` and `limits.per_person_per_day` in the scope where it
+  fires, like any reply. Over a cap it is held, not dropped: kept in
+  `watches.json` (`held`), ledgered `skipped`, `reminder held: daily
+  cap reached`, code `watch-held` (`detail`: which cap, as for `cap`;
+  **Why no reply?** explains it), tried again every 10 minutes, and
+  sent once the cap allows, marked `late`. One held for 7 days is
+  dropped.
 - Before a fire is queued the monitor checks again that it would
   answer the requester there now (`who.replies`, the ownerless-server
   gate, `who.allow` / `who.ignore`, the DM rules) and, in a server,
@@ -659,11 +670,13 @@ checker --bin/watch-report.py--> web_watch_results.json --> monitor
 ```
 
 - **Budgets.** Checks at most every 30 minutes per watch. A day (UTC)
-  has 200 checks in all, and 48 per place (a server, or all DMs) for
-  watches set by people other than the owners. A new web watch must
-  fit them as planned (every active web watch checked on schedule),
-  else it is refused (`watch-cap`, `per: budget`); checks that would
-  go past the day's budget wait until the next day.
+  has 500 checks in all (the owners' included: a safety budget), and
+  48 per place (a server, or all DMs) for watches set by people other
+  than the owners. A non-owner's new web watch must fit them as
+  planned (every active web watch checked on schedule), else it is
+  refused (`watch-cap`, `per: budget`); the owners' are never refused.
+  Checks that would go past the day's budget wait until the next
+  day.
 - **Due checks.** The first check is due when the watch is set, then
   every `every` seconds. The monitor issues each due check with a fresh
   nonce (128 bits, `secrets`), live for 15 minutes, and lists the live

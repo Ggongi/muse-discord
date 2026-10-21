@@ -30,9 +30,12 @@ New:
   watching for pizza". Everyone sees and cancels only their own; you
   can cancel anyone's, and your Muse can list and cancel them all with
   `bin/watches.py`.
-- Limits: 10 reminders, 5 watches and 3 web watches a person (more for
-  you), and 100 per server. A refused request shows up in **Why no
-  reply?**.
+- Limits: none for you. Anyone else can have 25 reminders and watches
+  going, and each one that comes due counts as a reply toward
+  "Replies per person per day" (and the daily total) where it lands.
+  Over that cap it waits and goes out, late, once the cap allows; it
+  is never lost. Web watches also have a daily check budget. A refused
+  or waiting one shows up in **Why no reply?**.
 - Two new settings: "Who can set reminders and watches" (everyone) and
   "Who can set web watches" (only you). DM the bot to change them, or
   ask your Muse.

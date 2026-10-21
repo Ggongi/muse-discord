@@ -1316,6 +1316,7 @@ _LEDGER_CODES = (
     # Reminders and watches (muse_watches.REASON_*): a request refused.
     ("reminders: limit reached", "watch-cap"),
     ("reminders: not allowed", "watch-not-allowed"),
+    ("reminder held: daily cap reached", "watch-held"),
 )
 
 
@@ -1324,7 +1325,7 @@ def ledger_code(status, reason=""):
     a message was skipped (replies-off, ownerless, dm-off, bots-ignore,
     not-allowed, dm-not-allowed, cap, bot-exchange, suspicious-ignored,
     predates-join, no-send, internal, worker-skipped, send-failed,
-    never-share, watch-cap, watch-not-allowed, other)."""
+    never-share, watch-cap, watch-not-allowed, watch-held, other)."""
     if status in ("replied", "queued", "quarantined"):
         return status
     if status == "enqueue_failed":
@@ -6543,9 +6544,12 @@ def watch_tick(state, now=None):
     store = watch_store()
     data = store.read()
     queued = []
+    held_due = any(h.get("next", 0) <= now
+                   for h in (data.get("held") or {}).values())
     if _WATCH_MATCHES or W.due_reminders(data, now) \
-            or W.expired_watches(data, now):
+            or W.expired_watches(data, now) or held_due:
         with store.edit() as data:
+            queued += _watch_release_held(state, data, now)
             entries = []
             for i, r in W.due_reminders(data, now):
                 del data["items"][i]
@@ -6587,27 +6591,83 @@ def _watch_make_fires(state, data, entries, now, kind="reminder"):
     store is written, so a fire is never queued without its record)."""
     out = []
     for (uid, cid), es in W.group(entries).items():
-        r0 = es[0][0]
-        gid, dm = r0.get("guild_id"), bool(r0.get("dm"))
-        name = r0.get("name") or uid
-        why = watch_fire_allowed(uid, name, cid, gid, dm)
-        if why:
-            print(f"Reminder for {name} in {cid} not sent ({why}).",
-                  flush=True)
-            continue
-        fid = W.new_fire_id(now)
-        ents = [dict(e, asked=msg_link(gid, cid, r["message_id"]))
-                for r, e in es]
-        q = watch_fire_item(state, fid, uid, name, cid, gid, dm, ents, now,
-                            kind=kind)
-        data["fires"][fid] = {
-            "id": fid, "at": now, "requester": uid, "channel_id": cid,
-            "guild_id": gid, "dm": dm,
-            "originals": sorted({r["message_id"] for r, _ in es}, key=int),
-            "item": q}
-        W.note_fired(data, fid, now)
-        out.append(q)
+        q = _watch_fire_group(state, data, uid, cid, es, now, kind)
+        if q:
+            out.append(q)
     return out
+
+
+def _watch_release_held(state, data, now):
+    """Fires a reply cap held back (see _watch_fire_group): tried again
+    every HELD_RETRY_SECS, going out (marked late) once the cap allows;
+    dropped after HELD_KEEP_SECS."""
+    out = []
+    held = data.setdefault("held", {})
+    for fid, h in list(held.items()):
+        if h.get("next", 0) > now:
+            continue
+        del held[fid]
+        if now - h.get("at", now) > W.HELD_KEEP_SECS:
+            print(f"Reminder {fid} held too long by a reply cap; dropped.",
+                  flush=True)
+            ledger_record(fid, "skipped", "reminder dropped: held too long",
+                          channel_id=h.get("cid"), author_id=h.get("uid"))
+            continue
+        es = [(r, dict(e, late=True)) for r, e in h.get("es") or []]
+        q = _watch_fire_group(state, data, h["uid"], h["cid"], es, now,
+                              h.get("kind") or "reminder", fid=fid,
+                              held_at=h.get("at", now))
+        if q:
+            out.append(q)
+    return out
+
+
+def _watch_fire_group(state, data, uid, cid, es, now, kind, fid=None,
+                      held_at=None):
+    """One fire for es [(record, fire entry)] of one person in one
+    place, or None. Not when the bot would no longer answer them there
+    (dropped). For anyone but the owners it counts as a reply toward the
+    limits (limits.per_day, limits.per_person_per_day) where it fires;
+    over a cap it is held (data["held"], ledgered skipped, "reminder
+    held") and tried again later, never lost."""
+    r0 = es[0][0]
+    gid, dm = r0.get("guild_id"), bool(r0.get("dm"))
+    name = r0.get("name") or uid
+    why = watch_fire_allowed(uid, name, cid, gid, dm)
+    if why:
+        print(f"Reminder for {name} in {cid} not sent ({why}).", flush=True)
+        return None
+    fid = fid or W.new_fire_id(now)
+    scope = scope_for(gid, cid, dm)
+    capped = rate_block(state, uid, cid, scope)
+    if capped:
+        data.setdefault("held", {})[fid] = {
+            "at": held_at or now, "next": now + W.HELD_RETRY_SECS,
+            "kind": kind, "uid": uid, "cid": cid,
+            "es": [[r, e] for r, e in es]}
+        if held_at is None:
+            print(f"Reminder for {name} in {cid} held: a reply cap is "
+                  f"reached ({capped['key']}).", flush=True)
+            ledger_record(fid, "skipped",
+                          "reminder held: daily cap reached",
+                          channel_id=cid, author=name, author_id=uid,
+                          detail=capped)
+        return None
+    rate_record(state, uid, scope)
+    if held_at is not None:
+        ledger_record(fid, "queued", channel_id=cid, author=name,
+                      author_id=uid)   # no longer held
+    ents = [dict(e, asked=msg_link(gid, cid, r["message_id"]))
+            for r, e in es]
+    q = watch_fire_item(state, fid, uid, name, cid, gid, dm, ents, now,
+                        kind=kind)
+    data["fires"][fid] = {
+        "id": fid, "at": now, "requester": uid, "channel_id": cid,
+        "guild_id": gid, "dm": dm,
+        "originals": sorted({r["message_id"] for r, _ in es}, key=int),
+        "item": q}
+    W.note_fired(data, fid, now)
+    return q
 
 
 def _web_take_results():
