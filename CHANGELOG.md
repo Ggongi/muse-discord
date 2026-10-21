@@ -35,10 +35,6 @@ New:
   bin/telemetry.py off`, set `telemetry: usage_stats: off` in
   config.yaml, or set `MUSE_DISCORD_TELEMETRY=off`. Days it was off are
   never sent. `bin/telemetry.py reset-id` replaces the install id.
-- Before anything is sent, the bot DMs each owner once about it, and
-  the first report waits at least 24 hours after that DM. If no owner
-  can be reached, nothing is sent (the DM is tried again hourly). If
-  you turn it off first, you never get the DM.
 
 **Action needed:**
 

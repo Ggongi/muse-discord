@@ -119,14 +119,6 @@ def cmd_status(args):
             and d.get("last_attempt") != T.utc_day():
         at = datetime.fromtimestamp(after, timezone.utc)
         print(f"Next send:   after {at:%Y-%m-%d %H:%M} UTC")
-    at = d.get("notice_at")
-    if isinstance(at, (int, float)):
-        print("Owner DM:    sent "
-              f"{datetime.fromtimestamp(at, timezone.utc):%Y-%m-%d %H:%M} UTC;"
-              " nothing is sent until 24 h after it")
-    else:
-        print("Owner DM:    not sent yet (nothing is sent until the owners "
-              "were told, and 24 h after)")
     print(f"Install id:  {T.read_install_id(ID_FILE, create=False) or '(none yet)'}")
     if not os.path.exists(DATA):
         print("(No counts yet: the monitor writes telemetry.json once it "
