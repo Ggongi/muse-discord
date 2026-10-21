@@ -68,7 +68,7 @@ Changed:
   everywhere. Each place shows a few settings as selects: when it
   replies, reply length, images and video, who can DM it and replies
   a person a day (whichever that place has; a channel can follow its
-  server again with "Like the server"). Then the server's style
+  server again with "Use server default"). Then the server's style
   (Friends, Community, Work, applied in one click with Undo), Pause
   or Resume, **Why no reply?**, and Undo for the last change. There
   are no More / Extras / Bot-wide pages, no Defaults page, no "Same
@@ -91,11 +91,16 @@ Changed:
 - Fixed after review: **Why no reply?** no longer fails to open when
   the same person (or the same cause) was refused twice; the second
   one shows without its own fix button. A channel in a category that
-  sets its own value now says it follows that category, not the
-  server. Picking Friends on a server over 50 members says why
+  sets its own value now offers "Use category default", not "Use
+  server default". Picking Friends on a server over 50 members says why
   nothing changed (it keeps to public facts there). Server admins get
   **Turn … back on** for images and video or a plugin that an admin
   turned off.
+- Wording from testing: the channel's follow option reads "Use server
+  default" (or "Use category default"), with "Currently: …" below
+  it; an "Applies to" label sits above the Where select; the style
+  section says "Applies to the whole server", and a server that
+  matches no style shows "Customized" selected in the style select.
 
 ## 2026-10-21: Anonymous usage stats, on by default
 

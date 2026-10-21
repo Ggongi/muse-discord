@@ -1097,7 +1097,15 @@ def style_select(R, gid):
     cur = ms.matching_preset(R.st, server)
     opts = [opt(title, name, PRESET_HELP.get(name), default=cur == title)
             for name, (title, _v) in ms.PRESETS.items()]
+    if cur is None:
+        # Not a style to apply: what the select shows while none
+        # matches (picking it changes nothing; see v_pre).
+        opts.append(opt("Customized", CUSTOMIZED, "Change the settings "
+                        "above, or DM me what you want.", default=True))
     return sel(cid("pre", f"s{gid}"), opts, "Pick a style…")
+
+
+CUSTOMIZED = "custom"
 
 
 def pause_buttons(R, place):
@@ -1167,20 +1175,21 @@ PLACE_CONTROLS = {"channel": ("r", "med"),
                   "dms": ("df", "ln", "med"),
                   "defaults": ("r", "df", "ln", "med", "pp")}
 CAP_CHOICES = (5, 10, 20, 50, 100)
+# When I reply's options, by value (and "Off", which is Pause).
+REPLY_CHOICES = {"conversational": "Chat freely",
+                 "when-addressed": "Only when @mentioned", "off": "Off"}
 
 
 def follow_option(R, place, key, now):
-    """The "=" option of a channel's select: what the channel follows
-    without its own setting, named: its category when the category sets
-    key, else the server."""
+    """The "=" option of a channel's select, in Discord's own words (its
+    notification settings): "Use server default", or "Use category
+    default" when the channel's category sets key; now is the label of
+    the value that gives."""
     cat = place.category_id
-    if cat and R.st.layer(("servers", place.guild_id, "channels", cat),
-                          key)[0]:
-        name = R.look(cat) or "its"
-        return opt(f"Like the {name} category", "=",
-                   f"Now {now}, as set for the {name} category")
-    return opt("Like the server", "=",
-               f"Now {now}, like the rest of {R.gname(place.guild_id)}")
+    by_cat = cat and R.st.layer(("servers", place.guild_id, "channels",
+                                 cat), key)[0]
+    return opt("Use category default" if by_cat else "Use server default",
+               "=", f"Currently: {now}")
 
 
 def only_you(R):
@@ -1191,7 +1200,7 @@ def ctl_replies(R, place):
     v = Val(R, place, "who.replies")
     opts = []
     if place.kind == "channel":
-        inh = UI_VALUES.get(("who.replies", v.inherited), "off")
+        inh = REPLY_CHOICES.get(v.inherited, "Off")
         o = follow_option(R, place, "who.replies", inh)
         if not v.set:
             o["default"] = True
@@ -1238,7 +1247,7 @@ def ctl_media(R, place):
     if place.kind in ("channel", "dms"):
         v = Val(R, place, "media.enabled")
         if place.kind == "channel":
-            inh = "on" if v.inherited else "off"
+            inh = "On" if v.inherited else "Off"
             o = follow_option(R, place, "media.enabled", inh)
             if not v.set:
                 o["default"] = True
@@ -1353,7 +1362,7 @@ def page_home(R, place):
     everywhere), a few settings, the server's style, pause, why, the
     last change, and the DM footer."""
     inner = [td("\n".join(head_lines(R, place))),
-             row(where_select(R, place)), sep()]
+             td("-# Applies to"), row(where_select(R, place)), sep()]
     for title, s in controls_for(R, place):
         head, _, note = title.partition("\n")
         inner.append(td(f"**{head}**" + (f"\n{note}" if note else "")))
@@ -1362,11 +1371,8 @@ def page_home(R, place):
     if place.kind in ("channel", "server"):
         gid = place.guild_id
         inner.append(sep())
-        style = ms.matching_preset(R.st, ms.Place.server(gid))
-        inner.append(td(f"**Style for all of {R.gname(gid)}**" + (
-            "" if style else "\n-# Customized. Picking a style replaces "
-                             "the server's settings; Undo brings them "
-                             "back.")))
+        inner.append(td(f"**Style for all of {R.gname(gid)}**\n"
+                        f"-# Applies to the whole server."))
         inner.append(row(style_select(R, gid)))
     inner += last_change_slot(R, place)
     paused = paused_at(R, place) is not None
@@ -2480,8 +2486,11 @@ def v_val(R, place, args, values):
 def v_pre(R, place, args, values):
     if not R.owner:
         return refusal(R)
-    if args or place.kind != "server" or not values \
-            or values[0] not in ms.PRESETS:
+    if args or place.kind != "server" or not values:
+        return notice(OUT_OF_DATE)
+    if values[0] == CUSTOMIZED:     # the "Customized" option: nothing
+        return show(R, *shown(R, place))
+    if values[0] not in ms.PRESETS:
         return notice(OUT_OF_DATE)
     name = values[0]
     try:

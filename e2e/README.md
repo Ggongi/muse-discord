@@ -258,8 +258,10 @@ Owner, in a server:
       place with **Done.** and **Undo**, `config.discord.yaml` gains
       the entry with your id as `by`, the log says `Settings
       reloaded`, and the bot's next reply follows it without a
-      restart. **Undo** puts it back; "Like the server" removes the
-      channel's own setting.
+      restart. **Undo** puts it back; "Use server default" (or "Use
+      category default" in a category that sets it) removes the
+      channel's own setting, and its "Currently: …" says what that
+      gives.
 - [ ] **Where** › All of the server, then Everywhere: each shows its
       own settings (reply length, images and video, replies a person
       a day; everywhere also who can DM it), and changes land there.
@@ -267,7 +269,8 @@ Owner, in a server:
       (it can cost money); Apply, then **Undo**.
 - [ ] **Style** › Community: one click applies it, the **Done** line
       lists what changed, one **Undo** reverts all of it. A server
-      that matches no style says it is customized.
+      that matches no style shows "Customized" selected; picking it
+      changes nothing.
 - [ ] The last change shows as one short line with **Undo** (which
       settings, who, when), never a long list of values.
 - [ ] **Why no reply?** on the channel page lists a message you sent
