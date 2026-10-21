@@ -10,7 +10,7 @@
 # to a worker, and a wake carries ONLY the items no live lease covers.
 # A message arriving while a worker is busy (say, generating a video)
 # wakes a second worker for just that message, never for the first
-# worker's items, so nothing is drafted, generated, or welcomed twice.
+# worker's items, so nothing is drafted or generated twice.
 # An item still open when its lease runs out (LEASE_SECS, long enough
 # for a slow generation) is handed out again, in case its worker died.
 # Items the worker already answered (they have an outbox entry, waiting
@@ -316,11 +316,17 @@ except Exception:
 print(os.path.join(sys.argv[2], os.path.expanduser(name or "persona.md")))
 PY
 ) || persona_file="$PKG_DIR/persona.md"
+
+# Usage counts (telemetry.py): one line per wake, once a monitor that
+# keeps them (telemetry.json) has run; it counts and removes the file.
+[ -e "$PKG_DIR/telemetry.json" ] \
+    && { echo >> "$PKG_DIR/telemetry.wakes"; } 2>/dev/null || true
+
 if [ -r "$persona_file" ]; then
     persona_args=(--rawfile persona "$persona_file")
 else
     persona_args=(--argjson persona null)
 fi
 
-payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" --argjson nonces "$nonces" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, welcome, welcome_prompt, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings} + (if $nonces[.message_id] then {owner_dm_nonce: $nonces[.message_id]} else {} end)]}')
+payload=$(printf '%s' "$due" | jq -c "${persona_args[@]}" --argjson nonces "$nonces" '{count: length, persona: $persona, items: [.[] | {message_id, channel_id, channel_name, kind, author, author_id, content, media, documents, unviewable, history, may_generate, owner_command, reply_to, burst, burst_fragments, from_bot, bot_turns, participants, follow_up, settings} + (if $nonces[.message_id] then {owner_dm_nonce: $nonces[.message_id]} else {} end)]}')
 wake "muse-discord mentions pending" "$payload"

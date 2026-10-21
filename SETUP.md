@@ -34,8 +34,7 @@ write it anywhere except the token file, and never commit config.yaml.
    - **Message Content Intent** (REQUIRED: without it Discord closes
      the gateway with code 4014 and the bot cannot read message text)
    - **Server Members Intent** is NOT needed; leave it off. The
-     monitor never requests it: joins (for the welcome plugin) arrive
-     as Discord's join system messages in the server's system channel.
+     monitor never requests it.
 4. (Optional) Under **Bot**, set the bot's username/avatar as desired.
    Under **General Information**, note the **Application ID**; it is
    the `client_id` for the invite URL in step 2, and leave
@@ -111,7 +110,7 @@ to, and keeps talking with someone it just answered when they write
 again within about 2 minutes; in DMs it answers only its owners;
 replies may draw on public facts about the owner (name, interests,
 public projects, opinions) but nothing private; there are no daily
-caps; welcomes and media generation are off. Step 5 and "Changing
+caps; image and video generation is off. Step 5 and "Changing
 settings later" below cover changing any of it.
 
 Check the file (no Discord connection is made, and the token is not
@@ -125,35 +124,21 @@ It names each problem: the file, the setting, and why. Fix every
 error before step 8: the bot refuses to start with an invalid
 config.yaml.
 
-## Step 5: Decide the plugins
+## Step 5: Decide on image and video generation
 
-Both plugins are off by default. Turn on only what the owner wants:
+Ask the owner one question: should the Muse make images and video when
+asked? It is off by default. Turn it on only if the worker runtime
+actually has media tools; if it doesn't, leave it off (the worker must
+never claim generation it cannot start):
 
-- **welcome**: greets new members. It is off in every server
-  (`all_servers`), and turned on one server at a time, under that
-  server's id (**[owner]** with Developer Mode on, right-click the
-  server icon and choose **Copy Server ID**):
+```yaml
+everywhere:
+  media:
+    enabled: on
+```
 
-  ```yaml
-  servers:
-    "200000000000000001":
-      name: My Server # a label for the owner; ignored by the bot
-      plugins:
-        welcome:
-          enabled: on
-          channel: system # or a channel id, in quotes
-          notes: "Point newcomers to #rules."
-  ```
-
-  `channel: system` is the server's Discord system channel.
-  `notes` tells the Muse what to mention to newcomers.
-
-- **media**: lets the owners (or anyone listed in
-  `plugins.media.who`) have the worker generate images/video, up to
-  `plugins.media.per_day` a day (`none` = no cap). Requires the
-  worker runtime to actually have media tools; if it doesn't, leave
-  `plugins.media.enabled: off` (the worker must never claim
-  generation it cannot start).
+When on, the owners (or anyone listed in `media.who`) can ask, up to
+`media.per_day` a day (`none` = no cap).
 
 Run `python3 bin/settings.py validate` again after editing.
 
@@ -299,19 +284,15 @@ see working before calling the install done.
    keeps delivering, and polls resume when the window ends. Do NOT
    restart the monitor repeatedly during a storm; restarts and extra
    API calls extend the limit.
-8. **Welcome** (if enabled): a new member joins (alt account). Expect
-   a welcome in the resolved channel, drafted from the prompt param.
-9. **Generation** (if enabled): owner asks the bot for an image.
+8. **Generation** (if enabled): owner asks the bot for an image.
    Expect a reply with the image attached, and the file visible in
-   `generated/<message id>/`. A user not in `plugins.media.who`
-   asking gets a brief decline.
-10. **New server** (if a second server is available): invite the
-    bot there. Expect a DM to the owner within a minute naming the
-    server, its ID, and the visible channels. The new server follows
-    `all_servers`: an @mention there gets a reply, and a member
-    joining there gets no welcome until that server turns welcomes
-    on.
-11. **Another bot** (if one is in the server): have it @mention this
+   `generated/<message id>/`. A user not in `media.who` asking gets a
+   brief decline.
+9. **New server** (if a second server is available): invite the bot
+   there. Expect a DM to the owner within a minute naming the server,
+   its ID, and the visible channels. The new server follows
+   `all_servers`: an @mention there gets a reply.
+10. **Another bot** (if one is in the server): have it @mention this
     bot or reply to one of its messages. Expect a reply that reaches
     the other bot as a real mention or reply, and expect the exchange
     to wind down on its own (silence or a reaction) instead of
@@ -363,6 +344,12 @@ to change the bot's settings finds its guide: "To change
 muse-discord's settings, read `<package dir>/SETTINGS.md` first and
 follow it."
 
+Tell the owner, in one line: muse-discord sends its maintainer
+anonymous daily usage counts (no names, ids or messages; README,
+"Privacy and usage stats"; the bot DMs them about it once, a day
+before the first report), and `python3 bin/telemetry.py off` (or
+`telemetry: usage_stats: off` in config.yaml) turns them off.
+
 ## Changing settings later
 
 The owner may ask to change how the bot behaves at any time ("be
@@ -381,33 +368,39 @@ friend's DMs through"). There are three ways:
   restart). Edit `config.yaml` by hand only for what that does not
   offer (owners, persona, never_share, plugins).
 
-The owner can also change most settings from Discord, without the
-Muse: type `/settings` in any channel the bot is in, or in a DM with
-the bot. Only the person who typed it sees the pages it opens.
+The owner can also change the most-used settings from Discord,
+without the Muse: type `/settings` in any channel the bot is in, or in
+a DM with the bot. Only the person who typed it sees the page it
+opens, and it is one page:
 
-- In a channel it opens that channel's page (in a thread, its parent
-  channel's): When it answers there, instructions added for it, and
-  image and video on or off. Buttons go to the server's page,
-  **Defaults** (what every server and DM follows unless it sets its
-  own), **DMs** and **Other servers**; a channel picker goes to any
-  other channel. In a DM with the bot it opens **DMs**.
-- A server's page has the basics (When it answers, What it may say
-  about you, Instructions and reply length, Replies per person per
-  day, Welcome and Image and video on or off), a preset picker
-  (Friends, Community, Work: it shows what would change before
-  anything is applied), **More settings** (Only answer these people,
-  Never answer, Other bots, caps, Possible prompt injection) and
-  **Extras settings** (where welcomes go, welcome notes, who may ask
-  for images and video).
-- Every choice starts with "Same as <place>: <value>": pick it to go
-  back to following the server or Defaults. A value set on that page
-  says who changed it and when, and says when it overrides
-  config.yaml.
-- Each change shows a **Done** line with **Undo**; the bottom of a
-  page shows the last change made there, with Undo (on a server's
-  page this includes its channels). Changes with risky results (DMs
-  opened to more people, memory shared in a big server, Pause
-  everywhere) show what they mean and wait for **Apply**.
+- At the top, one line on how the bot behaves there ("I reply only
+  when @mentioned · shares only public facts about people"), and a
+  **Where** select: the channel you typed it in (in a thread, its
+  parent channel), all of that server, or everywhere (every server
+  and DM that has no setting of its own). In a DM with the bot it
+  opens DMs.
+- Below it, a few settings for that place, each a select: **When I
+  reply** (Chat freely, Only when @mentioned), **Reply length**,
+  **Images & video** (Off, Only you, Everyone), **Who can DM me**
+  (in DMs and everywhere) and **Replies a person a day** (for a
+  server and everywhere). A channel has only When I reply and Images
+  & video, and either can be "Like the server" to follow the server
+  again.
+- **Style** for the whole server: Friends, Community or Work, applied
+  in one click (it lists what changed, with **Undo**).
+- **Pause here** (on the Everywhere page, **Pause everywhere**) and
+  **Resume**, **Why no reply?**, and **Undo** for the last change
+  made there (on a channel's page, the newest change in its server).
+- Everything else is changed by DMing the bot (above) or asking your
+  Muse: instructions, what it may say about you, other bots, the
+  total daily cap, prompt injection, who it answers or ignores, who
+  may DM it or make images by name, images and video per day, the
+  status line, update notices, and plugins. The page's last line says
+  so.
+- Each change shows a **Done** line with **Undo**. Changes with risky
+  results (DMs opened to more people, images and video for everyone
+  without a cap, a cap removed in a big server, Pause everywhere)
+  show what they mean and wait for **Apply**.
 - **Why no reply?** lists the last messages that addressed the bot
   there and got no answer, why, and a fix button where one helps.
   Right-click a message, Apps, **Why no reply?** does the same for one
@@ -418,9 +411,10 @@ the bot. Only the person who typed it sees the pages it opens.
   **Configure** button that opens that server's page.
 - Server admins (Manage Server) who type `/settings` in their own
   server get **Quiet the bot**: answer only @mentions or nothing, in
-  that channel or the whole server; add people to Never answer; turn
-  extras off; and undo what admins changed (back to the owner's
-  setting, never louder). The owner gets one DM per minute summing up
+  that channel or the whole server; ignore people (and stop ignoring
+  those admins added); turn images and video or a plugin off; and
+  undo what admins changed (back to the owner's setting, never
+  louder). The owner gets one DM per minute summing up
   what admins changed. Anyone else is told only the owners can change
   settings.
 - Not editable from Discord: `owners`, `token_from`, `persona`, the
@@ -436,9 +430,9 @@ the bot. Only the person who typed it sees the pages it opens.
   channel. A thread follows its parent channel. Lists replace the
   list above them; only `notes` add up (the server's, then the
   channel's).
-- A channel or category takes only `replies`, `notes`, and
-  `plugins.<name>.enabled`. Everything else is set per server at
-  most.
+- A channel or category takes only `replies`, `notes`,
+  `media.enabled` and `plugins.<name>.enabled`. Everything else is
+  set per server at most.
 - `replies` is `conversational` (the default: answers when
   addressed, and keeps talking with the person it just answered
   when they write again within about 2 minutes), `when-addressed`
@@ -487,10 +481,6 @@ rare install that needs them.
   **Why no reply?** (right-click a message, Apps) is registered the
   same way; if Discord refuses the "?" in its name, the log says so
   and it is registered as "Why no reply".
-- **No welcomes in a server**: welcomes are off there. Set
-  `plugins.welcome.enabled: on` under that server in `servers`
-  (step 5), and check `show --server <id> --explain`.
-
 - **`GATEWAY DISABLED (code 4014)` in monitor.log** (the watchdog
   alerts "monitor degraded"): Message Content intent is off.
   Step 1.3. The bot still polls, but content-based triggers are

@@ -154,10 +154,43 @@ def _import_nl():
 
 
 NL = _import_nl()
+
+# Anonymous daily usage counts (telemetry.py; README, "Privacy and usage
+# stats"). Off with telemetry.usage_stats: off or MUSE_DISCORD_TELEMETRY=off.
+TELEMETRY_FILE = os.path.join(BASE_DIR, "telemetry.json")
+TELEMETRY_ID_FILE = os.path.join(BASE_DIR, "telemetry_id")
+TELEMETRY_WAKES_FILE = os.path.join(BASE_DIR, "telemetry.wakes")
+
+
+class _NoTelemetry:
+    def __getattr__(self, name):
+        return lambda *a, **kw: ""
+
+
+def _import_telemetry():
+    """A telemetry.Recorder; a stand-in that does nothing when
+    telemetry.py cannot be loaded (it never stops the bot)."""
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "muse_telemetry", os.path.join(BASE_DIR, "telemetry.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.Recorder(lambda: (TELEMETRY_FILE, TELEMETRY_ID_FILE,
+                                     TELEMETRY_WAKES_FILE),
+                            ms=MS, pkg_dir=BASE_DIR)
+    except Exception as e:
+        print(f"Telemetry not loaded ({type(e).__name__}); usage counts "
+              f"are off.", flush=True)
+        return _NoTelemetry()
+
+
+TM = _import_telemetry()
 # The raw file (test-only keys such as testing: live here).
 CFG = _S0.raw
 if _S0.notice:
     print(_S0.notice, flush=True)
+if _S0.retired_notice:
+    print(_S0.retired_notice, flush=True)
 
 
 # The interaction thread (/settings) reads settings and writes the
@@ -202,6 +235,8 @@ def _on_settings_changed(prev, cur):
           "changed).", flush=True)
     if cur.notice and not prev.notice:
         print(cur.notice, flush=True)
+    if cur.retired_notice and not prev.retired_notice:
+        print(cur.retired_notice, flush=True)
     if sorted(cur.owners) != sorted(prev.owners):
         OWNER_USER_IDS = set(cur.owners)
         print(f"Owners are now: {', '.join(sorted(OWNER_USER_IDS)) or 'none'}",
@@ -414,8 +449,8 @@ PDF_EXTS = (".pdf",)
 DOCX_EXTS = (".docx",)
 PDFTOTEXT_TIMEOUT = 30
 
-# Generated media: when the media_generation plugin grants permission
-# on a queue item, the worker may write generated files into
+# Generated media: when the media settings grant permission on a queue
+# item (media_permission), the worker may write generated files into
 # GENERATED_DIR/<the item's message_id>/; the send path attaches a reply's
 # files from its own item's directory only (validated in
 # _validate_gen_paths), so one item's image can never ride on another
@@ -454,7 +489,7 @@ HISTORY_ATTACHED = 8
 #   channel (Send Messages in Threads for threads), or None when it
 #   could not be computed; callers then attempt the send and rely on
 #   the 403 safety net in process_outbox.
-# GUILDS: {guild_id: {"name", "system_channel_id", "joined_at"}}
+# GUILDS: {guild_id: {"name", "joined_at"}}
 CHANNELS = {}
 GUILDS = {}
 
@@ -616,7 +651,6 @@ def discover_channels_iter(previous=None):
         yield
         guilds_out[gid] = {
             "name": gname,
-            "system_channel_id": gobj.get("system_channel_id"),
             "joined_at": joined_at,
         }
         count = gobj.get("approximate_member_count")
@@ -1192,6 +1226,7 @@ def ledger_record_many(mids, status, reason="", channel_id=None,
         return
     d = _ledger_load()
     code = ledger_code(status, reason)
+    TM.ledger(code, [d["entries"].get(m) for m in mids])
     # Where it happened, as the monitor knows it now (a thread's parent
     # only for a thread): /settings' Why reads it later, when the
     # channel may be gone from discovery.
@@ -1430,7 +1465,7 @@ def predates_join(state, msg, gid):
 # the settings for where it happened: a DM, or a server channel (a thread
 # uses its parent channel; a channel its category). A new server has no
 # entry of its own and resolves through all_servers, which ships careful
-# (plugins not marked safe_in_new_servers, such as welcomes, stay off).
+# (plugins not marked safe_in_new_servers stay off).
 # When the bot joins a new server, the owners get a DM summary.
 # ---------------------------------------------------------------------------
 _FORCE_DISCOVERY = False  # set when the gateway reports a new guild
@@ -1724,17 +1759,18 @@ def _join_summary(gid, ginfo, channels):
                "conversational": "I answer @mentions and replies to my "
                                  "messages there, and the follow-ups of "
                                  "someone I just answered"}
-    on = [pid for pid in sorted(st.manifests)
-          if res.get(f"plugins.{pid}.enabled")]
+    on = (["image and video generation"] if res.get("media.enabled")
+          else []) + [pid for pid in sorted(st.manifests)
+                      if res.get(f"plugins.{pid}.enabled")]
     how = (f"set servers.\"{gid}\" in config.yaml (no restart needed)"
            if st.layout == "new" else
            f"add \"{gid}\" to behavior.active_guild_ids in config.yaml "
            f"(no restart needed)")
     return (f"I just joined **{name}** (server ID {gid}).\n"
             f"{replies.get(res['who.replies'], replies['when-addressed'])}"
-            f". Plugins on there: {', '.join(on) or 'none'}.\n"
+            f". Extras on there: {', '.join(on) or 'none'}.\n"
             f"Channels I can see ({len(visible)}): {shown or 'none'}\n"
-            f"To change what I do there (welcomes, for one), press "
+            f"To change what I do there, press "
             f"**Configure** (or use /settings), or {how}.")
 
 
@@ -2313,16 +2349,14 @@ _DIRECTORY_WRITTEN = {"body": None}
 def publish_directory():
     """Snapshot GUILDS, member counts and channel lists for /settings
     (main loop only; the interaction thread reads the snapshot). A
-    guild carries its system_channel_id when discovery knows it; a
-    channel whether the bot can read it (readable: a text channel the
-    monitor polls) and send there (can_send, None when unknown); where
-    maps every monitored channel and thread to (guild, parent)."""
+    channel carries whether the bot can read it (readable: a text
+    channel the monitor polls) and send there (can_send, None when
+    unknown); where maps every monitored channel and thread to (guild,
+    parent)."""
     guilds = []
     for gid, info in GUILDS.items():
         g = {"id": gid, "name": (info or {}).get("name") or gid,
              "member_count": _MEMBER_COUNTS.get(gid)}
-        if "system_channel_id" in (info or {}):
-            g["system_channel_id"] = info.get("system_channel_id")
         guilds.append(g)
     guilds.sort(key=lambda g: (str(g["name"]).lower(), g["id"]))
     channels = {}
@@ -3518,18 +3552,6 @@ def note_refused(msg, cname, reason):
           f"{reason}.", flush=True)
 
 
-def join_enabled(guild_id, channel_id):
-    """True when a plugin with a member_join hook (welcomes) is on where
-    the join message appeared."""
-    scope = scope_for(guild_id, channel_id)
-    st = settings()
-    for fn in PLUGIN_HOOKS.get("member_join", []):
-        pid = _HOOK_OWNER.get(id(fn))
-        if pid is None or st.plugin_enabled(pid, scope):
-            return True
-    return False
-
-
 def is_reply_to_bot(msg):
     """True when the message is a Discord reply to one of the bot's own
     messages. Replying to the bot is addressing the bot, even with no
@@ -4160,6 +4182,58 @@ def sweep_gen_state(state):
         approved.pop(mid, None)
     if len(state.get("gen_sent", [])) > 50:
         state["gen_sent"] = state["gen_sent"][-50:]
+
+
+def media_permission(state, scope, here, author_matches):
+    """may_generate for a message in scope (here: its resolved
+    settings): media.enabled is on there, the author is in media.who
+    there (an empty list counts as the owners), and no media.per_day
+    cap set along the scope is reached (each counts in its own scope,
+    see note_media_sent)."""
+    if not here["media.enabled"]:
+        return False
+    if not author_matches(here["media.who"] or "owners"):
+        return False
+    counts = _media_counts(state)
+    for counter, cap in settings().cap_layers("media.per_day", scope):
+        sent = counts.get("sent_today", 0) if counter == "everywhere" \
+            else (counts.get("counts") or {}).get(counter, 0)
+        if sent >= cap:
+            print(f"Media generation: daily cap ({cap}) reached; not "
+                  f"granting may_generate", flush=True)
+            return False
+    return True
+
+
+def note_media_sent(state, scope):
+    """Count one reply with generated files sent in scope, for every
+    media.per_day counter it adds to (everywhere, its server, or DMs)."""
+    TM.count("media_sent")
+    counts = _media_counts(state)
+    counts["sent_today"] = counts.get("sent_today", 0) + 1
+    for counter in MS.Settings.counter_ids(scope):
+        if counter != "everywhere":
+            c = counts.setdefault("counts", {})
+            c[counter] = c.get(counter, 0) + 1
+
+
+def _media_counts(state):
+    """Today's media.per_day counts in state ("media_sent": day,
+    sent_today = the everywhere total, counts by server / dms), reset
+    each UTC day. Takes over the old media_generation plugin's counts
+    once, so a cap reached today stays reached across the update."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    g = state.get("media_sent")
+    if not isinstance(g, dict):
+        old = (state.get("plugins") or {}).pop("media_generation", None)
+        g = old if isinstance(old, dict) else {}
+        if state.get("plugins") == {}:
+            state.pop("plugins")
+        state["media_sent"] = g
+    if g.get("day") != today:
+        g.clear()
+        g.update(day=today, sent_today=0, counts={})
+    return g
 
 
 def _gen_item_dir(item_id):
@@ -4800,15 +4874,13 @@ def prune_gateway_seen(state):
 
 def check_channel(channel_id, channel_name, state, guild_id=None):
     """Check for new messages in a channel and stage its triggers (see
-    stage_found). Returns (triggers, joins): triggers are the (msg, kind)
-    pairs staged (kind as in trigger_kind), joins are Discord system join
-    messages (type 7) from the system channel. Messages the gateway
-    already handled are skipped."""
+    stage_found). Returns the (msg, kind) pairs staged (kind as in
+    trigger_kind). Messages the gateway already handled are skipped."""
     last_seen = state["last_seen"].get(channel_id)
     if not last_seen:
         # Never seeded (discovery normally does it): history is history.
         seed_channel_seen(channel_id, channel_name, state)
-        return [], []
+        return []
 
     # 100 (Discord's max) so the poll keeps up with busy channels: it now
     # re-reads every message the gateway delivered since the last poll.
@@ -4819,10 +4891,10 @@ def check_channel(channel_id, channel_name, state, guild_id=None):
         messages = api_get(f"/channels/{channel_id}/messages?{query}")
     except Exception as e:
         print(f"Error reading #{channel_name}: {e}", flush=True)
-        return [], []
+        return []
 
     if not messages:
-        return [], []
+        return []
 
     record_history(state, channel_id, messages)
 
@@ -4831,22 +4903,19 @@ def check_channel(channel_id, channel_name, state, guild_id=None):
     advance_rest_watermark(state, channel_id, newest["id"])
 
     triggers = []
-    joins = []
     for msg in sorted(messages, key=lambda m: int(m["id"])):
         if msg["id"] in gw_done:
             continue  # the gateway path already handled it
         kind = classify_message(state, msg, channel_name, guild_id)
-        if kind == "join":
-            joins.append(msg)
-        elif kind:
+        if kind:
             stage_found(state, msg, channel_name, guild_id, kind)
             triggers.append((msg, kind))
 
-    return triggers, joins
+    return triggers
 
 
 # Message types people write: DEFAULT and REPLY. Everything else in a
-# channel is a system notice (join messages are handled before this).
+# channel is a system notice ("X joined the server", a pin, ...).
 CONVERSATION_TYPES = (0, 19)
 
 
@@ -4854,17 +4923,13 @@ def classify_message(state, msg, channel_name, guild_id=None):
     """Classify a single message exactly the way check_channel's loop does.
 
     Shared by the REST poll path and the gateway fast path so both ingest
-    routes behave identically. Returns "mention", "follow_up", "join",
-    or None (folded into a burst, skipped, or not actionable).
+    routes behave identically. Returns "mention", "follow_up", or None
+    (folded into a burst, skipped, or not actionable).
     """
     if predates_join(state, msg, guild_id):
         # Older than the bot's arrival in this guild: never a trigger,
         # never a fragment. It can still reach the worker as history.
         return None
-    if is_join_message(msg):
-        # Welcomes are a plugin, on per scope (off in new servers).
-        return "join" if join_enabled(guild_id, msg.get("channel_id")) \
-            else None
     if msg.get("type", 0) not in CONVERSATION_TYPES:
         # Discord's system notices ("X pinned a message", "X started a
         # thread", ...) carry the acting user as author: never a
@@ -4873,6 +4938,7 @@ def classify_message(state, msg, channel_name, guild_id=None):
     author = msg.get("author", {}) or {}
     if author.get("id") == BOT_ID:
         return None  # the bot's own messages: never triggers or fragments
+    TM.count("messages_seen")
     if is_bot_author(author) and settings().get(
             "who.bots", scope_for(guild_id, msg.get("channel_id"))) \
             == "ignore":
@@ -4887,17 +4953,6 @@ def classify_message(state, msg, channel_name, guild_id=None):
     return kind
 
 
-def is_join_message(msg):
-    """True for Discord's system join messages (type 7: 'X joined the
-    server'). The author field is the new member. Bots are skipped."""
-    if msg.get("type") != 7:
-        return False
-    author = msg.get("author", {}) or {}
-    if is_bot_author(author):
-        return False
-    if author.get("id") == BOT_ID:
-        return False
-    return True
 
 
 # Discord does not let bots list DM channels: GET /users/@me/channels always
@@ -4995,6 +5050,7 @@ def check_dm_channel(dm_id, dm_name, state):
                 or m["id"] in gw_done \
                 or m.get("type", 0) not in CONVERSATION_TYPES:
             continue
+        TM.count("messages_seen")
         if not dm_sender_allowed(m.get("author")):
             note_dm_refused(m)
             continue
@@ -5238,29 +5294,29 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     history = [h for h in chan_hist
                if h["id"] not in burst_ids][-HISTORY_ATTACHED:]
 
-    # 5. Plugin gates. Plugins may annotate the item via the gate_message
-    #    hook; the media_generation plugin uses it to grant may_generate
-    #    to allowed users. The flag is PERMISSION, not a decision: the
-    #    worker still judges from the full conversation context whether
-    #    generation is actually wanted, and generates at most once per
-    #    queue item. Queue time only records the permission, plus the
-    #    single-use approval below (keyed by message id, because the
-    #    worker's outbox item does not carry the flag); it must not claim
-    #    anywhere that generation is starting.
-    extra = {}
-
+    # 5. Generation permission (media.*) and plugin gates. may_generate
+    #    is PERMISSION, not a decision: the worker still judges from the
+    #    full conversation context whether generation is actually wanted,
+    #    and generates at most once per queue item. Queue time only
+    #    records the permission, plus the single-use approval below
+    #    (keyed by message id, because the worker's outbox item does not
+    #    carry the flag); it must not claim anywhere that generation is
+    #    starting. Plugins may annotate the item via the gate_message
+    #    hook, but never grant may_generate.
     def author_matches(who):
         return people_match(who, author_id, lambda: (
             set((msg.get("member") or {}).get("roles") or [])
             if "roles" in (msg.get("member") or {})
             else member_roles(guild_id, author_id)))
+    may_generate = media_permission(state, scope, here, author_matches)
+    extra = {}
     for res in call_hook("gate_message",
                          {"state": state, "owners": OWNER_USER_IDS,
                           "author_matches": author_matches},
                          msg, guild_id, scope=scope):
         if isinstance(res, dict):
             extra.update(res)
-    may_generate = bool(extra.pop("may_generate", False))
+    extra.pop("may_generate", None)
     if may_generate:
         # Bound to the channel too: the file may only go back where the
         # request came from (an image made in a DM never posts publicly).
@@ -5382,8 +5438,8 @@ def _settle(state, item, status, reason="", replied=False):
         ids += [m for m in [trigger] + [f for f, t in aliases.items()
                                         if t == trigger]
                 if m not in ids]
-    # The queue item it answers (the only id a welcome reply has), so a
-    # second worker's draft for the same item is suppressed too.
+    # The queue item it answers, so a second worker's draft for the
+    # same item is suppressed too.
     if item.get("item") and item["item"] not in ids:
         ids.append(item["item"])
     if not ids:
@@ -5400,7 +5456,7 @@ def _settle(state, item, status, reason="", replied=False):
 def _answered_id(state, item):
     """The queue item (its message_id) an outbox item answers: its "item"
     field, else the burst trigger its reply_to belongs to, else reply_to.
-    None when it names neither (an older worker's welcome reply)."""
+    None when it names neither."""
     if item.get("item"):
         return item["item"]
     reply_to = item.get("reply_to")
@@ -5523,7 +5579,7 @@ def _log_latency(state, qid, picked, sent):
     (ingest: the gateway or the poll delivering it, and the main loop
     getting to it), to queued (hold: the burst coalescing), to the
     outbox pickup (worker), to sent. An item that was never staged (a
-    welcome, a sweep recovery) has no hold. Our clock can trail Discord's
+    sweep recovery) has no hold. Our clock can trail Discord's
     snowflake time by a fraction of a second, so t0 is clamped to the
     first local timestamp: ingest shows 0, never negative, and total
     stays the sum of the parts."""
@@ -5543,6 +5599,7 @@ def _log_latency(state, qid, picked, sent):
         t0 = min(t0, picked)
         print(f"Latency {qid}: send {sent - picked:.1f}s, total "
               f"{sent - t0:.1f}s", flush=True)
+    TM.latency(sent - t0)
 
 
 # A failed send is retried with growing gaps, but only for this long:
@@ -5675,7 +5732,7 @@ def process_outbox(state):
         # fallback for files without an approval: generation is gated in
         # code. Nothing is committed before the send succeeds: a retry
         # re-attaches the same files (kept in _retry), and the approval
-        # (single-use), gen_sent and the generation_sent hook settle once.
+        # (single-use), gen_sent and the media.per_day count settle once.
         gen_id = _gen_item_id(state, item)
         approval = _gen_approval(state, gen_id)
         if approval and approval.get("channel_id") != item.get("channel_id"):
@@ -5739,15 +5796,15 @@ def process_outbox(state):
             if approval:
                 state.get("gen_approved", {}).pop(gen_id, None)
             if parts and gen_files:
-                # A generation really ran and its file went out. Let
-                # plugins account for it via the generation_sent hook
-                # (the media_generation plugin counts its daily cap
-                # here, at send time, never at queue time).
+                # A generation really ran and its file went out: count
+                # it for media.per_day here, at send time, never at
+                # queue time, and tell plugins (generation_sent).
                 state.setdefault("gen_sent", []).extend(
                     rp for _, rp in gen_files)
+                sent_scope = scope_of_channel(item["channel_id"])
+                note_media_sent(state, sent_scope)
                 call_hook("generation_sent", {"state": state}, item,
-                          scope=scope_of_channel(item["channel_id"]),
-                          only_where_on=False)
+                          scope=sent_scope, only_where_on=False)
             _settle(state, item, "replied", replied=True)
             if item.get("_hold"):
                 state.get("hold_released", {}).pop(item["_hold"], None)
@@ -6106,16 +6163,16 @@ def _gateway_thread_main(token, inbox, status):
 
 def drain_gateway(state, inbox, channels):
     """Pull gateway-delivered messages (all guilds + DMs) and classify them
-    exactly like polled messages. Returns (triggers, joins, dms): guild
+    exactly like polled messages. Returns (triggers, dms): guild
     triggers as (msg, cname, guild_id, kind) tuples (already staged, see
-    stage_found), joins as (msg, cname, guild_id), DMs as (msg, cname).
+    stage_found), DMs as (msg, cname).
     Guild join/leave events are applied to state on the way, and typing
     events and message arrivals are recorded for the early burst flush
     (note_activity). Skips anything the REST poll already processed (at
     or below its last_seen watermark), and leaves that watermark alone
     (see note_gateway_seen). Messages from servers outside a non-empty
     bot.guild_ids are ignored."""
-    mentions, joins, dms = [], [], []
+    mentions, dms = [], []
     guild_names = {}
     for info in channels.values():
         if info.get("guild_id"):
@@ -6178,9 +6235,7 @@ def drain_gateway(state, inbox, channels):
             record_history(state, cid, [m])
             note_gateway_seen(state, cid, m["id"])
             kind = classify_message(state, m, cname, gid)
-            if kind == "join":
-                joins.append((m, cname, gid))
-            elif kind:
+            if kind:
                 stage_found(state, m, cname, gid, kind)
                 mentions.append((m, cname, gid, kind))
         else:
@@ -6193,6 +6248,8 @@ def drain_gateway(state, inbox, channels):
                 record_history(state, cid, [m])
                 note_gateway_seen(state, cid, m["id"])
                 continue  # own messages are context only
+            TM.count("messages_seen",
+                     int(m.get("type", 0) in CONVERSATION_TYPES))
             if not dm_sender_allowed(author):
                 note_dm_refused(m)
                 continue
@@ -6203,7 +6260,7 @@ def drain_gateway(state, inbox, channels):
             if hold_fragment(state, cid, m):
                 continue  # folded into a burst already being coalesced
             dms.append((m, "DM with " + (author.get("username") or cid)))
-    return mentions, joins, dms
+    return mentions, dms
 
 
 
@@ -6350,23 +6407,22 @@ def sweep_mentions(state, queue, channels, dms=True):
 # `settings:` manifest declares its settings (type, default, scopes; see
 # muse_settings.load_manifests; an old `params:` list still works). A
 # plugin is loaded once some scope turns it on (plugins.<id>.enabled),
-# and its hooks run only where it is on. The core calls these hooks:
+# and its hooks run only where it is on. No plugin ships today (see
+# plugins/README.md); the core calls these hooks:
 #
 #   gate_message(ctx, msg, guild_id) -> dict | None
-#       During enqueue: returned dicts are merged into the queue item.
-#       The media_generation plugin uses this to set may_generate.
-#   member_join(ctx, msg, guild_id) -> queue item dict | None
-#       A member joined (Discord system message, type 7). The welcome
-#       plugin resolves its target channel from its settings and
-#       returns a "welcome" queue item for the worker to draft.
+#       During enqueue: returned dicts are merged into the queue item
+#       (never may_generate: generation permission is the core's,
+#       media.*).
 #   generation_sent(ctx, outbox_item)
-#       A generated attachment was actually sent for an outbox item.
+#       A generated attachment was actually sent for an outbox item
+#       (runs wherever the reply went, on or off).
 #
-# ctx carries {"state", "channels", "guilds", "owners"} (subset per hook)
-# plus, for the event's scope: "scope", "settings" (the plugin's own
-# resolved values there, nothing else), "cap_layers" (key -> [(counter
-# id, cap)]: the caps set along the scope, each counting in its own
-# scope), "counter_ids" (the counters an event there adds to) and, for
+# ctx carries "state" (and "owners" for gate_message) plus, for the
+# event's scope: "scope", "settings" (the plugin's own resolved values
+# there, nothing else), "cap_layers" (key -> [(counter id, cap)]: the
+# caps set along the scope, each counting in its own scope),
+# "counter_ids" (the counters an event there adds to) and, for
 # gate_message, "author_matches" (people value -> bool). api.param(key,
 # guild_id, guild_name) still resolves one value for one server (old
 # param names too, see Manifest.spec_for).
@@ -6374,7 +6430,6 @@ def sweep_mentions(state, queue, channels, dms=True):
 PLUGIN_HOOKS = {}
 _HOOK_OWNER = {}        # id(hook fn) -> plugin id
 _LOADED_PLUGINS = set()  # plugin folders already imported
-GEN_PLUGIN_ENABLED = False  # set when the media_generation plugin loads
 
 
 def param_for(params, key, guild_id=None, guild_name=None):
@@ -6446,7 +6501,7 @@ def load_plugins():
     """Import every plugin under plugins/ that some scope turns on, once,
     and collect its hooks. Called at startup and after a settings
     reload."""
-    global GEN_PLUGIN_ENABLED, _SETTINGS
+    global _SETTINGS
     if not os.path.isdir(PLUGINS_DIR):
         return
     if os.path.abspath(_SETTINGS.plugins_dir or "") \
@@ -6481,8 +6536,6 @@ def load_plugins():
             if callable(fn):
                 PLUGIN_HOOKS.setdefault(hook_name, []).append(fn)
                 _HOOK_OWNER[id(fn)] = pid
-        if name == "media_generation":
-            GEN_PLUGIN_ENABLED = True
         print(f"Plugin loaded: {name} "
               f"(hooks: {', '.join(sorted(hooks))})", flush=True)
 
@@ -6595,22 +6648,22 @@ class PollRotation:
     def due(self, now):
         return not self.done() and now >= self.next_due()
 
-    def run_slice(self, state, deadline, joins_out, dms_out):
+    def run_slice(self, state, deadline, dms_out):
         """Poll due targets until deadline, at least one. Polled guild
-        triggers are staged inside (stage_found); joins and DMs are
-        appended to joins_out / dms_out for the staging phase. Returns
-        the number of targets polled."""
+        triggers are staged inside (stage_found); DMs are appended to
+        dms_out for the staging phase. Returns the number of targets
+        polled."""
         n = 0
         while self.due(time.time()) and not rest_backing_off():
             if n and time.time() >= deadline:
                 break
             target = self.targets[self.pos]
             self.pos += 1
-            if self._poll(state, target, joins_out, dms_out):
+            if self._poll(state, target, dms_out):
                 n += 1
         return n
 
-    def _poll(self, state, target, joins_out, dms_out):
+    def _poll(self, state, target, dms_out):
         if target[0] == "dms":
             # DMs: every message not from the bot is addressed to the
             # bot. Resolving the channels is a step; each DM channel is
@@ -6632,11 +6685,9 @@ class PollRotation:
         gid = info["guild_id"]
         try:
             # Triggers are staged inside, in arrival order.
-            _, joins = check_channel(cid, cname, state, gid)
+            check_channel(cid, cname, state, gid)
         except Exception as e:
             print(f"Poll error in {cname}: {e}", flush=True)
-            return True
-        joins_out.extend((m, cname, gid) for m in joins)
         return True
 
 
@@ -6792,6 +6843,7 @@ def outbox_waiting(since):
 def main():
     global BOT_USER_ID, BOT_ID, BOT_NAME, CHANNELS, GUILDS, _FORCE_DISCOVERY
     _acquire_singleton()
+    TM.start()
     touch_heartbeat()
     # Identity FIRST, discovery second: the watchdog's health check waits
     # for the identity marker, and full discovery (a probe per channel
@@ -6925,7 +6977,6 @@ def main():
                 spread=0.0 if rotation_started is None else POLL_SPREAD)
             rotation_started = now
         cycle_done = False
-        joins_found = []
         dm_items = []
         queue = None  # read fresh below; None = unknown this cycle
 
@@ -6936,13 +6987,11 @@ def main():
             # events ride the same inbox. Waits for the bot's identity,
             # like the poll.
             if BOT_USER_ID is not None:
-                gw_mentions, gw_joins, gw_dms = drain_gateway(
+                gw_mentions, gw_dms = drain_gateway(
                     state, _gateway_inbox, CHANNELS)
-                if gw_mentions or gw_joins or gw_dms:
+                if gw_mentions or gw_dms:
                     print(f"Gateway delivered {len(gw_mentions)} "
-                          f"mention(s), {len(gw_joins)} join(s), "
-                          f"{len(gw_dms)} DM(s).", flush=True)
-                joins_found.extend(gw_joins)
+                          f"mention(s), {len(gw_dms)} DM(s).", flush=True)
                 for msg, cname in gw_dms:
                     stage_trigger(state, msg, cname, None, "dm", dm=True)
         except Exception as e:
@@ -6978,8 +7027,7 @@ def main():
         try:
             if poll_turn:
                 t0 = time.time()
-                rotation.run_slice(state, t0 + REST_SLICE_SECS,
-                                   joins_found, dm_items)
+                rotation.run_slice(state, t0 + REST_SLICE_SECS, dm_items)
                 rest_spent = time.time() - t0
         except Exception as e:
             print(f"Poll error: {e}", flush=True)
@@ -6991,8 +7039,8 @@ def main():
         try:
             # Stage polled DMs into the coalescing buffer (bursts from
             # the same author fold into one pending entry; guild triggers
-            # were staged as they were classified); welcomes queue
-            # immediately. Matured bursts flush into single queue items.
+            # were staged as they were classified). Matured bursts flush
+            # into single queue items.
             # The queue snapshot only serves the duplicate checks: what
             # gets written is just the items appended to it, applied to a
             # fresh read under the lock (queue_edit), because the flush
@@ -7000,30 +7048,10 @@ def main():
             # monitor's own sends remove answered items.
             queue = load_queue()
             n_before = len(queue)
-            dirty = False
-            for msg, cname, gid in joins_found:
-                for item in call_hook(
-                        "member_join",
-                        {"state": state, "channels": CHANNELS,
-                         "guilds": GUILDS},
-                        msg, gid,
-                        scope=scope_for(gid, msg.get("channel_id"))):
-                    if item:
-                        item.setdefault("queued_at", note_queued(
-                            state, item.get("message_id")))
-                        where = scope_for(item.get("guild_id") or gid,
-                                          item.get("channel_id"))
-                        item.setdefault("follow_up", False)
-                        item.setdefault("settings", settings_card(
-                            where, settings().resolve(where),
-                            item.get("author_id"), False,
-                            item.get("channel_id")))
-                        queue.append(item)
-                        dirty = True
             for msg, cname in dm_items:
                 stage_trigger(state, msg, cname, None, "dm", dm=True)
 
-            dirty |= flush_pending(state, queue)
+            dirty = flush_pending(state, queue)
             if dirty:
                 queue_edit(add=queue[n_before:])
             save_state(state)
@@ -7128,6 +7156,9 @@ def main():
         except Exception as e:
             print(f"Cleanup error: {e}", flush=True)
 
+        TM.tick(settings, GUILDS, _MEMBER_COUNTS,  # never raises
+                lambda text: bool(OWNER_USER_IDS) and not rest_backing_off()
+                and notify_owners(text))
         # Event-driven wait: a gateway MESSAGE_CREATE wakes the loop at
         # once. Otherwise it idles in ticks of at most 2s, shorter while
         # REST slices are due (none while they are behind), a burst is
@@ -7164,4 +7195,8 @@ def main():
         _gateway_status["wake"].clear()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException as e:
+        TM.crashed(e)  # its class name only; SystemExit is not a crash
+        raise

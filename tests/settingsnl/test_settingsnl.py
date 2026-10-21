@@ -444,12 +444,12 @@ class Meaning(Base):
         self.ask([ch("remove", "dms", "who.dms_from", [a])])
         self.assertEqual(self.value("dms", "who.dms_from"), "owners")
         # Images and video: a list that replaces "owners" keeps them.
-        self.ask([ch("add", f"server:{G1}", "plugins.media.who", [a])])
+        self.ask([ch("add", f"server:{G1}", "media.who", [a])])
         ids = self.custom_ids(self.last())
         if ids and ids[0].startswith("mdnl:ok:"):    # it asked first
             self.click(ids[0])
         self.assertEqual(
-            sorted(self.value(f"server:{G1}", "plugins.media.who")),
+            sorted(self.value(f"server:{G1}", "media.who")),
             sorted([OWNER, OWNER2, a]))
         # Removing the last person from Only answer these people is
         # refused (it would answer nobody); with Everyone there is no
@@ -830,7 +830,7 @@ class Shape(Base):
                   [ch("undo")], [ch("undo", "dms")],
                   [ch("preset", f"server:{G1}", name="community")],
                   [ch("pause", "defaults")], [ch("resume", GEN)],
-                  [ch("set", "defaults", "plugins.media.enabled", "on")],
+                  [ch("set", "defaults", "media.enabled", "on")],
                   [ch("set", "defaults", "presence.status", "hi")]):
             self.assertEqual(self.probs(c), [], c)
         bad = [

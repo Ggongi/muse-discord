@@ -83,7 +83,8 @@ COPY_IGNORE = shutil.ignore_patterns(
     "mention_ledger.json", "monitor.pid", "monitor.heartbeat",
     "watchdog_state.json", "watchdog.lock", "update_check.json",
     "update_request.json", "directory.json", "owner_dm_nonces.json",
-    "nl_journal.json", "*.log", "*.log.1", "media", "generated", "out")
+    "nl_journal.json", "telemetry.json", "telemetry_id", "telemetry.wakes",
+    "*.log", "*.log.1", "media", "generated", "out")
 READY_IDENTITY = "Bot user id: "
 READY_DISCOVERY = "muse-discord monitor starting."
 READY_GATEWAY_ON = "Gateway READY: realtime ingest live."
@@ -275,6 +276,9 @@ class SUT:
         env["MUSE_DISCORD_CONFIG"] = os.path.join(self.pkg_dir,
                                                   "config.yaml")
         env["PYTHONUNBUFFERED"] = "1"
+        # Never send usage stats from a test run (telemetry.py).
+        env["MUSE_DISCORD_TELEMETRY"] = "off"
+        env["MUSE_DISCORD_TELEMETRY_URL"] = ""   # "" = no endpoint at all
         if not gateway:
             env["PYTHONPATH"] = os.pathsep.join(
                 p for p in (self._stub_dir, env.get("PYTHONPATH")) if p)

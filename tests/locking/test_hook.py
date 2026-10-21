@@ -92,15 +92,14 @@ class MentionWatchLeases(unittest.TestCase):
             {"message_id": "1", "channel_id": "9"},
             {"message_id": "2", "channel_id": "9", "burst": True,
              "burst_fragments": [{"message_id": "3"}]},
-            {"message_id": "4", "channel_id": "9", "welcome": True}])
+            {"message_id": "4", "channel_id": "9"}])
         out, _ = self.run_hook()
         self.assertEqual(self.wake_ids(out), ["4"], out)
-        self.assertIs(self.last_payload["items"][0]["welcome"], True)
 
         # Leases expire; 4 is answered in the outbox and 2 through its
         # fragment in the processing file: only 1 is handed out again.
         self.put("reply_outbox.json",
-                 [{"item": "4", "channel_id": "9", "text": "welcome"}])
+                 [{"item": "4", "channel_id": "9", "text": "hello"}])
         self.put("reply_outbox.processing.json",
                  [{"channel_id": "9", "reply_to": "3", "text": "x"}])
         self.age_leases()

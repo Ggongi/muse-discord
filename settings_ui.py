@@ -89,7 +89,6 @@ WHY_ENTRIES = 5
 DM_USER_SELECT_SEARCHES = False
 THREAD_TYPES = (10, 11, 12)
 CATEGORY = 4
-MEDIA_ON = "plugins.media.enabled"
 
 # Component types and button styles.
 ROW, BUTTON, STRING_SELECT, TEXT_INPUT = 1, 2, 3, 4
@@ -173,6 +172,8 @@ PAGES = ("h", "y")
 def kcode(key):
     if key in CORE_CODES:
         return CORE_CODES[key]
+    if key.startswith("media."):
+        return "~" + key  # the media plugin's code: ids stay valid
     if key.startswith("plugins."):
         code = "~" + key[len("plugins."):]
         if _PLUGIN_CODE.fullmatch(code):
@@ -184,7 +185,7 @@ def kdecode(code):
     if code in CODE_KEYS:
         return CODE_KEYS[code]
     if _PLUGIN_CODE.fullmatch(code or ""):
-        return "plugins." + code[1:]
+        return ms.moved_key("plugins." + code[1:])
     return None
 
 
@@ -831,7 +832,7 @@ def status_text(R, place):
         parts.append(ln)
     parts.append(MEMORY_WORDS.get(value(R, place, "privacy.memory"),
                                   MEMORY_WORDS["public-only"]))
-    if R.st.spec(MEDIA_ON) is not None and value(R, place, MEDIA_ON):
+    if value(R, place, "media.enabled"):
         parts.append(media_words(R, place))
     cap = value(R, place, "limits.per_person_per_day")
     if isinstance(cap, int):
@@ -842,8 +843,7 @@ def status_text(R, place):
 def media_words(R, place):
     sp = place if place.kind != "channel" \
         else ms.Place.server(place.guild_id)
-    who = value(R, sp, "plugins.media.who") \
-        if R.st.spec("plugins.media.who") is not None else "owners"
+    who = value(R, sp, "media.who")
     if who == "everyone":
         return "images & video for everyone"
     if isinstance(who, list) and [p for p in who if p not in R.ctx.owners]:
@@ -863,9 +863,9 @@ UI_LABELS = {
     "privacy.suspicious": "Suspicious messages",
     "limits.per_day": "Replies a day",
     "limits.per_person_per_day": "Replies a person a day",
-    "plugins.media.enabled": "Images & video",
-    "plugins.media.who": "Who can ask for images & video",
-    "plugins.media.per_day": "Images & video a day",
+    "media.enabled": "Images & video",
+    "media.who": "Who can ask for images & video",
+    "media.per_day": "Images & video a day",
 }
 UI_VALUES = {("who.replies", "conversational"): "chat freely",
              ("who.replies", "when-addressed"): "only when @mentioned",
@@ -943,19 +943,6 @@ def undo_scope(R, place):
     return place, place.kind == "server", None
 
 
-def undo_forward(R, plan):
-    """The changes an Undo would revert, as "In #general, When it
-    answers: Chatty → Off" (what was changed, not what Undo does)."""
-    sim = ms.simulate(R.st, plan)
-    parts = []
-    for ch in plan:
-        sc = _scope_at(ch.place, ch.key, ch.path)
-        before = sim.top(ch.key) if sc is None else sim.get(ch.key, sc)
-        now = R.st.top(ch.key) if sc is None else R.st.get(ch.key, sc)
-        parts.append(say_change(R, ch.place, ch.key, before, now, ch.path))
-    return "; ".join(parts)
-
-
 def last_author(R, plan):
     """(who, when) of the change an Undo would revert."""
     if not plan:
@@ -968,8 +955,18 @@ def last_author(R, plan):
     return None, None
 
 
+def changed_names(plan):
+    """"Replies", "Replies and Reply length", "Replies, … and 2 more":
+    what a group changed, by name only."""
+    names = list(dict.fromkeys(ui_label(ch.key) for ch in plan))
+    if len(names) > 2:
+        return f"{names[0]}, {names[1]} and {len(names) - 2} more"
+    return " and ".join(names)
+
+
 def last_change_slot(R, place):
-    """SEC "-# Last change: ..." [Undo], or []."""
+    """SEC "-# Last change: Replies · you, 4 min ago" [Undo], or []:
+    which settings the newest change touched, not its values."""
     if R.banner or R.st.overlay_error or R.role is None:
         return []
     up, children, admin_gid = undo_scope(R, place)
@@ -979,14 +976,13 @@ def last_change_slot(R, place):
         if not gid:
             return []
         plan = ms.undo_plan(R.st, up, children, admin_gid)
-        forward = undo_forward(R, plan)
     except Exception as e:
         R.ctx.log(f"settings_ui: last change: {e}")
         return []
     by, at = last_author(R, plan)
-    when = f" ({who_text(R, by)}, {ago(R, at)})" if by else ""
+    when = f" · {who_text(R, by)}, {ago(R, at)}" if by else ""
     head = "Last change by admins" if R.admin else "Last change"
-    text = clip(f"-# {head}: {forward}{when}", 600)
+    text = clip(f"-# {head}: {changed_names(plan)}{when}", 300)
     try:
         b = btn("Undo", cid("un", ptok(up), gid))
     except BadId:
@@ -1042,6 +1038,38 @@ PRESET_HELP = {
                  "person a day",
     "work": "Only when @mentioned, nothing personal, ignores other bots",
 }
+
+
+def plugin_keys(R, place):
+    """The on/off keys of the plugins installed and offered at place
+    (plugins.<id>.enabled; never media, which is a core setting)."""
+    try:
+        keys = ms.place_keys(R.st, place, "basics")
+    except Exception:
+        return []
+    return [k for k in keys if k.startswith("plugins.")
+            and ms._is_enabled_key(k)]
+
+
+def on_off_name(key):
+    """"images & video", or a plugin's name ("Example")."""
+    if key == "media.enabled":
+        return "images & video"
+    parts = key.split(".")
+    return esc(parts[1].replace("_", " ").capitalize()) \
+        if len(parts) == 3 else esc(key)
+
+
+def plugins_line(R, place):
+    """"-# Plugins here: Example (on). DM me to switch them." or None:
+    plugins have no controls of their own on these pages."""
+    keys = plugin_keys(R, place)
+    if not keys:
+        return None
+    parts = [f"{on_off_name(k)} ({'on' if value(R, place, k) else 'off'})"
+             for k in keys]
+    return td("-# Plugins here: " + ", ".join(parts) + ". DM me to switch "
+              "them or change their settings.")
 
 
 def style_select(R, gid):
@@ -1113,14 +1141,11 @@ def where_select(R, place):
 
 
 # -- The settings on the page --------------------------------------------------
-MEDIA_WHO = "plugins.media.who"
 # The settings each kind of place shows, in order (custom_id codes).
 PLACE_CONTROLS = {"channel": ("r", "med"),
                   "server": ("r", "ln", "med", "pp"),
                   "dms": ("df", "ln", "med"),
                   "defaults": ("r", "df", "ln", "med", "pp")}
-CONTROL_KEYS = {"r": "who.replies", "ln": "style.length", "med": MEDIA_ON,
-                "df": "who.dms_from", "pp": "limits.per_person_per_day"}
 CAP_CHOICES = (5, 10, 20, 50, 100)
 
 
@@ -1169,9 +1194,9 @@ def ctl_length(R, place):
 def media_now(R, place):
     """"off", "owners", "everyone" or "list" in force at a server or
     everywhere."""
-    if not value(R, place, MEDIA_ON):
+    if not value(R, place, "media.enabled"):
         return "off"
-    who = value(R, place, MEDIA_WHO)
+    who = value(R, place, "media.who")
     if isinstance(who, list):
         others = [p for p in who if p not in R.ctx.owners]
         return "list" if others else "owners"
@@ -1181,7 +1206,7 @@ def media_now(R, place):
 def ctl_media(R, place):
     opts = []
     if place.kind in ("channel", "dms"):
-        v = Val(R, place, MEDIA_ON)
+        v = Val(R, place, "media.enabled")
         if place.kind == "channel":
             inh = "on" if v.inherited else "off"
             opts.append(opt("Like the server", "=",
@@ -1254,8 +1279,6 @@ def controls_for(R, place):
     """[(title, select)] for the settings place shows."""
     out = []
     for code in PLACE_CONTROLS.get(place.kind, ()):
-        if code == "med" and R.st.spec(MEDIA_ON) is None:
-            continue
         out.append(CONTROLS[code](R, place))
     return out
 
@@ -1304,12 +1327,15 @@ def page_home(R, place):
         head, _, note = title.partition("\n")
         inner.append(td(f"**{head}**" + (f"\n{note}" if note else "")))
         inner.append(row(s))
+    inner.append(plugins_line(R, place))
     if place.kind in ("channel", "server"):
         gid = place.guild_id
         inner.append(sep())
         style = ms.matching_preset(R.st, ms.Place.server(gid))
-        inner.append(td(f"**Style for all of {R.gname(gid)}**"
-                        + ("" if style else ": a custom mix")))
+        inner.append(td(f"**Style for all of {R.gname(gid)}**" + (
+            "" if style else "\n-# Customized. Picking a style replaces "
+                             "the server's settings; Undo brings them "
+                             "back.")))
         inner.append(row(style_select(R, gid)))
     inner += last_change_slot(R, place)
     paused = paused_at(R, place) is not None
@@ -1773,7 +1799,6 @@ def quiet_row(R, place, where):
 
 def page_quiet(R, gid):
     """The admin panel for one server (here = where it was typed)."""
-    st = R.st
     server = ms.Place.server(gid)
     gname = R.gname(gid)
     here = R.here() if R.in_guild(gid) else server
@@ -1802,11 +1827,18 @@ def page_quiet(R, gid):
                  else R.person(p)) or "Someone an admin added", p)
             for p in adds[:25]], "Stop ignoring…", 1,
             min(25, len(adds)))))
-    if st.spec(MEDIA_ON) is not None and value(R, server, MEDIA_ON):
-        inner.append(section(
-            f"**Images & video:** on in {gname}",
-            btn("Turn off", cid("val", f"s{gid}", kcode(MEDIA_ON), "off"),
-                DANGER)))
+    offs = []
+    for key in ["media.enabled"] + plugin_keys(R, server):
+        if value(R, server, key):
+            offs.append(btn(f"Turn off {plain(on_off_name(key))}",
+                            cid("val", f"s{gid}", kcode(key), "off"),
+                            DANGER))
+    if offs:
+        inner.append(td(f"**Also on in {gname}:** "
+                        + ", ".join(on_off_name(k) for k in
+                                    ["media.enabled"] + plugin_keys(R, server)
+                                    if value(R, server, k))))
+        inner.append(row(*offs[:5]))
     inner += last_change_slot(R, server)
     return finish(R, [container(inner, AMBER),
                       row(btn("Why no reply?",
@@ -2310,15 +2342,15 @@ def set_changes(R, place, code, v):
     if code == "med":
         if kind in ("channel", "dms"):
             if v == "=" and kind == "channel":
-                return [ms.Change(place, MEDIA_ON, "inherit")]
+                return [ms.Change(place, "media.enabled", "inherit")]
             if v in ("on", "off"):
-                return [ms.Change(place, MEDIA_ON, v)]
+                return [ms.Change(place, "media.enabled", v)]
             return None
         if v == "off":
-            return [ms.Change(place, MEDIA_ON, "off")]
+            return [ms.Change(place, "media.enabled", "off")]
         if v in ("owners", "everyone"):
-            return [ms.Change(place, MEDIA_ON, "on"),
-                    ms.Change(place, MEDIA_WHO, v)]
+            return [ms.Change(place, "media.enabled", "on"),
+                    ms.Change(place, "media.who", v)]
         if v == "list":
             return "You already picked who can. DM me to change who."
         return None
@@ -2346,8 +2378,6 @@ def v_set(R, place, args, values):
     if len(args) != 1 or len(values) != 1 \
             or args[0] not in PLACE_CONTROLS.get(place.kind, ()):
         return notice(OUT_OF_DATE)
-    if args[0] == "med" and R.st.spec(MEDIA_ON) is None:
-        return notice(OUT_OF_DATE)
     changes = set_changes(R, place, args[0], values[0])
     if changes is None:
         return notice(OUT_OF_DATE)
@@ -2359,7 +2389,7 @@ def v_set(R, place, args, values):
 
 
 # The keys an owner's val button may set (the page's own controls).
-OWNER_VAL_KEYS = ("who.replies", MEDIA_ON)
+OWNER_VAL_KEYS = ("who.replies", "media.enabled")
 
 
 def v_val(R, place, args, values):

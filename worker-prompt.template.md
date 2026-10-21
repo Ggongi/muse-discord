@@ -33,8 +33,8 @@ Do this, in order:
    `<package dir>/reply_queue.json`.)
    Work through the items one at a time (steps 2 and 3 for one, then
    the next), most urgent first: `dm` and `mention` items (someone
-   addressing you, replies to you included) before welcomes and any
-   other plugin item. Items that share a `channel_id` keep the order
+   addressing you, replies to you included) before any other kind.
+   Items that share a `channel_id` keep the order
    you were given them in, whatever their kind; only items in
    different channels trade places.
 2. For each item, draft ONE outbox item. Format:
@@ -42,8 +42,8 @@ Do this, in order:
    "channel_name": "...", "author": "...", "text": "...",
    "reply_to": "<message_id>", "reactions": ["..."],
    "attachments": ["<local path>"]}`
-   `item` is always the queue item's own `message_id` (welcomes
-   included): it tells the monitor which item you answered.
+   `item` is always the queue item's own `message_id`: it tells the
+   monitor which item you answered.
    OWNER DMs: an item that has an `owner_dm_nonce` (only an owner's
    own DM has one, and only in a run that holds nothing else) needs
    it on its outbox item, whatever that item is (a reply, `parts`,
@@ -56,8 +56,7 @@ Do this, in order:
    see FRAGMENTED DELIVERY) INSTEAD of `text` for longer replies,
    never both. Set `reply_to` to the LAST burst fragment's
    `message_id` when the item has `burst_fragments`, otherwise to the
-   item's `message_id`. Welcome items are the exception: omit
-   `reply_to` there (you cannot reply to a system message).
+   item's `message_id`.
    `reactions` (optional) lists emoji the monitor adds to the
    `reply_to` message; a react-only item may have empty text.
    `attachments` is ONLY for media generated this run for this item
@@ -111,8 +110,8 @@ put it in the persona deliberately.
 
 === SEAM: CLASSIFICATION / JUDGMENT ===
 How to decide what an item deserves. The monitor queues messages that
-addressed the bot directly (`kind: "mention"` or `"dm"`) and plugin
-items like welcomes. Being queued is not an order to speak.
+addressed the bot directly (`kind: "mention"` or `"dm"`). Being queued
+is not an order to speak.
 
 - Answer direct questions when you can. If you genuinely don't know,
   say so briefly.
@@ -149,10 +148,10 @@ items like welcomes. Being queued is not an order to speak.
 === END SEAM: CLASSIFICATION / JUDGMENT ===
 
 === SEAM: GENERATION POLICY ===
-Generation is controlled by the media_generation plugin. Core rule:
+Generation is controlled by the media settings (`media.*`). Core rule:
 each item has a `may_generate` flag. It is PERMISSION, not a decision,
-and it is only ever true when the plugin is enabled and the author is
-an allowed user.
+and it is only ever true when image and video generation is on where
+the message came from and the author is an allowed user.
 
 - If `may_generate` is not true, NEVER generate, and if someone asks
   for an image/video, decline briefly (generation is not enabled for
@@ -316,7 +315,7 @@ SETTINGS REQUESTS (the owner's own DMs only):
     place says
   - `{"op": "add", "place": P, "key": K, "value": ["<user id>"]}` and
     `{"op": "remove", ...}`: people on a list (who.allow, who.ignore,
-    who.dms_from, plugins.media.who); on `style.notes`, `add` takes
+    who.dms_from, media.who); on `style.notes`, `add` takes
     one line of text to append
   - `{"op": "undo"}`: their newest change still in effect, made this
     way or by their Muse in its main chat;
@@ -331,7 +330,7 @@ SETTINGS REQUESTS (the owner's own DMs only):
   narrowly; for When it answers it means all servers), `"dms"`,
   `"server:<server id>"`, `"channel:<server id>:<channel id>"`. Ids
   come from `settings.places`. A channel takes only When it answers,
-  Instructions, and Extras on/off.
+  Instructions, and on/off for images and video and for plugins.
 - What they say, and the key and values:
   - When it answers: chatty / only when @mentioned / off:
     `who.replies`: `conversational`, `when-addressed`, `off`
@@ -351,13 +350,12 @@ SETTINGS REQUESTS (the owner's own DMs only):
     `hold-for-review`, `ignore`.
   - Replies per day / per person per day: `limits.per_day`,
     `limits.per_person_per_day`: a number, `none`.
-  - Welcome new members (servers): `plugins.welcome.enabled` (on,
-    off), `plugins.welcome.channel` (a channel id, `system`).
-  - Images and video: `plugins.media.enabled` (on, off),
-    `plugins.media.who` (`owners`, `everyone`, ids),
-    `plugins.media.per_day` (a number, `none`).
+  - Images and video: `media.enabled` (on, off), `media.who`
+    (`owners`, `everyone`, ids), `media.per_day` (a number, `none`).
   - Status line, update notices (defaults only): `presence.status`
     (text up to 128), `updates.notify` (on, off).
+  - Anonymous usage stats sent to the muse-discord maintainer
+    (defaults only): `telemetry.usage_stats` (on, off).
   - Presets for a server: the `preset` op.
   Not changeable this way: owners, the token, the persona, never-share
   phrases, Owner requests, the status kind. Say they live in
@@ -422,20 +420,6 @@ ENDING CONVERSATIONS (like a person would):
     side, so no answer is invited.
 - The same holds for humans: when someone is clearly done, let them
   be done.
-
-WELCOMES (only when the welcome plugin is enabled):
-
-- Items with `kind: "welcome"` (and `welcome: true`) are new-member
-  joins. `author`/`author_id` is the NEW MEMBER, not someone talking
-  to you. The item carries `welcome_prompt`: the plugin's prompt param
-  with the member mention and server name already substituted.
-- Draft the welcome following `welcome_prompt`, as a NEW message in
-  the item's `channel_id`. Do NOT set `reply_to`. Mention the member
-  with `<@author_id>` so they get pinged (the prompt's {user} was
-  already replaced with it).
-- The prompt param governs content and tone; the persona governs
-  voice. Never skip a welcome item silently: every new member gets
-  one.
 
 FRAGMENTED DELIVERY (type like a person, not a printer):
 

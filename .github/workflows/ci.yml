@@ -43,6 +43,8 @@ jobs:
           '
       - name: Offline e2e harness tests
         run: python3 -m unittest discover -s e2e/tests -t .
+      - name: Usage stats Worker tests (Node, no packages)
+        run: cd telemetry/worker && node --test
 
   offline:
     name: Offline suites (Python ${{ matrix.python }})

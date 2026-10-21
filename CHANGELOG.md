@@ -6,6 +6,101 @@ entries below the releases are pre-release history. **Action
 needed** lists what an existing install must do after updating;
 UPDATING.md walks a Muse through it.
 
+## 2026-10-21: /settings, simpler
+
+Changed:
+
+- `/settings` is one page now. It opens on the place you typed it in
+  (a channel, or DMs in the bot's DM) with one line on how the bot
+  behaves there, and a **Where** select for that server or
+  everywhere. Each place shows a few settings as selects: when it
+  replies, reply length, images and video, who can DM it and replies
+  a person a day (whichever that place has; a channel can follow its
+  server again with "Like the server"). Then the server's style
+  (Friends, Community, Work, applied in one click with Undo), Pause
+  or Resume, **Why no reply?**, and Undo for the last change. There
+  are no More / Extras / Bot-wide pages, no Defaults page, no "Same
+  as" choices and no server or channel browsing any more.
+- Moved to DM-only (DM the bot what you want, or ask your Muse):
+  instructions, what it may say about you (a style still sets it),
+  other bots and replies in a row to bots, the total daily cap,
+  possible prompt injection, Only answer these people and the owners'
+  Never answer list, picking people by name for DMs or for images and
+  video, images and video per day, the status line, update notices,
+  and plugins (the page lists installed plugins and says so).
+- Server admins' **Quiet the bot** panel is unchanged in what it
+  allows (quieter only, never past the owners), but shorter: the
+  ignore list, a Turn off button for images and video or a plugin
+  that is on, and Undo of admins' last change.
+- Buttons on `/settings` messages sent before this update answer
+  "This settings page is out of date" and change nothing; run
+  `/settings` again. The join notice's **Configure** button still
+  works.
+
+## 2026-10-21: Anonymous usage stats, on by default
+
+New:
+
+- The bot now sends the muse-discord maintainer one small anonymous
+  report a day, so we can see how many installs there are and what
+  breaks. **It is on by default.** It goes only to the project's own
+  Cloudflare Worker (`telemetry/worker`, which stores no IP
+  addresses), at most once a day, a few hours after the day ends.
+  Only released versions (a `vX.Y.Z` tag) send; a checkout of
+  unreleased code never does.
+- A report holds: a random install id, the day, the muse-discord,
+  Python and OS versions (like 3.12, linux), how many commits the copy
+  is past that release and whether its code has local edits, how many servers the bot
+  is in and their total members rounded down to a power of 2, and
+  that day's counts (messages seen in servers and DMs, replies sent,
+  unanswered messages by reason, wakes, reply times, settings changes
+  and presets, images and videos sent, restarts, crashes by exception
+  name) plus a
+  few bot-wide settings as plain values (DMs on or off, memory mode,
+  ...). Never message content, names, Discord ids, tokens, file paths,
+  error messages, IP addresses or times finer than the day. README,
+  "Privacy and usage stats", lists every field.
+- `python3 bin/telemetry.py show` prints exactly what would be sent
+  next; `status` shows whether it is on and the last send.
+- To turn it off: DM the bot "turn off usage stats", run `python3
+  bin/telemetry.py off`, set `telemetry: usage_stats: off` in
+  config.yaml, or set `MUSE_DISCORD_TELEMETRY=off`. Days it was off are
+  never sent. `bin/telemetry.py reset-id` replaces the install id.
+- Before anything is sent, the bot DMs each owner once about it, and
+  the first report waits at least 24 hours after that DM. If no owner
+  can be reached, nothing is sent (the DM is tried again hourly). If
+  you turn it off first, you never get the DM.
+
+**Action needed:**
+
+- None to keep things working. To turn usage stats off by DM, update
+  the installed worker prompt (step 2's SETTINGS REQUESTS); the other
+  ways work as is. If your runtime registered a copy of
+  hooks/mention-watch.sh, update the copy so wakes are counted.
+
+## 2026-10-21: Image and video built in, welcomes gone
+
+Changed:
+
+- Image and video generation is a built-in setting now, `media.*`
+  (`media.enabled`, `media.who`, `media.per_day`), instead of the
+  `media_generation` plugin. It works exactly as before: off by
+  default, the same scopes and caps, and the same "Image and video"
+  switch in `/settings`.
+- Welcoming new members is gone, and with it the welcome plugin, its
+  `/settings` controls and the "welcome" queue items. The bot no
+  longer looks at Discord's "X joined the server" messages at all.
+- No plugins ship with the bot now. The plugin mechanism stays:
+  `plugins/README.md` shows how to make one.
+
+Old configs keep working, nothing to do: `plugins.media.*` and the
+older `plugins.media_generation.*` settings (`allowed_user_ids`,
+`daily_cap`) are read as `media.*`, including changes made from
+Discord and their Undo, and today's generation count carries over.
+`plugins.welcome.*` settings are ignored (one line in monitor.log
+says so). Installed worker prompts keep working too; the template no
+longer mentions welcomes and names the settings `media.*`.
+
 ## 2026-10-20: Your DMs are answered only by the run that got them
 
 Security fix: a worker woken by someone else's message (and maybe

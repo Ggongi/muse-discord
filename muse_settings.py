@@ -21,7 +21,7 @@ changes) replaces the file's value at that same layer, unless the file
 was edited after the change (the overlay entry's base no longer matches
 the file): then the file wins and the entry is retired into history.
 
-Caps (limits.*, plugins.media.per_day) count within the scope WHERE THEY
+Caps (limits.*, media.per_day) count within the scope WHERE THEY
 ARE SET: everywhere = one total, a server = that server, dms = all DMs.
 Every cap set along the chain is enforced (see Settings.cap_layers).
 
@@ -165,8 +165,51 @@ CORE = {
                            none=True),
     "limits.per_person_per_day": Spec("number", None, "EDS", min=0,
                                       max=10000, none=True),
+    # Image and video generation (the worker generates, the monitor
+    # attaches; see monitor.py). Off by default. who: a list replaces
+    # the owners (add them to keep them). per_day counts replies with
+    # generated files actually sent, in the scope where it is set.
+    # legacy: the old plugin's param names (see moved_key).
+    "media.enabled": Spec("on-off", False, "EDASC"),
+    "media.who": Spec("people", "owners", "ES", values=("owners",
+                                                         "everyone"),
+                      risky=True, legacy="allowed_user_ids"),
+    "media.per_day": Spec("number", None, "ES", min=0, max=1000,
+                          none=True, legacy="daily_cap"),
 }
-CORE_GROUPS = ("who", "style", "abilities", "privacy", "limits")
+CORE_GROUPS = ("who", "style", "abilities", "privacy", "limits", "media")
+# Settings that moved: the media_generation plugin (settings id media) is
+# core since 2026-10. Its keys, plugins.media.* and plugins.media_
+# generation.* (old param names too), still load from config.yaml and
+# config.discord.yaml (values and history) and mean media.*.
+MOVED_PLUGINS = {"media": "media", "media_generation": "media"}
+# Plugins that were removed: their settings in config.yaml are ignored
+# (one log line, see Settings.retired_notice), their Discord-side
+# changes dropped.
+RETIRED_PLUGINS = ("welcome",)
+
+
+def moved_key(key):
+    """The current name of a settings key whose setting moved
+    ("plugins.media.who" -> "media.who", "plugins.media_generation.
+    daily_cap" -> "media.per_day"); any other key as is."""
+    parts = str(key).split(".", 2)
+    if len(parts) != 3 or parts[0] != "plugins" \
+            or parts[1] not in MOVED_PLUGINS:
+        return key
+    group = MOVED_PLUGINS[parts[1]]
+    for k, spec in CORE.items():
+        if k.startswith(group + ".") and spec.legacy == parts[2]:
+            return k
+    return f"{group}.{parts[2]}"
+
+
+def _retired_key(key):
+    parts = str(key).split(".", 2)
+    return len(parts) == 3 and parts[0] == "plugins" \
+        and parts[1] in RETIRED_PLUGINS
+
+
 TOP = {
     "presence.status": Spec("text", "", "E", maxlen=128),
     "presence.kind": Spec("choice", "watching", "E", values=PRESENCE_KINDS),
@@ -174,9 +217,11 @@ TOP = {
     "presence.enabled": Spec("on-off", True, "E", hidden=True,
                              discord_editable=False),
     "updates.notify": Spec("on-off", True, "E"),
+    # Anonymous daily usage counts to the maintainer (telemetry.py).
+    "telemetry.usage_stats": Spec("on-off", True, "E"),
 }
 TOP_DISCORD_EDITABLE = ("presence.status", "presence.kind",
-                        "updates.notify")
+                        "updates.notify", "telemetry.usage_stats")
 
 
 # ---------------------------------------------------------------------------
@@ -184,8 +229,9 @@ TOP_DISCORD_EDITABLE = ("presence.status", "presence.kind",
 # ---------------------------------------------------------------------------
 class Manifest:
     def __init__(self, pid, folder, specs, safe_in_new_servers,
-                 legacy_names=(), hooks=()):
+                 legacy_names=(), hooks=(), core_group=None):
         self.id = pid
+        self.core_group = core_group  # a plugin that is core now
         self.folder = folder
         self.specs = specs
         self.safe_in_new_servers = safe_in_new_servers
@@ -245,6 +291,8 @@ def _load_manifests(plugins_dir):
             raise SettingsError(f"plugins/{folder}/plugin.yaml: unreadable "
                                 f"({e})")
         pid = str(meta.get("id") or folder)
+        if {pid, folder} & (set(MOVED_PLUGINS) | set(RETIRED_PLUGINS)):
+            continue  # a leftover copy of a plugin that is gone now
         specs = {}
         raw = meta.get("settings")
         if isinstance(raw, dict):
@@ -480,7 +528,7 @@ def parse_key(s):
     if not parts or any(p == "" for p in parts):
         raise ValueError("empty key part")
     head = parts[0]
-    if head in ("presence", "updates"):
+    if head in ("presence", "updates", "telemetry"):
         return ("top",), ".".join(parts)
     if head in ("everywhere", "dms", "all_servers"):
         return (head,), _canon(parts[1:], False)
@@ -497,7 +545,7 @@ def _canon(rest, channel):
     key = ".".join(rest)
     if channel and key in CHANNEL_SHORT:
         return CHANNEL_SHORT[key]
-    return key
+    return moved_key(key)
 
 
 def format_key(path, key):
@@ -752,22 +800,27 @@ def map_old(raw, manifests):
     if (raw.get("updates") or {}).get("check") is False:
         put(out, "updates.notify", "off")
         lines.append("updates.check: false -> updates.notify: off")
+    if (raw.get("telemetry") or {}).get("usage_stats") in (False, "off"):
+        put(out, "telemetry.usage_stats", "off")
     for name, block in (raw.get("plugins") or {}).items():
         man = None
-        for m in manifests.values():
-            if name == m.id or name in m.legacy_names:
-                man = m
+        if name in MOVED_PLUGINS:
+            man = _moved_manifest(name)
+        else:
+            for m in manifests.values():
+                if name == m.id or name in m.legacy_names:
+                    man = m
         if man is None or not isinstance(block, dict):
             continue  # the old loader ignored config for absent plugins
         pid = man.id
         label = f"plugins.{name}"
+        dest = man.core_group or f"plugins.{pid}"
         if block.get("enabled"):
-            put(out, f"everywhere.plugins.{pid}.enabled", "on")
-            lines.append(f"{label}.enabled -> everywhere.plugins.{pid}"
-                         f".enabled")
+            put(out, f"everywhere.{dest}.enabled", "on")
+            lines.append(f"{label}.enabled -> everywhere.{dest}.enabled")
             if not man.safe_in_new_servers:
                 # Off in every server (built in for all_servers) except
-                # the old active ones: welcomes ran only there.
+                # the old active ones: such a plugin ran only there.
                 for gid in active:
                     put(server_block(gid), f"plugins.{pid}.enabled", "on")
                 lines.append(f"behavior.active_guild_ids -> servers.<id>."
@@ -783,27 +836,27 @@ def map_old(raw, manifests):
             if isinstance(val, dict) and ("default" in val
                                           or "per_guild" in val):
                 if "default" in val:
-                    _put_plugin(out.setdefault("everywhere", {}), pid, skey,
+                    _put_plugin(out.setdefault("everywhere", {}), man, skey,
                                 spec, val["default"])
                 for g, v in (val.get("per_guild") or {}).items():
-                    _put_plugin(server_block(g), pid, skey, spec, v)
+                    _put_plugin(server_block(g), man, skey, spec, v)
             else:
-                _put_plugin(out.setdefault("everywhere", {}), pid, skey,
+                _put_plugin(out.setdefault("everywhere", {}), man, skey,
                             spec, val)
             if skey != key:
-                lines.append(f"{label}.{key} -> plugins.{pid}.{skey}")
+                lines.append(f"{label}.{key} -> {dest}.{skey}")
         for g, params in (block.get("per_guild") or {}).items():
             if not isinstance(params, dict):
                 continue
             for key, v in params.items():
                 skey, spec = man.spec_for(key)
                 if spec is not None:
-                    _put_plugin(server_block(g), pid, skey, spec, v)
-        if name != pid:
-            lines.append(f"plugins.{name} -> plugins.{pid}")
+                    _put_plugin(server_block(g), man, skey, spec, v)
+        if f"plugins.{name}" != dest:
+            lines.append(f"plugins.{name} -> {dest}")
     if active and not any("active_guild_ids" in ln for ln in lines):
         lines.append("behavior.active_guild_ids: dropped (only welcomes "
-                     "used it, and they are off)")
+                     "used it, and they are gone)")
     if servers:
         out["servers"] = servers
     if isinstance(raw.get("testing"), dict):
@@ -811,7 +864,16 @@ def map_old(raw, manifests):
     return out, aliases, respond, lines
 
 
-def _put_plugin(block, pid, key, spec, value):
+def _moved_manifest(name):
+    """A plugin that is core now, as a manifest over its core settings
+    (for map_old): its keys map onto the core group."""
+    group = MOVED_PLUGINS[name]
+    specs = {k.split(".", 1)[1]: s for k, s in CORE.items()
+             if k.startswith(group + ".")}
+    return Manifest(group, name, specs, True, core_group=group)
+
+
+def _put_plugin(block, man, key, spec, value):
     if spec.legacy == "allowed_user_ids" or key == "who" \
             and spec.type == "people" and isinstance(value, list) \
             and not value:
@@ -824,12 +886,19 @@ def _put_plugin(block, pid, key, spec, value):
         return  # null meant "the default" for these
     if value is None and spec.type == "number":
         value = "none"
-    block.setdefault("plugins", {}).setdefault(pid, {})[key] = value
+    if man.core_group:
+        block.setdefault(man.core_group, {})[key] = value
+    else:
+        block.setdefault("plugins", {}).setdefault(man.id, {})[key] = value
 
 
 # ---------------------------------------------------------------------------
 # Parsing a new-layout dict into layer values
 # ---------------------------------------------------------------------------
+CHANNEL_ONLY = ("a channel or category may set only replies, notes, "
+                "media.enabled and plugins.<plugin>.enabled")
+
+
 class _Parser:
     def __init__(self, file_label, manifests, old=False):
         self.file = file_label
@@ -838,6 +907,8 @@ class _Parser:
         self.errors = []
         self.values = {}       # (path, key) -> value
         self.labels = {}       # server/channel id -> name label
+        self.retired = set()   # removed plugins the file still sets
+        self.old_names = set()  # (path, key) set under a moved key
 
     def err(self, where, msg):
         self.errors.append(f"{self.file}: {where}: {msg}")
@@ -851,7 +922,9 @@ class _Parser:
                 return self.manifests[parts[1]].specs.get(parts[2])
         return None
 
-    def set(self, path, key, value, where):
+    def set(self, path, key, value, where, old_name=False):
+        """old_name: key came from a moved setting's old spelling, which
+        never overrides the current spelling at the same layer."""
         spec = self.spec(key)
         kind = _scope_kind(path)
         if spec is None:
@@ -890,6 +963,13 @@ class _Parser:
         if not ok:
             self.err(where, f"{v}; valid: {spec.valid_text()}")
             return
+        if old_name:
+            if (path, key) in self.values \
+                    and (path, key) not in self.old_names:
+                return
+            self.old_names.add((path, key))
+        else:
+            self.old_names.discard((path, key))
         self.values[(path, key)] = v
 
     def scope_block(self, path, block, where):
@@ -922,23 +1002,36 @@ class _Parser:
                     continue
                 for pid, pblock in sub.items():
                     pw = f"{w}.{pid}"
+                    if pid in RETIRED_PLUGINS:
+                        self.retired.add(str(pid))
+                        continue
                     if not isinstance(pblock, dict):
                         self.err(pw, "expected a block like "
                                  "{enabled: on}")
                         continue
+                    moved = pid in MOVED_PLUGINS
                     for k, v in pblock.items():
                         if kind == "channel" and k != "enabled":
-                            self.err(f"{pw}.{k}", "a channel or category "
-                                     "may set only replies, notes and "
-                                     "plugins.<plugin>.enabled")
+                            self.err(f"{pw}.{k}", CHANNEL_ONLY)
                             continue
-                        self.set(path, f"plugins.{pid}.{k}", v, f"{pw}.{k}")
+                        key = moved_key(f"plugins.{pid}.{k}")
+                        if moved and self.spec(key) is not None \
+                                and self.spec(key).legacy == k \
+                                and self.spec(key).type == "people" \
+                                and v == []:
+                            v = "owners"  # allowed_user_ids: [] = owners
+                        self.set(path, key, v, f"{pw}.{k}", old_name=moved)
             elif kind == "channel":
                 if top in CHANNEL_SHORT:
                     self.set(path, CHANNEL_SHORT[top], sub, w)
+                elif top == "media" and isinstance(sub, dict):
+                    for k, v in sub.items():
+                        if k != "enabled":
+                            self.err(f"{w}.{k}", CHANNEL_ONLY)
+                            continue
+                        self.set(path, "media.enabled", v, f"{w}.{k}")
                 else:
-                    self.err(w, "a channel or category may set only "
-                             "replies, notes and plugins.<plugin>.enabled")
+                    self.err(w, CHANNEL_ONLY)
             elif top in CORE_GROUPS:
                 if not isinstance(sub, dict):
                     self.err(w, f"expected settings under {top}:")
@@ -999,6 +1092,8 @@ class Settings:
         self.persona = DEFAULT_PERSONA
         self.token_from = DEFAULT_TOKEN_FILE
         self.legacy_defaults = False
+        # One line when config.yaml still sets a removed plugin.
+        self.retired_notice = None
         self._cache = {}
 
     # -- top level ---------------------------------------------------------
@@ -1021,6 +1116,10 @@ class Settings:
     @property
     def updates_notify(self):
         return self.top("updates.notify")
+
+    @property
+    def usage_stats(self):
+        return self.top("telemetry.usage_stats")
 
     def token_sources(self):
         """[("env", NAME) | ("file", path)], tried in order."""
@@ -1410,6 +1509,51 @@ def _read_overlay_doc(path, strict=False):
     if not isinstance(doc.get("history"), list):
         doc["history"] = []
     doc["version"] = 1
+    return _upgrade_overlay(doc)
+
+
+def _upgrade_key(keystr):
+    """An overlay key in its current spelling (a moved setting's old key
+    -> its new one), or None for a removed plugin's setting."""
+    try:
+        path, key = parse_key(keystr)
+    except (ValueError, TypeError):
+        return keystr
+    if _retired_key(key):
+        return None
+    if key in CORE and "plugins." in str(keystr):
+        return format_key(path, key)
+    return keystr
+
+
+def _upgrade_overlay(doc):
+    """Bring an overlay document's keys up to date, in place: a moved
+    setting's entries and history lines take its new key (undo keeps
+    working), a removed plugin's are dropped. Writers save the result,
+    so the file converts on its next write. Returns doc."""
+    values = doc.get("values")
+    if isinstance(values, dict) and any(
+            _upgrade_key(k) != k for k in values):
+        out = {}
+        for k, entry in values.items():
+            nk = _upgrade_key(k)
+            if nk is not None and (nk == k or nk not in values):
+                out[nk] = entry
+        doc["values"] = out
+    hist = doc.get("history")
+    if isinstance(hist, list) and any(
+            isinstance(h, dict) and isinstance(h.get("key"), str)
+            and _upgrade_key(h["key"]) != h["key"] for h in hist):
+        out = []
+        for h in hist:
+            if isinstance(h, dict) and isinstance(h.get("key"), str):
+                nk = _upgrade_key(h["key"])
+                if nk is None:
+                    continue
+                if nk != h["key"]:
+                    h = dict(h, key=nk)
+            out.append(h)
+        doc["history"] = out
     return doc
 
 
@@ -1538,6 +1682,12 @@ def load(config_path, plugins_dir=None, overlay_path=None,
     _parse_new(p, data, aliases, st)
     if p.errors:
         raise SettingsError("\n".join(p.errors))
+    retired = p.retired | {str(n) for n in (raw.get("plugins") or {})
+                           if st.layout == "old" and n in RETIRED_PLUGINS}
+    if retired:
+        st.retired_notice = (
+            f"Note: config.yaml still sets the {', '.join(sorted(retired))} "
+            f"plugin, which was removed; those settings are ignored.")
     st.file_values = p.values
     st.labels = p.labels
     st.aliases = {a: True for a in aliases}
@@ -1547,8 +1697,8 @@ def load(config_path, plugins_dir=None, overlay_path=None,
 
 def _parse_new(p, data, aliases, st):
     allowed = {"version", "owners", "persona", "token_from", "presence",
-               "updates", "everywhere", "dms", "all_servers", "servers",
-               "engine", "testing"}
+               "updates", "telemetry", "everywhere", "dms", "all_servers",
+               "servers", "engine", "testing"}
     for k in data:
         if k not in allowed:
             p.err(str(k), "unknown top-level key; valid: "
@@ -1587,7 +1737,8 @@ def _parse_new(p, data, aliases, st):
             st.token_from = [i.strip() for i in items] \
                 if isinstance(tf, list) else tf.strip()
     for sect, keys in (("presence", ("status", "kind", "enabled")),
-                       ("updates", ("notify",))):
+                       ("updates", ("notify",)),
+                       ("telemetry", ("usage_stats",))):
         block = data.get(sect)
         if block is None:
             continue
@@ -1660,6 +1811,7 @@ def _apply_overlay(st):
     st.overlay_error = None
     if not isinstance(doc, dict):
         doc = {}
+    _upgrade_overlay(doc)
     st.overlay_doc = doc
     values = doc.get("values") or {}
     if not isinstance(values, dict):
@@ -1731,10 +1883,9 @@ def check_settable(st, path, key):
     elif kind not in spec.scopes or (kind == "all_servers" and not (
             key == "who.replies" or key.endswith(".enabled"))):
         raise SettingsError(f"{keystr}: cannot be set at {kind} scope")
-    elif kind == "channel" and key.startswith("plugins.") \
-            and not key.endswith(".enabled"):
-        raise SettingsError(f"{keystr}: a channel or category may set only "
-                            f"replies, notes and plugins.<plugin>.enabled")
+    elif kind == "channel" and not (key in CHANNEL_SHORT.values()
+                                    or _is_enabled_key(key)):
+        raise SettingsError(f"{keystr}: {CHANNEL_ONLY}")
     if path[0] in ("servers", "alias") and (_id_str(path[1]) is None or (
             len(path) > 2 and _id_str(path[3]) is None)):
         raise SettingsError(f"{keystr}: expected Discord ids")
@@ -2238,6 +2389,11 @@ def _fold(config_path, plugins_dir):
                               else key.split("."))
             else:
                 node_path += key.split(".")
+        if path != ("top",):
+            # A moved setting's old spelling at this layer goes, so the
+            # file holds the folded value once.
+            for old in _old_spellings(key):
+                _del_path(data, list(_node_prefix(path)) + old.split("."))
         if entry.get("value") == "inherit":
             _del_path(data, node_path)
         else:
@@ -2254,6 +2410,16 @@ def _fold(config_path, plugins_dir):
         doc["history"] = _trim_history(doc["history"])
         _write_overlay_doc(st.overlay_path, doc)
     return bak, folded
+
+
+def _old_spellings(key):
+    """The old keys a moved setting was written as (see moved_key)."""
+    group, _, name = key.partition(".")
+    spec = CORE.get(key)
+    names = [name] + ([spec.legacy] if spec is not None and spec.legacy
+                      else [])
+    return [f"plugins.{pid}.{n}" for pid, g in MOVED_PLUGINS.items()
+            if g == group for n in names]
 
 
 def _node_prefix(path):
@@ -2343,8 +2509,8 @@ def build_migrated(config_path, plugins_dir=None, state_path=None):
         name = block.pop("name", None) or known.get(gid)
         servers[gid] = ({"name": name} if name else {}) | block
     order = ["version", "owners", "persona", "token_from", "presence",
-             "updates", "everywhere", "dms", "all_servers", "servers",
-             "engine", "testing"]
+             "updates", "telemetry", "everywhere", "dms", "all_servers",
+             "servers", "engine", "testing"]
     data["version"] = 1
     out = {k: data[k] for k in order if k in data}
     header = ("# muse-discord settings (converted from the old layout by "
@@ -2397,9 +2563,7 @@ def compare(old_st, new_st, known=None):
                 continue
             diffs.append((sc.label(), key, a.get(key), b.get(key)))
         for cap in ("limits.per_day", "limits.per_person_per_day",
-                    "plugins.media.per_day"):
-            if cap.startswith("plugins.") and "media" not in new_st.manifests:
-                continue
+                    "media.per_day"):
             ca, cb = old_st.cap_layers(cap, sc), new_st.cap_layers(cap, sc)
             if ca != cb:
                 diffs.append((sc.label(), cap + " (counted where set)",
@@ -2468,11 +2632,11 @@ _PLACE_HELP = ('use "defaults", "dms", "server:<server id>" or '
 class Place:
     """Where a change applies, in the words people use: defaults (every
     server and DM that does not set its own), dms, a server, or a
-    channel. Defaults maps each key to its real layer: who.replies and
-    plugins.*.enabled to all_servers, who.dms_from to dms, bot-wide
-    keys to the top level, everything else to everywhere. A channel
-    may carry its category (category_id) so values resolve as they do
-    for messages there."""
+    channel. Defaults maps each key to its real layer: who.replies,
+    media.enabled and plugins.*.enabled to all_servers, who.dms_from
+    to dms, bot-wide keys to the top level, everything else to
+    everywhere. A channel may carry its category (category_id) so values
+    resolve as they do for messages there."""
 
     KINDS = ("defaults", "dms", "server", "channel")
 
@@ -2554,7 +2718,9 @@ class Place:
 
 
 def _is_enabled_key(key):
-    return key.startswith("plugins.") and key.endswith(".enabled")
+    """An Extras on/off key: media.enabled or a plugin's enabled."""
+    return key == "media.enabled" or (key.startswith("plugins.")
+                                      and key.endswith(".enabled"))
 
 
 def format_place(place):
@@ -2665,9 +2831,10 @@ def _scope_for(place, key, path=None):
 
 # -- what each place offers ---------------------------------------------------
 BASIC_KEYS = ("who.replies", "who.dms_from", "privacy.memory", "style.notes",
-              "style.length", "limits.per_person_per_day")
+              "style.length", "limits.per_person_per_day", "media.enabled")
 MORE_KEYS = ("who.allow", "who.ignore", "who.bots", "who.bot_exchange_limit",
-             "limits.per_day", "privacy.suspicious")
+             "limits.per_day", "privacy.suspicious", "media.who",
+             "media.per_day")
 BOT_WIDE_KEYS = ("presence.status", "updates.notify")
 HIDDEN_KEYS = ("abilities.owner_commands", "presence.kind",
                "privacy.never_share")
@@ -2680,8 +2847,8 @@ def place_keys(st, place, tier):
     Replies per person per day, Extras on/off), "more", or "hidden"
     (valid in config.yaml and still Discord-editable as far as the
     overlay goes, but not offered: owner requests, status kind, never
-    share, welcome's daily_cap / max_age_hours / prompt). The UI may
-    show a hidden key read only."""
+    share, a plugin's hidden settings). The UI may show a hidden key
+    read only."""
     if tier not in ("basics", "more", "hidden"):
         raise ValueError(tier)
     plugins = sorted(st.manifests)
@@ -2701,11 +2868,6 @@ def place_keys(st, place, tier):
                 more.append(key)
     if place.kind == "defaults":
         more += list(BOT_WIDE_KEYS)
-    if place.kind in ("channel", "dms"):
-        # Welcomes greet server members: not a channel or DM setting.
-        for key in [k for k in basics if k == "plugins.welcome.enabled"]:
-            basics.remove(key)
-            hidden.append(key)
     if place.kind == "channel":
         more = []
         basics = [k for k in basics if k in CHANNEL_KEYS
@@ -2758,15 +2920,13 @@ LABELS = {
     "limits.per_day": "Replies per day (total)",
     "limits.per_person_per_day": "Replies per person per day",
     "abilities.owner_commands": "Owner requests (pin, post, react, threads)",
-    "plugins.welcome.enabled": "Welcome new members",
-    "plugins.welcome.channel": "Welcome channel",
-    "plugins.welcome.notes": "Welcome notes",
-    "plugins.media.enabled": "Image and video generation",
-    "plugins.media.who": "Who can ask for images and video",
-    "plugins.media.per_day": "Generations per day",
+    "media.enabled": "Image and video generation",
+    "media.who": "Who can ask for images and video",
+    "media.per_day": "Generations per day",
     "presence.status": "Status line",
     "presence.kind": "Status kind",
     "updates.notify": "Update notices",
+    "telemetry.usage_stats": "Anonymous usage stats",
 }
 VALUE_LABELS = {
     ("who.replies", "conversational"): "Chatty",
@@ -2789,18 +2949,10 @@ VALUE_LABELS = {
     ("privacy.suspicious", "hold-for-review"): "Hold for my review",
     ("privacy.suspicious", "ignore"): "Drop it",
     ("privacy.suspicious", "answer"): "Answer it (no check)",
-    ("plugins.media.who", "owners"): "Only you",
-    ("plugins.media.who", "everyone"): "Everyone",
-    ("plugins.welcome.channel", "system"): "The server's system channel",
-    ("plugins.welcome.channel", "off"): "Nowhere",
+    ("media.who", "owners"): "Only you",
+    ("media.who", "everyone"): "Everyone",
 }
 CATEGORY_TYPE = 4
-# Types of the bundled plugins' keys, for words when no Settings is at
-# hand (describe_change takes values, not a Settings).
-_PLUGIN_TYPES = {"plugins.welcome.channel": "channel",
-                 "plugins.welcome.notes": "text",
-                 "plugins.welcome.prompt": "text",
-                 "plugins.media.who": "people"}
 
 
 def label(key):
@@ -2820,8 +2972,6 @@ def _type_of(key):
     spec = CORE.get(key) or TOP.get(key)
     if spec is not None:
         return spec.type
-    if key in _PLUGIN_TYPES:
-        return _PLUGIN_TYPES[key]
     if _is_enabled_key(key):
         return "on-off"
     if key.endswith("per_day") or key.endswith("_cap"):
@@ -3009,7 +3159,7 @@ def explain_lines(st, place, keys=None, names=None):
 
 def key_from_text(st, text):
     """A settings key from its key name or its label (any case)."""
-    t = str(text).strip()
+    t = moved_key(str(text).strip())
     if st.spec(t) is not None:
         return t
     low = t.lower()
@@ -3153,7 +3303,7 @@ class Change:
     def __init__(self, place, key, value, path=None, revert=False):
         if isinstance(place, str):
             place = parse_place(place)
-        self.place, self.key, self.value = place, key, value
+        self.place, self.key, self.value = place, moved_key(key), value
         self.path = path
         self.revert = revert   # an admin's revert (see admin_changes)
 
@@ -3817,16 +3967,16 @@ PRESETS = {
         "who.replies": "conversational", "privacy.memory": "everything",
         "limits.per_person_per_day": None, "limits.per_day": None,
         "who.bots": "when-addressed", "who.bot_exchange_limit": None,
-        "plugins.media.per_day": None}),
+        "media.per_day": None}),
     "community": ("Community", {
         "who.replies": "when-addressed", "privacy.memory": "public-only",
         "limits.per_person_per_day": 20, "limits.per_day": 300,
         "who.bots": "when-addressed", "who.bot_exchange_limit": 4,
-        "plugins.media.per_day": (_IF_MEDIA, 10)}),
+        "media.per_day": (_IF_MEDIA, 10)}),
     "work": ("Work", {
         "who.replies": "when-addressed", "privacy.memory": "nothing",
         "limits.per_person_per_day": None, "limits.per_day": None,
-        "who.bots": "ignore", "plugins.media.per_day": None,
+        "who.bots": "ignore", "media.per_day": None,
         "style.notes": (_IF_EMPTY, WORK_NOTES)}),
 }
 
@@ -3869,7 +4019,7 @@ def preset_changes(st, name, place, info=None, big="refuse"):
             continue  # a plugin that is not installed, or skipped
         if isinstance(value, tuple):
             cond, value = value
-            if cond == _IF_MEDIA and not st.get("plugins.media.enabled", sc):
+            if cond == _IF_MEDIA and not st.get("media.enabled", sc):
                 continue
             if cond == _IF_EMPTY and st.get(key, sc):
                 continue
@@ -3894,8 +4044,7 @@ def matching_preset(st, place):
                 continue
             if isinstance(value, tuple):
                 cond, value = value
-                if cond == _IF_MEDIA and not st.get("plugins.media.enabled",
-                                                    sc):
+                if cond == _IF_MEDIA and not st.get("media.enabled", sc):
                     continue
             if st.get(key, sc) != value:
                 ok = False
@@ -4087,47 +4236,46 @@ def assess(st, changes, info=None, names=None, named=()):
                             "about you.")
 
     # Image and video generation.
-    if "media" in st.manifests:
-        scopes = {(g,): sc for g, sc in servers.items()}
-        scopes[("DMs",)] = Scope.dm()
-        scopes[("later",)] = later
-        for (g, c), sc in channels.items():
-            scopes[(g, c)] = sc
+    scopes = {(g,): sc for g, sc in servers.items()}
+    scopes[("DMs",)] = Scope.dm()
+    scopes[("later",)] = later
+    for (g, c), sc in channels.items():
+        scopes[(g, c)] = sc
 
-        def media(s, sc):
-            if not s.get("plugins.media.enabled", sc):
-                return None, False
-            who = s.get("plugins.media.who", sc)
-            cap = _effective_cap(s, "plugins.media.per_day", sc)
-            return who, who != "owners" and (
-                cap is None or cap > MEDIA_PER_DAY_RISKY)
+    def media(s, sc):
+        if not s.get("media.enabled", sc):
+            return None, False
+        who = s.get("media.who", sc)
+        cap = _effective_cap(s, "media.per_day", sc)
+        return who, who != "owners" and (
+            cap is None or cap > MEDIA_PER_DAY_RISKY)
 
-        def where(k):
-            if k == ("DMs",):
-                return "DMs"
-            if k == ("later",):
-                return "servers it joins later"
-            if len(k) == 1:
-                return gname(k[0])
-            return place_name(Place.channel(*k), look_names)
-        everyone, uncapped = [], []
-        for k, sc in scopes.items():
-            wb, ub = media(st, sc)
-            wa, ua = media(after, sc)
-            if wa == "everyone" and wb != "everyone":
-                everyone.append(where(k))
-            if ua and not ub:
-                uncapped.append(where(k))
-        if everyone:
-            out.warnings.append(f"Anyone in {_join(everyone)} can ask for "
-                                f"generated images and video. Generation "
-                                f"can cost real money.")
-        if uncapped:
-            out.warnings.append(
-                f"Generations per day: more than "
-                f"{MEDIA_PER_DAY_RISKY} (or no limit) for people other "
-                f"than you in {_join(uncapped)}. Generation can cost real "
-                f"money.")
+    def where(k):
+        if k == ("DMs",):
+            return "DMs"
+        if k == ("later",):
+            return "servers it joins later"
+        if len(k) == 1:
+            return gname(k[0])
+        return place_name(Place.channel(*k), look_names)
+    everyone, uncapped = [], []
+    for k, sc in scopes.items():
+        wb, ub = media(st, sc)
+        wa, ua = media(after, sc)
+        if wa == "everyone" and wb != "everyone":
+            everyone.append(where(k))
+        if ua and not ub:
+            uncapped.append(where(k))
+    if everyone:
+        out.warnings.append(f"Anyone in {_join(everyone)} can ask for "
+                            f"generated images and video. Generation "
+                            f"can cost real money.")
+    if uncapped:
+        out.warnings.append(
+            f"Generations per day: more than "
+            f"{MEDIA_PER_DAY_RISKY} (or no limit) for people other "
+            f"than you in {_join(uncapped)}. Generation can cost real "
+            f"money.")
 
     # Only answer these people: newly limiting places.
     allow_scopes = [(gname(g), sc) for g, sc in servers.items()] + [
@@ -4222,10 +4370,9 @@ def assess(st, changes, info=None, names=None, named=()):
                             f"a Muse turn.")
 
     # Plugin settings their manifest marks risky.
-    explicit = {"plugins.media.who", "plugins.media.per_day"}
     for ch in changes:
         spec = st.spec(ch.key)
-        if ch.key in CORE or ch.key in TOP or ch.key in explicit \
+        if ch.key in CORE or ch.key in TOP \
                 or spec is None or not spec.risky:
             continue
         path = change_path(st, ch)

@@ -103,10 +103,11 @@ FORUM = "200000000000000003"
 GUILD = "300000000000000001"
 cfg_path = os.path.join(WORK, "config.yaml")
 with open(cfg_path, "w") as f:
-    f.write(f"""bot:
-  token_env: MUSE_TEST_TOKEN
-owners:
-  user_ids: ["{OWNER}"]
+    f.write(f"""version: 1
+token_from: env:MUSE_TEST_TOKEN
+owners: ["{OWNER}"]
+everywhere:
+  media: {{enabled: on}}
 """)
 os.environ["MUSE_DISCORD_CONFIG"] = cfg_path
 os.environ["MUSE_TEST_TOKEN"] = "dummy-token"
@@ -132,7 +133,6 @@ M.BOT_NAME = "musebot"
 API_POSTS = []
 FILE_SENDS = []
 SEND_FILES_FAIL = [0]
-HOOK_CALLS = []
 
 
 def fake_api_post(path, data):
@@ -162,12 +162,6 @@ M.api_post = fake_api_post
 M.api_get = fake_api_get
 M.send_typing = lambda cid: None
 M.send_reply_with_files = fake_send_files
-M.PLUGIN_HOOKS["gate_message"] = [
-    lambda ctx, msg, gid: {"may_generate": True}
-    if (msg.get("author") or {}).get("id") == OWNER else None]
-M.PLUGIN_HOOKS["generation_sent"] = [
-    lambda ctx, item: HOOK_CALLS.append(item.get("reply_to"))]
-M.GEN_PLUGIN_ENABLED = True
 ORIG_COLLECT = M.collect_media
 
 
@@ -188,7 +182,6 @@ def reset():
     D.GENERATED_DIR = M.GENERATED_DIR
     API_POSTS.clear()
     FILE_SENDS.clear()
-    HOOK_CALLS.clear()
     CURL_CALLS.clear()
     FF_CALLS.clear()
     CURL_HANDLER[0] = None
@@ -369,7 +362,8 @@ def f2_failed_send_retries_with_image_and_counts_once():
     SEND_FILES_FAIL[0] = 1
     M.process_outbox(state)
     assert not FILE_SENDS
-    assert HOOK_CALLS == [], f"hook counted a failed send: {HOOK_CALLS}"
+    assert M._media_counts(state)["sent_today"] == 0, \
+        "media.per_day counted a failed send"
     assert x["id"] in state.get("gen_approved", {}), "approval popped early"
     assert os.path.realpath(img) not in state.get("gen_sent", []), \
         "gen_sent recorded before send"
@@ -380,7 +374,8 @@ def f2_failed_send_retries_with_image_and_counts_once():
     M.process_outbox(state)
     assert FILE_SENDS and FILE_SENDS[0]["files"] == [os.path.realpath(img)], \
         f"retry went out without the image: {FILE_SENDS}"
-    assert len(HOOK_CALLS) == 1, f"hook calls: {HOOK_CALLS}"
+    assert M._media_counts(state)["sent_today"] == 1, \
+        "media.per_day must count the sent reply once"
     assert x["id"] not in state.get("gen_approved", {})
     assert os.path.realpath(img) in state.get("gen_sent", [])
     assert read_outbox() == []
