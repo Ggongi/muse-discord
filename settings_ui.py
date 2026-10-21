@@ -104,6 +104,8 @@ REFUSAL_WHY = ("Sorry, only the bot's owners and this server's admins can "
                "see why the bot didn't reply.")
 OUT_OF_DATE = ("This settings page is out of date. Run /settings for a "
                "fresh one. Nothing was changed.")
+NOT_THERE = ("I'm not in that server any more, so there is nothing to set "
+             "there. Nothing was changed.")
 EXPIRED = "This confirmation expired, so nothing was changed."
 WRONG_USER = ("That button was made for someone else, so nothing was "
               "changed.")
@@ -221,6 +223,10 @@ def clip(text, n):
 
 
 _MD = re.compile(r"([\\*_~|>#\[\]()`])")
+# Bidi controls (embeddings, overrides, isolates): a name could reorder
+# the words around it on the page.
+_BIDI = re.compile("[\u202a-\u202e\u2066-\u2069]")
+_SCHEME = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]{0,30}):(?=//)")
 _UNMD = re.compile(r"\\([\\*_~|>#\[\]()`])")
 ZWSP = "​"
 
@@ -230,9 +236,11 @@ def esc(text):
     them) made safe to put in a Text Display: markdown escaped, mentions
     and @everyone / @here neutralised, on one line. Labels and options
     are plain text in Discord; plain() undoes this for them."""
-    t = " ".join(str(text).split())
+    t = _BIDI.sub("", " ".join(str(text).split()))
     t = _MD.sub(r"\\\1", t)
     t = re.sub(r"<(?=[@#])", "<" + ZWSP, t)
+    # "https://" becomes "https:<ZWSP>//": a URL in a name never links.
+    t = _SCHEME.sub(r"\1:" + ZWSP, t)
     return re.sub(r"@(?=(everyone|here)\b)", "@" + ZWSP, t)
 
 
@@ -922,9 +930,8 @@ def banner_done(R, text, undo_place=None, group=None):
         try:
             return [section(text, btn("Undo", cid("un", ptok(undo_place),
                                                   group)))]
-        except BadId:
-            return [section(text, btn("Undo", cid("un",
-                                                  ptok(undo_place))))]
+        except BadId:   # no Undo without its group (the stale check)
+            pass
     return [td(text)]
 
 
@@ -985,8 +992,8 @@ def last_change_slot(R, place):
     text = clip(f"-# {head}: {changed_names(plan)}{when}", 300)
     try:
         b = btn("Undo", cid("un", ptok(up), gid))
-    except BadId:
-        b = btn("Undo", cid("un", ptok(up)))
+    except BadId:   # no Undo without its group (the stale check)
+        return [td(text)]
     return [section(text, b)]
 
 
@@ -1047,8 +1054,21 @@ def plugin_keys(R, place):
         keys = ms.place_keys(R.st, place, "basics")
     except Exception:
         return []
-    return [k for k in keys if k.startswith("plugins.")
-            and ms._is_enabled_key(k)]
+    out = []
+    for k in keys:
+        if not (k.startswith("plugins.") and ms._is_enabled_key(k)):
+            continue
+        if kcode(k) is None:    # an id no custom_id can carry
+            if k not in _UNNAMEABLE:
+                _UNNAMEABLE.add(k)
+                R.ctx.log(f"settings_ui: plugin key {k} can't be shown "
+                          f"(its id must be 1-40 of A-Z a-z 0-9 _ -)")
+            continue
+        out.append(k)
+    return out
+
+
+_UNNAMEABLE = set()     # plugin keys already logged as skipped
 
 
 def on_off_name(key):
@@ -1149,9 +1169,18 @@ PLACE_CONTROLS = {"channel": ("r", "med"),
 CAP_CHOICES = (5, 10, 20, 50, 100)
 
 
-def follow_name(R, place):
-    """What a channel follows, in words: "the rest of Muse Lounge"."""
-    return f"the rest of {R.gname(place.guild_id)}"
+def follow_option(R, place, key, now):
+    """The "=" option of a channel's select: what the channel follows
+    without its own setting, named: its category when the category sets
+    key, else the server."""
+    cat = place.category_id
+    if cat and R.st.layer(("servers", place.guild_id, "channels", cat),
+                          key)[0]:
+        name = R.look(cat) or "its"
+        return opt(f"Like the {name} category", "=",
+                   f"Now {now}, as set for the {name} category")
+    return opt("Like the server", "=",
+               f"Now {now}, like the rest of {R.gname(place.guild_id)}")
 
 
 def only_you(R):
@@ -1163,9 +1192,10 @@ def ctl_replies(R, place):
     opts = []
     if place.kind == "channel":
         inh = UI_VALUES.get(("who.replies", v.inherited), "off")
-        opts.append(opt("Like the server", "=",
-                        f"Now {inh}, like {follow_name(R, place)}",
-                        default=not v.set))
+        o = follow_option(R, place, "who.replies", inh)
+        if not v.set:
+            o["default"] = True
+        opts.append(o)
     cur = v.here if place.kind == "channel" else v.value
     for x, label, d in (
             ("conversational", "Chat freely", "Answers @mentions, replies "
@@ -1209,9 +1239,10 @@ def ctl_media(R, place):
         v = Val(R, place, "media.enabled")
         if place.kind == "channel":
             inh = "on" if v.inherited else "off"
-            opts.append(opt("Like the server", "=",
-                            f"Now {inh}, like {follow_name(R, place)}",
-                            default=not v.set))
+            o = follow_option(R, place, "media.enabled", inh)
+            if not v.set:
+                o["default"] = True
+            opts.append(o)
         on = bool(v.here if v.set else v.value)
         pick = v.set or place.kind == "dms"
         opts.append(opt("On", "on", "For the people allowed in the server"
@@ -1571,6 +1602,7 @@ def page_why(R, place):
         R.ctx.log(f"settings_ui: recent_outcomes: {e}")
         got = []
     shown = 0
+    fixes = set()
     most = WHY_ENTRIES - (1 if R.banner else 0)
     for o in got:
         if not isinstance(o, dict) or o.get("status") not in REFUSED:
@@ -1590,6 +1622,14 @@ def page_why(R, place):
         text, fix, holds = explain_outcome(R, o)
         if not aid:
             fix = None   # an older entry: no fix
+        if fix is not None:
+            # Two refusals with the same cause have the same fix: one
+            # button (the newest entry's); a custom_id may appear only
+            # once in a message, or Discord refuses the whole page.
+            if fix["custom_id"] in fixes:
+                fix = None
+            else:
+                fixes.add(fix["custom_id"])
         body = f"**{who_m}** · [message]({link}) · {when}\n" + text
         if R.fixed and R.fixed == aid and not holds:
             body += "\n" + FIXED_NOTE.format(who=who_m)
@@ -1797,6 +1837,20 @@ def quiet_row(R, place, where):
     return [td(f"**{where}:** {words}"), row(*bs) if bs else None]
 
 
+def admin_turned_off(R, gid, key):
+    """An admin's entry turned key off for the whole server, and the
+    owners have it on there: an admin may turn it back on."""
+    e = R.st.overlay.get((("servers", str(gid)), key))
+    if ms.entry_role(e) != "admin" or e.get("_norm", e.get("value")) \
+            not in (False, "off"):
+        return False
+    try:
+        return bool(ms.owners_view(R.st, gid).get(key, ms.Scope.server(
+            gid)))
+    except Exception:
+        return False
+
+
 def page_quiet(R, gid):
     """The admin panel for one server (here = where it was typed)."""
     server = ms.Place.server(gid)
@@ -1827,17 +1881,22 @@ def page_quiet(R, gid):
                  else R.person(p)) or "Someone an admin added", p)
             for p in adds[:25]], "Stop ignoring…", 1,
             min(25, len(adds)))))
-    offs = []
+    offs, items = [], []
     for key in ["media.enabled"] + plugin_keys(R, server):
+        name = on_off_name(key)
         if value(R, server, key):
-            offs.append(btn(f"Turn off {plain(on_off_name(key))}",
+            items.append(f"{name} on")
+            offs.append(btn(f"Turn off {plain(name)}",
                             cid("val", f"s{gid}", kcode(key), "off"),
                             DANGER))
+        elif admin_turned_off(R, gid, key):
+            # "=": back to the owners' value (the engine's admin rule).
+            items.append(f"{name} off (an admin turned it off)")
+            offs.append(btn(f"Turn {plain(name)} back on",
+                            cid("val", f"s{gid}", kcode(key), "="),
+                            SUCCESS))
     if offs:
-        inner.append(td(f"**Also on in {gname}:** "
-                        + ", ".join(on_off_name(k) for k in
-                                    ["media.enabled"] + plugin_keys(R, server)
-                                    if value(R, server, k))))
+        inner.append(td(f"**In {gname}:** " + ", ".join(items)))
         inner.append(row(*offs[:5]))
     inner += last_change_slot(R, server)
     return finish(R, [container(inner, AMBER),
@@ -2060,14 +2119,14 @@ def do_undo(R, place, expect=None, origin=None, confirmed=False):
     if not gid:
         R.banner = [td("Nothing to undo here.")]
         return show(R, *origin)
-    if expect and expect != gid:
+    if not expect or expect != gid:
+        text = clip(f"Something changed since. Undo now would make: "
+                    f"{say_undo(R, plan)}", 900)
         try:
-            b = btn("Undo that", cid("un", ptok(up), gid))
-        except BadId:
-            b = btn("Undo that", cid("un", ptok(up)))
-        R.banner = [section(clip(f"Something changed since. Undo now "
-                                 f"would make: {say_undo(R, plan)}", 900),
-                            b)]
+            R.banner = [section(text, btn("Undo that",
+                                          cid("un", ptok(up), gid)))]
+        except BadId:   # no Undo without its group (the stale check)
+            R.banner = [td(text)]
         return show(R, *origin)
     if R.owner and not confirmed:
         try:
@@ -2205,6 +2264,12 @@ def handle(interaction, ctx):
         return notice(APOLOGY)
 
 
+def not_there(R, gid):
+    """The bot is not in server gid (when the server list is known)."""
+    gs = R.guilds()
+    return bool(gs) and str(gid) not in gs
+
+
 def refusal(R):
     return notice(REFUSAL_SERVER if R.guild_id else REFUSAL_DM)
 
@@ -2236,6 +2301,8 @@ def _handle(ix, ctx):
             return notice(OUT_OF_DATE)
         if not R.owner:
             return refusal(R)
+        if not_there(R, parts[3]):
+            return notice(NOT_THERE)
         R.new = True
         return show(R, ms.Place.server(parts[3]), "h")
     if parts[1] != VERSION or len(parts) < 4:
@@ -2322,6 +2389,8 @@ def v_wh(R, place, args, values):
     target = R.place(values[0])
     if target is None or target not in where_options(R, place):
         return notice(OUT_OF_DATE)
+    if target.guild_id and not_there(R, target.guild_id):
+        return notice(NOT_THERE)
     return gone(R, target) or show(R, target, "h")
 
 
@@ -2428,8 +2497,15 @@ def v_pre(R, place, args, values):
                      f"than {ms.BIG_FOR_MEMORY} members. DM me if you're "
                      f"sure.")
     if not changes:
-        R.banner = [td(f"**No change:** {R.gname(place.guild_id)} already "
-                       f"has the {title} style.")]
+        if notes:   # Friends, held back only by the big-server rule
+            R.banner = [td(f"**No change:** {R.gname(place.guild_id)} has "
+                           f"more than {ms.BIG_FOR_MEMORY} members, too "
+                           f"many for Friends' sharing of private facts, "
+                           f"so I keep to public facts there. Everything "
+                           f"else already matches Friends.")]
+        else:
+            R.banner = [td(f"**No change:** {R.gname(place.guild_id)} "
+                           f"already has the {title} style.")]
         return show(R, *shown(R, place))
     return do_changes(R, shown(R, place), changes, notes=notes,
                       headline=f"{R.gname(place.guild_id)} now has the "
@@ -2536,9 +2612,11 @@ def v_ok(R, place, args, values):
 
 
 def v_un(R, place, args, values):
-    if len(args) > 1:
+    # un:<place>:<group>: the group the button was made for, always; an
+    # Undo without it would skip the stale check.
+    if len(args) != 1 or not args[0]:
         return notice(OUT_OF_DATE)
-    return do_undo(R, place, args[0] if args else None, shown(R, place))
+    return do_undo(R, place, args[0], shown(R, place))
 
 
 def v_pz(R, place, args, values, resume=False):

@@ -15,9 +15,9 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import crawl  # noqa: E402
 import harness as H  # noqa: E402
-from harness import (ADMIN, G1, GENERAL, MANAGE, MEMBER, MS,  # noqa: E402
-                     MUSECHAT, OWNER, UI, FakeCtx, P, command, component,
-                     context_command)
+from harness import (ADMIN, CAT, G1, GENERAL, KAI, MANAGE,  # noqa: E402
+                     MEMBER, MS, MUSECHAT, OWNER, UI, FakeCtx, P, command,
+                     component, context_command)
 
 S1 = MS.Place.server(G1)
 MC = MS.Place.channel(G1, MUSECHAT)
@@ -128,7 +128,7 @@ class Owner(Base):
         apply(MS.Change(DMS, "who.dms_from", "anyone"))
         apply(MS.Change(DMS, "who.dms_from", "owners"),
               MS.Change(S1, "style.length", "brief"))
-        r = self.owner(f"{P}un:s{G1}")
+        r = self.owner(H.undo_id(self.ctx, S1))
         self.assertEqual(self.val("who.dms_from", DMS), "owners")  # asked
         self.owner(control(r, "ok")["custom_id"])
         self.assertEqual(self.val("who.dms_from", DMS), "anyone")
@@ -200,6 +200,40 @@ class Admin(Base):
         self.assertEqual(self.ctx.notified[-1][:3], (G1, ADMIN, key))
         self.admin(control(r, "un")["custom_id"])
         self.assertNotEqual(self.val("who.replies", MC), "off")
+
+
+    def test_admin_turns_back_on_what_an_admin_turned_off(self):
+        """Review E #6: images & video turned off by an admin can be
+        turned back on from the panel, without undoing the admins'
+        later changes first, and only as far as the owners' value."""
+        MS.apply(self.ctx.cfg, [MS.Change(S1, "media.enabled", "on")],
+                 OWNER, plugins_dir=H.PLUGINS, role="owner")
+        self.admin(f"{P}val:s{G1}:~media.enabled:off")
+        self.admin(f"{P}ppl:s{G1}:ig", [KAI],
+                   resolved=H.resolved_for(7, [KAI]))
+        r = self.h(command(ADMIN, G1, MANAGE, MUSECHAT))
+        back = control(r, f"{P}val:s{G1}:~media.enabled:=")
+        self.assertIsNotNone(back)
+        self.admin(back["custom_id"])
+        self.assertTrue(self.val("media.enabled", S1))
+        self.assertIn(KAI, self.val("who.ignore", S1))
+
+
+class Category(Base):
+    def test_a_channel_follows_its_category_and_says_so(self):
+        """Review E #4: #general is in the Staff category, which turns
+        replies off. Its "follow" option names the category (not the
+        server), and picking it gives the category's value."""
+        GEN = MS.Place.channel(G1, GENERAL, CAT)
+        MS.apply(self.ctx.cfg, [MS.Change(GEN, "who.replies",
+                                          "when-addressed")],
+                 OWNER, plugins_dir=H.PLUGINS, role="owner")
+        r = self.h(command(OWNER, G1, "0", GENERAL))
+        sel = control(r, f"{P}set:c{G1}.{GENERAL}:r")
+        follow = next(o for o in sel["options"] if o["value"] == "=")
+        self.assertIn("Staff", follow["label"])      # the category's name
+        self.owner(sel["custom_id"], ["="], channel=GENERAL)
+        self.assertEqual(self.val("who.replies", GEN), "off")
 
 
 class Stranger(Base):

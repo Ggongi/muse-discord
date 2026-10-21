@@ -35,6 +35,9 @@ NAV_VERBS = ("pg", "wh")
 FOREIGN_LINK = re.compile(r"(?<!\\)\]\((?!https://discord\.com/channels/)")
 MASS_PING = re.compile(r"@(everyone|here)\b")
 RAW_MENTION = re.compile(r"<(@|@&|#)(?!\d{15,25}>)")
+# A bare URL autolinks too; ours all go to discord.com/channels.
+BARE_URL = re.compile(r"https?://(?!discord\.com/channels/)", re.I)
+BIDI = re.compile("[\u202a-\u202e\u2066-\u2069]")
 FILLER = re.compile(r"(6[12]000000000000000\d{3}|7[12]000000000000000\d{3})")
 
 
@@ -161,6 +164,8 @@ def check(resp, where):
         no(bool(FOREIGN_LINK.search(t)), f"a link a name made in {t!r}")
         no(bool(MASS_PING.search(t)), f"@everyone / @here in {t!r}")
         no(bool(RAW_MENTION.search(t)), f"a mention a name made in {t!r}")
+        no(bool(BARE_URL.search(t)), f"a bare URL a name made in {t!r}")
+        no(bool(BIDI.search(t)), f"a bidi control a name made in {t!r}")
     return bad
 
 
@@ -335,6 +340,8 @@ def entries():
     out = [
         ("owner_channel", H.FakeCtx, Actor(O, H.G1, "0", H.MUSECHAT),
          H.command(O, H.G1, "0", H.MUSECHAT)),
+        ("owner_general", H.FakeCtx, Actor(O, H.G1, "0", H.GENERAL),
+         H.command(O, H.G1, "0", H.GENERAL)),
         ("owner_thread", H.FakeCtx, Actor(O, H.G1, "0", H.THREAD),
          H.command(O, H.G1, "0", H.THREAD, 11, H.MUSECHAT)),
         ("owner_dm", H.FakeCtx, Actor(O), H.command(O)),
