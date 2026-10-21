@@ -110,6 +110,20 @@ class Owner(Base):
         self.confirm_if_asked(self.owner(cap["custom_id"], ["20"]))
         self.assertEqual(self.val("limits.per_person_per_day", S1), 20)
 
+    def test_customized_and_forged_styles_write_nothing(self):
+        """The style select's "Customized" option (shown while no style
+        matches) and a forged style value are no-ops."""
+        r = self.h(command(OWNER, G1, "0", MUSECHAT))
+        style = control(r, f"{P}pre:s{G1}")
+        others = [o["value"] for o in style["options"]
+                  if o["value"] not in MS.PRESETS]
+        self.assertTrue(others)             # Muse Lounge matches none
+        before = self.ctx.overlay()
+        for v in others + ["chaos", "Friends", ""]:
+            self.owner(style["custom_id"], [v])
+        self.assertEqual(self.ctx.overlay(), before)
+        self.assertEqual(self.ctx.applied, [])
+
     def test_pause_here_and_resume(self):
         r = self.h(command(OWNER, G1, "0", MUSECHAT))
         r = self.owner(control(r, f"{P}pz:c{G1}.{MUSECHAT}")["custom_id"])
@@ -220,18 +234,17 @@ class Admin(Base):
 
 
 class Category(Base):
-    def test_a_channel_follows_its_category_and_says_so(self):
+    def test_a_channel_follows_its_category(self):
         """Review E #4: #general is in the Staff category, which turns
-        replies off. Its "follow" option names the category (not the
-        server), and picking it gives the category's value."""
+        replies off. Its follow option ("=") gives the category's value,
+        not the server's."""
         GEN = MS.Place.channel(G1, GENERAL, CAT)
         MS.apply(self.ctx.cfg, [MS.Change(GEN, "who.replies",
                                           "when-addressed")],
                  OWNER, plugins_dir=H.PLUGINS, role="owner")
         r = self.h(command(OWNER, G1, "0", GENERAL))
         sel = control(r, f"{P}set:c{G1}.{GENERAL}:r")
-        follow = next(o for o in sel["options"] if o["value"] == "=")
-        self.assertIn("Staff", follow["label"])      # the category's name
+        self.assertIn("=", [o["value"] for o in sel["options"]])
         self.owner(sel["custom_id"], ["="], channel=GENERAL)
         self.assertEqual(self.val("who.replies", GEN), "off")
 

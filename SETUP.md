@@ -374,20 +374,22 @@ opens, and it is one page:
 
 - At the top, one line on how the bot behaves there ("I reply only
   when @mentioned · shares only public facts about people"), and a
-  **Where** select: the channel you typed it in (in a thread, its
-  parent channel), all of that server, or everywhere (every server
-  and DM that has no setting of its own). In a DM with the bot it
-  opens DMs.
+  **Where** select (under "Applies to"): the channel you typed it in
+  (in a thread, its parent channel), all of that server, or
+  everywhere (every server and DM that has no setting of its own). In
+  a DM with the bot it opens DMs.
 - Below it, a few settings for that place, each a select: **When I
   reply** (Chat freely, Only when @mentioned), **Reply length**,
   **Images & video** (Off, Only you, Everyone), **Who can DM me**
   (in DMs and everywhere) and **Replies a person a day** (for a
   server and everywhere). A channel has only When I reply and Images
-  & video, and either can be "Like the server" to follow the server
-  again ("Like the <name> category" when the channel's category sets
-  its own value).
+  & video, and either can be "Use server default" to follow the server
+  again ("Use category default" when the channel's category sets its
+  own value; "Currently: …" says what that gives).
 - **Style** for the whole server: Friends, Community or Work, applied
-  in one click (it lists what changed, with **Undo**).
+  in one click (it lists what changed, with **Undo**). A server that
+  matches none shows "Customized": change the settings above, or DM
+  the bot.
 - **Pause here** (on the Everywhere page, **Pause everywhere**) and
   **Resume**, **Why no reply?**, and **Undo** for the last change
   made there (on a channel's page, the newest change in its server).
