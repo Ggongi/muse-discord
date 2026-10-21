@@ -60,6 +60,7 @@ time):
 | `restart_mid_send` | SIGKILL mid-send still gives exactly one reply (Discord's nonce check) |
 | `settings_scopes_live` | Live settings changes and undo without a restart; a channel overrides its server; a new thread follows its channel |
 | `settings_action_refused` | A settings action on a non-owner's message or in a server is refused, and nothing is written |
+| `remind_me` | "Remind me in a minute": the reminder comes back once, a minute later, threaded under the request |
 
 Tier 2 (Claude as worker and judge):
 

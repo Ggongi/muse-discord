@@ -55,6 +55,10 @@ everywhere:
   abilities:
     owner_commands: on    # owners may ask it to pin, post, react,
                           # or start threads: on or off
+    reminders: everyone   # who can set reminders and watches ("ping
+                          # me in 30 minutes"): everyone, owners, or a
+                          # list of user ids / "role:<id>" (owners
+                          # always can)
   privacy:
     memory: public-only   # how much of what your Muse knows about you a
                           # reply may use: everything, public-only, or

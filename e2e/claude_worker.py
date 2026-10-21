@@ -75,7 +75,7 @@ PAYLOAD_FIELDS = (
     "author_id", "content", "media", "documents", "unviewable", "history",
     "may_generate", "owner_command", "reply_to", "burst",
     "burst_fragments", "from_bot", "bot_turns", "participants",
-    "follow_up", "settings")
+    "follow_up", "settings", "watches", "reminder")
 
 # Env vars the worker run has no business seeing. The SUT token stays:
 # bin/discord-api.py may resolve it through token_from (env:NAME).
@@ -131,8 +131,11 @@ OWNER_DM_NONCES = "owner_dm_nonces.json"
 
 
 def is_owner_dm(item):
-    return item.get("kind") == "dm" \
-        and (item.get("settings") or {}).get("speaker") == "owner"
+    """An owner's own DM, or a reminder firing in one (the hook's test)."""
+    card = item.get("settings") or {}
+    return (item.get("kind") == "dm" or (item.get("kind") == "reminder"
+                                         and card.get("where") == "dm")) \
+        and card.get("speaker") == "owner"
 
 
 def outbox_answers(pkg):

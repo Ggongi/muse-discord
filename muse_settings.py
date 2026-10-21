@@ -152,6 +152,10 @@ CORE = {
                          steers=True),
     "style.notes": Spec("text", "", "EDSC", maxlen=NOTES_MAX, steers=True),
     "abilities.owner_commands": Spec("on-off", True, "ES"),
+    # Who can set reminders and watches (muse_watches.py): owners always
+    # can; a list names the others who may.
+    "abilities.reminders": Spec("people", "everyone", "EDS",
+                                values=("owners", "everyone")),
     "privacy.memory": Spec("choice", "public-only", "EDS",
                            values=("everything", "public-only", "nothing"),
                            steers=True, risky=True),
@@ -2839,7 +2843,7 @@ BASIC_KEYS = ("who.replies", "who.dms_from", "privacy.memory", "style.notes",
               "style.length", "limits.per_person_per_day", "media.enabled")
 MORE_KEYS = ("who.allow", "who.ignore", "who.bots", "who.bot_exchange_limit",
              "limits.per_day", "privacy.suspicious", "media.who",
-             "media.per_day")
+             "media.per_day", "abilities.reminders")
 BOT_WIDE_KEYS = ("presence.status", "updates.notify")
 HIDDEN_KEYS = ("abilities.owner_commands", "presence.kind",
                "privacy.never_share")
@@ -2925,6 +2929,7 @@ LABELS = {
     "limits.per_day": "Replies per day (total)",
     "limits.per_person_per_day": "Replies per person per day",
     "abilities.owner_commands": "Owner requests (pin, post, react, threads)",
+    "abilities.reminders": "Who can set reminders and watches",
     "media.enabled": "Image and video generation",
     "media.who": "Who can ask for images and video",
     "media.per_day": "Generations per day",
@@ -2956,6 +2961,8 @@ VALUE_LABELS = {
     ("privacy.suspicious", "answer"): "Answer it (no check)",
     ("media.who", "owners"): "Only you",
     ("media.who", "everyone"): "Everyone",
+    ("abilities.reminders", "owners"): "Only you",
+    ("abilities.reminders", "everyone"): "Everyone",
 }
 CATEGORY_TYPE = 4
 

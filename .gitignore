@@ -31,6 +31,9 @@ update_request.json
 directory.json
 owner_dm_nonces.json
 nl_journal.json
+watches.json
+watches.json.bad-*
+watches.lock
 telemetry.json
 telemetry_id
 telemetry.wakes
