@@ -86,6 +86,8 @@ const FIELDS = {
   version: (v) => (typeof v === "string" && (VERSION.test(v)
     || v === "unreleased" || v === "unknown")
     ? null : "vX.Y.Z, unreleased or unknown"),
+  ahead: int(0, 100_000),
+  modified: (v) => (typeof v === "boolean" ? null : "true or false"),
   python: (v) => (typeof v === "string" && PYTHON.test(v)
     ? null : "3.N"),
   os: oneOf(OS_FAMILIES),

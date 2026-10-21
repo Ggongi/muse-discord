@@ -79,6 +79,14 @@ to the report's fields needs `SCHEMA` raised in both `telemetry.py` and
 `src/validate.js` (and a new column in `schema.sql`, applied with
 `npx wrangler d1 execute ... --command "ALTER TABLE ..."`).
 
+A database created before the `ahead` and `modified` columns existed
+needs them added once (no release had sent anything yet, so `SCHEMA`
+stayed 1):
+
+```bash
+npx wrangler d1 execute muse-telemetry --remote --command "ALTER TABLE reports ADD COLUMN ahead INTEGER NOT NULL DEFAULT 0; ALTER TABLE reports ADD COLUMN modified INTEGER NOT NULL DEFAULT 0;"
+```
+
 ## Tests
 
 Plain Node, no packages:

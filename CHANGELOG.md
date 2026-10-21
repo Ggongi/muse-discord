@@ -18,7 +18,8 @@ New:
   Only released versions (a `vX.Y.Z` tag) send; a checkout of
   unreleased code never does.
 - A report holds: a random install id, the day, the muse-discord,
-  Python and OS versions (like 3.12, linux), how many servers the bot
+  Python and OS versions (like 3.12, linux), how many commits the copy
+  is past that release and whether its code has local edits, how many servers the bot
   is in and their total members rounded down to a power of 2, and
   that day's counts (messages seen in servers and DMs, replies sent,
   unanswered messages by reason, wakes, reply times, settings changes

@@ -208,6 +208,28 @@ def installed_version(pkg_dir, timeout=5):
                                          _SEMVER_RE.match(t).groups()))
 
 
+def build_info(pkg_dir, version, timeout=5):
+    """(ahead, modified) for a release version: commits HEAD is past that
+    tag, and whether tracked code (*.py, *.sh) has uncommitted edits.
+    persona.md and the config are the owner's to edit, so they don't
+    count. (0, False) when git cannot tell or there is no release."""
+    if not (version and _SEMVER_RE.match(version)):
+        return 0, False
+    git = ["git", "-C", pkg_dir]
+    try:
+        n = subprocess.run(git + ["rev-list", "--count", f"{version}..HEAD"],
+                           capture_output=True, text=True, timeout=timeout)
+        st = subprocess.run(git + ["status", "--porcelain",
+                                   "--untracked-files=no", "--",
+                                   "*.py", "*.sh"],
+                            capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return 0, False
+    ahead = int(n.stdout.strip()) if n.returncode == 0 \
+        and n.stdout.strip().isdigit() else 0
+    return min(ahead, 100_000), st.returncode == 0 and bool(st.stdout.strip())
+
+
 def new_day(day):
     return {"day": day, **{c: 0 for c in COUNTERS}, "refusals": {},
             "latency": {}, "settings_changes": {}, "presets": {},
@@ -386,6 +408,12 @@ def build_payload(rec, install_id):
         "install_id": install_id,
         "day": rec["day"],
         "version": version,
+        # Past the release, or edited: lets reports from main or a
+        # customized copy be told apart from the release itself.
+        "ahead": max(0, min(int(g.get("ahead") or 0), 100_000))
+        if _SEMVER_RE.match(version) else 0,
+        "modified": bool(g.get("modified"))
+        if _SEMVER_RE.match(version) else False,
         "python": str(g.get("python") or python_minor())[:8],
         "os": (g.get("os") or os_family())
         if (g.get("os") or os_family()) in OS_FAMILIES else "other",
@@ -541,6 +569,7 @@ class Recorder:
         self.lock = threading.Lock()
         self.data = None          # telemetry.json, loaded on first use
         self.version = None
+        self.ahead, self.modified = 0, False
         self._errors = 0
         self._last_tick = 0.0
         self._last_flush = 0.0
@@ -629,6 +658,8 @@ class Recorder:
     def _find_version(self):
         try:
             self.version = installed_version(self.pkg_dir or ".")
+            self.ahead, self.modified = build_info(self.pkg_dir or ".",
+                                                   self.version)
         except Exception:
             self.version = "unknown"
 
@@ -720,6 +751,7 @@ class Recorder:
                 "features": features(st, self.ms),
                 "version": self.version or rec.get("gauges", {}).get(
                     "version"),
+                "ahead": self.ahead, "modified": self.modified,
                 "python": python_minor(), "os": os_family()}
             self._take_result(d, now)
             if on and self.released() and endpoint(self.environ) \

@@ -16,6 +16,8 @@ function report(over = {}) {
     install_id: "0b6f8f0e-6c1a-4f3e-9a2b-1c2d3e4f5a6b",
     day: "2026-10-20",
     version: "unreleased",
+    ahead: 0,
+    modified: false,
     python: "3.12",
     os: "linux",
     servers: 3,
@@ -111,9 +113,9 @@ function fakeDB() {
             return {
               installs_7d: new Set(rows.map((r) => r[0])).size,
               installs_30d: new Set(rows.map((r) => r[0])).size,
-              servers: rows.reduce((a, r) => a + r[5], 0),
-              replies_7d: rows.reduce((a, r) => a + r[9], 0),
-              replies_30d: rows.reduce((a, r) => a + r[9], 0),
+              servers: rows.reduce((a, r) => a + r[7], 0),
+              replies_7d: rows.reduce((a, r) => a + r[11], 0),
+              replies_30d: rows.reduce((a, r) => a + r[11], 0),
             };
           }
           return null;
@@ -149,7 +151,7 @@ test("a report is stored once per install and day, without the IP", async () => 
   assert.equal(res.status, 204);
   assert.equal(env.DB.reports.size, 1);
   const row = [...env.DB.reports.values()][0];
-  assert.equal(row[9], 12); // the resent day replaced the row
+  assert.equal(row[11], 12); // the resent day replaced the row
   const bound = JSON.stringify(env.DB.binds);
   assert.ok(!bound.includes(ip));
   assert.ok(!bound.includes("muse-discord-telemetry"));

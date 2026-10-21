@@ -136,6 +136,10 @@ What a report holds, for one UTC day:
   bin/telemetry.py reset-id` makes a new one), the day, the
   muse-discord version, the Python version (like 3.12) and the OS
   family (linux, darwin, ...);
+- how many commits the copy is past that release, and whether its code
+  (`.py`, `.sh` files) has local edits, so reports from `main` or a
+  customized copy aren't mistaken for the release itself (never commit
+  hashes or branch names; your persona and config don't count as edits);
 - how many servers the bot is in, and their total members rounded down
   to a power of 2;
 - counts: messages seen (in servers and DMs), messages queued for your Muse,

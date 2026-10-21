@@ -30,7 +30,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_lib"))
-from common import MUT_DIR  # noqa: E402
+from common import MUT_DIR, scratch  # noqa: E402
 from settings_harness import (BOT, CH, G1, MS, OWNER, U1, U2,  # noqa: E402
                               author, gmsg, load_monitor, quiet, state)
 
@@ -151,6 +151,42 @@ class Base(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 0. Copies past a release, or edited, are told apart from the release.
+# ---------------------------------------------------------------------------
+class BuildInfo(unittest.TestCase):
+
+    def git(self, d, *args):
+        subprocess.run(["git", "-C", d, "-c", "user.name=t",
+                        "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                        "-c", "tag.gpgsign=false", *args],
+                       check=True, capture_output=True)
+
+    def test_ahead_and_modified(self):
+        d = scratch("muse-telemetry-git-")
+        self.git(d, "init", "-q")
+        for name in ("monitor.py", "persona.md"):
+            with open(os.path.join(d, name), "w") as f:
+                f.write("x\n")
+        self.git(d, "add", ".")
+        self.git(d, "commit", "-qm", "1")
+        self.git(d, "tag", "v1.0.0")
+        self.assertEqual(T.installed_version(d), "v1.0.0")
+        self.assertEqual(T.build_info(d, "v1.0.0"), (0, False))
+        with open(os.path.join(d, "persona.md"), "w") as f:
+            f.write("my bot\n")     # the owner's to edit: not "modified"
+        self.assertEqual(T.build_info(d, "v1.0.0"), (0, False))
+        for i in range(2):
+            self.git(d, "commit", "-qam", f"main {i}", "--allow-empty")
+        with open(os.path.join(d, "monitor.py"), "w") as f:
+            f.write("edited\n")
+        self.assertEqual(T.build_info(d, "v1.0.0"), (2, True))
+        rec = dict(T.new_day("2026-10-20"), gauges={
+            "version": "v1.0.0", "ahead": 2, "modified": True})
+        p = T.build_payload(rec, "0b6f8f0e-6c1a-4f3e-9a2b-1c2d3e4f5a6b")
+        self.assertEqual((p["ahead"], p["modified"]), (2, True))
+
+
+# ---------------------------------------------------------------------------
 # 1. Nothing identifying in a report.
 # ---------------------------------------------------------------------------
 class NeverIdentifying(Base):
@@ -250,7 +286,8 @@ class NeverIdentifying(Base):
 
 
 EXPECTED_FIELDS = (
-    "schema", "install_id", "day", "version", "python", "os", "servers",
+    "schema", "install_id", "day", "version", "ahead", "modified",
+    "python", "os", "servers",
     "members_bucket", "messages_seen", "queued", "replies_sent",
     "quarantined", "refusals", "wakes", "latency_p50", "latency_p90",
     "settings_changes", "presets_applied", "media_sent", "restarts",
