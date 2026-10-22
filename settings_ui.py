@@ -1924,7 +1924,7 @@ def shown(R, fallback):
     the Why page has a Back (pg:<place>:h); the home page a Why button
     (pg:<place>:y). (fallback, "h") when it can't tell."""
     found = {}
-    for c in _walk((R.ix.get("message") or {}).get("components") or []):
+    for c in _all((R.ix.get("message") or {}).get("components")):
         parts = str(c.get("custom_id") or "").split(":")
         if len(parts) == 5 and parts[:3] == [PREFIX, VERSION, "pg"] \
                 and parts[4] in PAGES:
@@ -1936,16 +1936,6 @@ def shown(R, fallback):
     if "y" in found:
         return found["y"], "h"
     return fallback, "h"
-
-
-def _walk(comps):
-    for c in comps:
-        if not isinstance(c, dict):
-            continue
-        yield c
-        yield from _walk(c.get("components") or [])
-        if isinstance(c.get("accessory"), dict):
-            yield c["accessory"]
 
 
 # ---------------------------------------------------------------------------
