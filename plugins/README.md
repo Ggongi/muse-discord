@@ -1,11 +1,7 @@
 # Plugins
 
-No plugin ships with muse-discord right now; this folder is where one
-goes. A plugin is a folder `plugins/<name>/` with two files:
-
-- `plugin.yaml`: its id, the hooks it uses and its settings.
-- `plugin.py`: a `register(api)` function returning `{hook name:
-  function}`.
+No plugin ships with muse-discord; this folder is where one goes: a
+folder `plugins/<name>/` with two files.
 
 ```yaml
 # plugins/example/plugin.yaml
@@ -31,9 +27,6 @@ def register(api):
 
 The monitor loads a plugin once some scope turns it on
 (`plugins.<id>.enabled: on` in `config.yaml`, or by DMing the bot "turn
-on example"; `/settings` lists installed plugins but has no controls for
-them, and server admins can turn one off there), and
-runs its hooks only where it is on. The hooks, and what `ctx` carries,
-are listed in `monitor.py` (search for "Plugins. A plugin is a folder");
-the setting types are those of `muse_settings.load_manifests`. A
-failing plugin is logged and skipped, never fatal.
+on example"; in `/settings` only server admins can turn one off). The hooks, `ctx`
+and the setting types are in PROTOCOL.md, "Plugin hooks". A failing
+plugin is logged and skipped, never fatal.

@@ -3,13 +3,12 @@
 You, the owner's Muse, follow this guide. The owner does five things:
 send you the request, make the Discord app, paste its token, click the
 invite link, and mention the bot once. Everything else is yours. Never
-ask them for IDs, YAML, Developer Mode, intents or a terminal, and
-don't ask questions this guide doesn't. Send the owner messages
-below as written, filling in the `<...>` parts, one message per step.
+ask them for IDs, YAML, Developer Mode, intents or a terminal, or
+questions this guide doesn't. Send the quoted messages as written,
+filling in the `<...>` parts, one message per step.
 
 The bot's name is your own name, and by default it is simply you.
-Never print, repeat or log the bot token: it goes from the owner's
-paste straight into `bin/connect-discord.py`'s stdin.
+Never print, repeat or log the bot token (step 3 says how it travels).
 
 ## Step 1: Get the code (you)
 
@@ -18,12 +17,12 @@ git clone https://github.com/cszach/muse-discord ~/muse-discord
 cd ~/muse-discord && bash bin/install.sh
 ```
 
-Commands below run in that directory (the "package dir"). `install.sh`
+Commands run in that directory (the "package dir"). `install.sh`
 checks Python 3.10+ and jq, installs the packages (falling back to
 `pip --user`, then a `.venv`), and makes the private
-`~/.config/muse-discord/incoming/` for step 3. Fix what an `INSTALL FAILED` line says
-and rerun it. With `.venv`, run `bin/settings.py` with
-`.venv/bin/python3` later; the setup scripts find it themselves.
+`~/.config/muse-discord/incoming/` for step 3. Fix what an `INSTALL
+FAILED` line says and rerun it. If it made a `.venv`, run the package's
+scripts with `.venv/bin/python3` wherever these guides say `python3`.
 
 Already installed (`config.yaml` exists)? Don't onboard again: run
 `python3 bin/doctor.py --no-dm` and fix what it reports.
@@ -47,9 +46,8 @@ If your name contains "discord", Discord refuses it: use
 >    (Discord may ask for your password or 2FA code). Click **Copy** and
 >    paste it here. It's the bot's password; I'll lock it away.
 
-Don't offer a secret vault or secure credential field instead: the bot
-needs the real token for its connection to Discord, and a vault only
-hands you a stand-in. A chat paste is the way.
+Don't offer a secret vault or secure field instead: a vault only hands
+you a stand-in, and the bot needs the real token.
 
 ## Step 3: Connect (you)
 
@@ -70,16 +68,18 @@ kept, or backed up before the owner is added), writes your default
 persona to `persona.md`, and prints the invite link. Exit status:
 
 - **0**: done. Go on.
-- **2**: wrong paste or a reset token. Nothing was saved. Send the
-  owner its `PROBLEM:` line as is; it says exactly what to copy
-  instead. Then write the new paste and run it again.
+- **2**: wrong paste or a reset token; nothing was saved. Send the
+  owner its `PROBLEM:` line as is (it says what to copy instead),
+  then write the new paste and run it again.
 - **3**: Discord was unreachable; nothing was saved. Wait a minute,
-  then ask for the token again (the file is gone).
-- **4**: saved, but the owner has a portal step. Send each
-  `OWNER STEP:` line, and when they say it's done, run it again with
-  `--saved` instead of `--token-file`.
-- **6**: `config.yaml` is invalid; nothing was changed. Run `python3
-  bin/settings.py validate`, fix what it names, and run it again.
+  write the paste to the file again (it is gone) and run it again.
+- **4**: saved, but the owner has a portal step. Send each `OWNER
+  STEP:` line; when they say it's done, run it again with `--saved`
+  instead of `--token-file`.
+- **6**: `config.yaml` is invalid or could not be written. Run
+  `python3 bin/settings.py validate` and fix what it names. Then run it
+  again: with `--saved` if the output says the token is saved, else
+  with the paste written to the file again.
 
 A `NOTE:` about a Discord team or about owners already in
 `config.yaml` means the owner it set may not be them: ask "Is your
@@ -106,8 +106,10 @@ python3 bin/connect-discord.py --wait 900
 ```
 
 It says which server the bot joined and how many channels it can read
-and post in. If it can post nowhere, send the owner its `PROBLEM:`
-line. On a timeout, remind them of the link once.
+and post in. A `PROBLEM:` line (it sees no channel there): send it to
+the owner. Exit 4 (it can read but post nowhere): ask the owner to let
+its role send messages in a channel. Exit 5 (timeout): remind them of
+the link once.
 
 ## Step 5: The worker and the hooks (you)
 
@@ -118,9 +120,9 @@ Render the worker prompt, saying what you can generate (`none`,
 python3 bin/render-worker-prompt.py --media <what you can make>
 ```
 
-It writes `worker-prompt.md` (re-rendered on every update, never edited
-by hand). Then register these four hooks, all at once, with the
-package dir's absolute path for `<pkg>`:
+It writes `worker-prompt.md` (re-rendered on every update; edit it only
+inside a seam, when the owner asks). Then register these four hooks,
+all at once, with the package dir's absolute path for `<pkg>`:
 
 | Script | Every | Deliver to | Wake prompt | Without it |
 | --- | --- | --- | --- | --- |
@@ -129,20 +131,21 @@ package dir's absolute path for `<pkg>`:
 | `hooks/update-watch.sh` | 60 s | the owner's main chat | `The owner pressed "Update now" on muse-discord's update DM. Update <pkg> to the release in the payload by following <pkg>/UPDATING.md with the owner in this chat. When done, or if you stop early, delete <pkg>/update_request.json and report the version running, or what waits on the owner.` | The bot's **Update now** button does nothing. |
 | `hooks/watch-due.sh` | 60 s | a dedicated checker chat, not the main one or the worker's | `You are muse-discord's web watch checker. The wake payload below is your whole task: follow it exactly.` | Web watches are never checked: each ends after a few tries and tells the person who set it. |
 
-For `hooks/watch-due.sh`'s chat, allow only web search and fetch and
-one command, by exact prefix: `python3 <pkg>/bin/watch-report.py ` (or
-`<pkg>/.venv/bin/python3 <pkg>/bin/watch-report.py ` when bin/install.sh
-made a .venv), if the runtime can limit a chat's tools.
+If the runtime can limit a chat's tools, give `hooks/watch-due.sh`'s
+chat only web search and fetch and one command, by exact prefix:
+`python3 <pkg>/bin/watch-report.py ` (with a `.venv`:
+`<pkg>/.venv/bin/python3 <pkg>/bin/watch-report.py `).
 
 The scripts find the package from their own location (set
 `MUSE_DISCORD_DIR` if the runtime copies them). A runtime without hooks
-follows the same table with a poller per row (PROTOCOL.md specifies the
-queue), or cron for the watchdog.
+runs a poller per row (PROTOCOL.md is the contract), or cron for the
+watchdog.
 
 Save this memory note in your main chat: "muse-discord is installed at
-`<pkg>`. To change its settings, read `<pkg>/SETTINGS.md` first. To
-update it, follow `<pkg>/UPDATING.md`. To check it, run `python3
-<pkg>/bin/doctor.py --no-dm`."
+`<pkg>`; run its scripts with `<python3, or <pkg>/.venv/bin/python3>`.
+To change its settings, read `<pkg>/SETTINGS.md` first. To update it,
+follow `<pkg>/UPDATING.md`. To check it, run `<pkg>/bin/doctor.py
+--no-dm`."
 
 ## Step 6: Start it and prove it (you, then owner)
 
@@ -152,9 +155,9 @@ python3 bin/doctor.py     # checks everything, then DMs the owner
 ```
 
 `doctor.py` prints `OK`, `NOTE` or `PROBLEM` lines, each problem with
-its fix. Fix them and run it again until it ends with "All good." Only
-a run with no problem DMs the owner "I'm online" (with the community
-invite), so they get it once; they don't need to answer it. Then send:
+its fix. Fix them and rerun until it ends with "All good." Only a run
+with no problem DMs the owner "I'm online" (with the community
+invite), so they get it once. Then send:
 
 > Last step: in any channel of your server, type **@<your name> hello**,
 > pick the bot from the list that pops up, and send it.
@@ -171,18 +174,6 @@ On `OK`, send:
 > with whoever it just answered, answers DMs only from you, and never
 > shares private things about you. To change anything, DM it in plain
 > words ("only answer in #general") or type **/settings**.
->
-> Want to meet other Muse owners and their Muses? Join the Muse Agent
-> server: https://discord.gg/sxjhCPdEG6
 
-That's the end of setup.
-
-## Changing settings later
-
-The owner DMs the bot in plain words, or uses `/settings` in Discord.
-When they ask you instead, follow SETTINGS.md.
-
-## Troubleshooting
-
-See [TROUBLESHOOTING.md](TROUBLESHOOTING.md): what each `PROBLEM` and
-watchdog alert means, how to stop the bot, and manual checks.
+That's the end of setup. Later, settings changes asked of you follow
+SETTINGS.md, and problems TROUBLESHOOTING.md.

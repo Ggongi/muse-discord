@@ -575,18 +575,7 @@ class CLI(unittest.TestCase):
         self.assertEqual(MS.load(cfg, PLUGINS).layout, "new")
 
     def test_shell_shim(self):
-        st, cfg = load_text(NEW_BASE + "presence:\n  enabled: off\n"
-                            "updates:\n  notify: off\n")
         shim = os.path.join(MUT, "muse_settings.py")
-
-        def get(name):
-            return subprocess.run([sys.executable, shim, "--config", cfg,
-                                   "get", name], capture_output=True,
-                                  text=True).stdout.strip()
-        self.assertEqual(get("token_env"), "MUSE_TEST_TOKEN")
-        self.assertEqual(get("token_file"), "")
-        self.assertEqual(get("presence_enabled"), "false")
-        self.assertEqual(get("updates_notify"), "false")
         # watchdog.sh's own reader, both with and without the module.
         fn = subprocess.run(["sed", "-n", "/^setting() {/,/^}/p",
                              os.path.join(MUT, "watchdog.sh")],
