@@ -238,7 +238,7 @@ def shape_problems(item, plugins_dir=None):
     if bad:
         out.append(f"a settings item carries no {', '.join(bad)}; only "
                    f"item, channel_id, channel_name, author, reply_to, "
-                   f"text, owner_dm_nonce and settings")
+                   f"text, reply_nonce, owner_dm_nonce and settings")
     text = item.get("text")
     if text is not None and (not isinstance(text, str)
                              or len(text) > TEXT_MAX):

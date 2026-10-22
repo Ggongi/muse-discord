@@ -10,7 +10,7 @@ three kinds inside:
     watch-web   a web watch: an outside-world condition ("the venue
                 announces the date") a checker session of the owner's
                 Muse checks on the web, every so often (see "Web
-                watches" below; owners only by default)
+                watches" below; owners only)
 
 This module is the data model, the outbox action's shape and meaning,
 the caps, the matching and the store. It makes no Discord calls:
