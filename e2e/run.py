@@ -701,12 +701,8 @@ class Runner:
             return
         if name == "start_monitor":
             self.sut.start(gateway=self.sut.gateway)
-        elif name == "restart_monitor":
-            self.sut.restart()
         elif name == "gateway_off":
             self.sut.restart(gateway=False)
-        elif name == "gateway_on":
-            self.sut.restart(gateway=True)
         else:
             raise ValueError(f"unknown action {name!r}")
         self.starts += 1
