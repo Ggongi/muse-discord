@@ -2110,10 +2110,13 @@ def on_guild_event(state, ev):
             _MEMBER_COUNTS[gid] = ev["member_count"]
             publish_directory()
         known = state.get("known_guilds")
-        if known is not None and gid not in known:
-            _FORCE_DISCOVERY = True
-            # A join: ownerless until the owner check (sync_guilds).
+        if known is None or gid not in known:
+            # A join, or a first run whose discovery has not finished (a
+            # lost state.json): ownerless until the owner check
+            # (sync_guilds).
             note_guild_join_for_owners(state, gid)
+            if known is not None:
+                _FORCE_DISCOVERY = True
     else:
         name = state.get("known_guilds", {}).pop(gid, None)
         state.get("owner_in_guild", {}).pop(gid, None)
