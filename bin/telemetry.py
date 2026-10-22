@@ -65,11 +65,8 @@ def cmd_show(args):
     pending = [p for p in d.get("pending") or [] if isinstance(p, dict)
                and p.get("day")]
     why = _why_off(st)
-    try:
-        install_id = T.read_install_id(ID_FILE)
-    except OSError:
-        install_id = T.read_install_id(ID_FILE, create=False) \
-            or "(made at the first send)"
+    install_id = T.read_install_id(ID_FILE, create=False) \
+        or "(made at the first send)"
     if why:
         print(f"Usage stats are {why}: nothing is sent.", file=sys.stderr)
     elif not T.endpoint():
