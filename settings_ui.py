@@ -1041,7 +1041,8 @@ def finish(R, comps):
 # The owner's page
 # ---------------------------------------------------------------------------
 PRESET_HELP = {
-    "friends": "Chats freely, no daily caps, may use what it remembers",
+    "friends": "Chats freely, no daily caps, may use what it remembers, "
+               "reaches out now and then",
     "community": "Only when @mentioned, public facts only, 20 replies a "
                  "person a day",
     "work": "Only when @mentioned, nothing personal, ignores other bots",

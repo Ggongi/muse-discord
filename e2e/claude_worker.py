@@ -77,7 +77,7 @@ PAYLOAD_FIELDS = (
     "author_id", "content", "media", "documents", "unviewable", "history",
     "may_generate", "owner_command", "reply_to", "burst",
     "burst_fragments", "from_bot", "bot_turns", "participants",
-    "follow_up", "settings", "watches", "reminder")
+    "follow_up", "settings", "watches", "reminder", "proactive")
 
 # Env vars the worker run has no business seeing. The SUT token stays:
 # bin/discord-api.py may resolve it through token_from (env:NAME).
@@ -140,13 +140,15 @@ NONCE_WAIT_SECS = 60
 
 
 def is_owner_dm(item):
-    """An owner's own DM, or a reminder or web watch firing in one (the
-    hook's test)."""
+    """An owner's own DM, a reminder or web watch firing in one, or a
+    heartbeat slot (all handed out alone, with their nonce: the hook's
+    rule)."""
     card = item.get("settings") or {}
     notice = item.get("kind") in ("reminder", "watch-met") \
         and card.get("where") == "dm"
-    return (item.get("kind") == "dm" or notice) \
-        and card.get("speaker") == "owner"
+    return item.get("kind") == "proactive" or (
+        (item.get("kind") == "dm" or notice)
+        and card.get("speaker") == "owner")
 
 
 def is_owner_command(item):
@@ -200,6 +202,8 @@ def open_items(pkg, answered=None):
     queue = read_json(os.path.join(pkg, "reply_queue.json"), [])
     nonces = read_json(os.path.join(pkg, OWNER_DM_NONCES), {})
     nonces = nonces if isinstance(nonces, dict) else {}
+    pro = read_json(os.path.join(pkg, "proactive_nonce.json"), {})
+    nonces.update(pro if isinstance(pro, dict) else {})   # a live slot's
     replies = read_json(os.path.join(pkg, ITEM_NONCES), {})
     replies = replies if isinstance(replies, dict) else {}
     out = []
@@ -210,7 +214,8 @@ def open_items(pkg, answered=None):
         if answered is not None and any(i in answered for i in ids):
             continue
         n = nonces.get(str(item["message_id"]))
-        r = replies.get(str(item["message_id"]))
+        r = None if item.get("kind") == "proactive" \
+            else replies.get(str(item["message_id"]))   # (a slot: its nonce)
         hits = [nonce for named, nonce, reply in entries
                 if any(i in named for i in ids)
                 and (r is None or reply == r)]
@@ -547,7 +552,8 @@ class Worker:
             age = now - (i.get("queued_at") if isinstance(
                 i.get("queued_at"), (int, float)) else 0)
             return age < NONCE_WAIT_SECS and (
-                (reply_file and mid not in replies)
+                (reply_file and i.get("kind") != "proactive"
+                 and mid not in replies)
                 or (is_owner_command(i) and cmd_file and not cmds.get(mid)))
         with self.lock:
             self.leases = {k: v for k, v in self.leases.items()
@@ -556,12 +562,13 @@ class Worker:
                    if self.leases.get(i["message_id"], 0) + self.lease <= now
                    and not waits(i)]
             owner = [i for i in due if is_owner_dm(i)]
-            if any(i.get("kind") == "dm" for i in owner):
-                # The owner's own messages never share a run with the
-                # bot's notices to them (the hook's rule).
-                owner = [i for i in owner if i.get("kind") == "dm"]
             caps = {"reply": replies}
             if owner:
+                # The hook's rule: the owner's own messages first, else a
+                # heartbeat slot alone, else the bot's notices to them.
+                dms = [i for i in owner if i.get("kind") == "dm"]
+                slots = [i for i in owner if i.get("kind") == "proactive"]
+                owner = dms or slots[:1] or owner
                 due = owner
                 caps.update(dm=nonces, cmd=cmds)
             else:

@@ -38,8 +38,11 @@ that can read and write these files can implement a worker.
   command, `owner_command: true`, or a `web_nonce`: web watches are
   the owners' only) is handed out alone, one per run, and only that
   run gets its `owner_command_nonce` and `web_nonce` (Owner commands,
-  below). Every
-  run gets each of its items' `reply_nonce`, which every outbox item
+  below). A heartbeat slot
+  (`kind: "proactive"`, Unprompted messages) is handed out like an
+  owner DM: alone (after any owner DMs, before any notices), with its
+  slot nonce, never with an owner command. Every run gets each of
+  its items' `reply_nonce` (a slot has none), which every outbox item
   must carry (Replies stay with their run, below).
   The shipped hook also restarts a dead monitor:
   when the monitor process is gone, it runs `watchdog.sh --from-hook`
@@ -81,7 +84,7 @@ fields:
 | `channel_id`               | Channel to reply in                                                                                                                                                     |
 | `channel_name`             | Guild-qualified display, e.g. `"My Server #general"`, or `"DM with <name>"`                                                                                             |
 | `guild_id`                 | Guild ID, or null for DMs                                                                                                                                               |
-| `kind`                     | `"mention"` (direct address: @mention or reply to the bot) or `"dm"`; `"reminder"` and `"watch-met"` are items the monitor starts (Reminders and watches)                  |
+| `kind`                     | `"mention"` (direct address: @mention or reply to the bot) or `"dm"`; `"reminder"` and `"watch-met"` (Reminders and watches) and `"proactive"` (Unprompted messages) are items the monitor starts |
 | `author`, `author_id`      | Triggering user                                                                                                                                                         |
 | `content`                  | Message text; for bursts, all fragments joined oldest-first with newlines                                                                                               |
 | `timestamp`                | ISO timestamp of the trigger                                                                                                                                            |
@@ -101,6 +104,7 @@ fields:
 | `settings`                 | The settings card for the item's place: where, who is speaking, audience, memory, length, house rules (see The settings card)                                           |
 | `watches`                  | The author's reminders and watches, and whether they may set them here (see Reminders and watches)                                                                      |
 | `reminder`                 | On `reminder` / `watch-met` items only: what came due or matched (see Reminders and watches)                                                                            |
+| `proactive`                | On `proactive` items only: the slot's targets and time (see Unprompted messages)                                                                                         |
 
 ### reply_outbox.json (worker -> monitor)
 
@@ -124,9 +128,10 @@ back ahead of whatever was appended meanwhile. Item fields:
 | `silent`     | True = deliberately no reply: the monitor records it so the sweep does not requeue the message. Needs `reply_to` or `item`                               |
 | `standalone`   | True = post as a plain message instead of a Discord reply: notifies nobody and does not address the other side                                         |
 | `settings`     | A settings request, on the item answering an owner's own DM only: `{"v": 1, "changes": [...]}` (see Settings requests). The monitor writes the reply |
-| `reply_nonce`  | Required on every item: its queue item's `reply_nonce` from the wake payload, as is (see Replies stay with their run) |
-| `owner_dm_nonce` | Required on every item for an owner's own DM: that item's `owner_dm_nonce` from the wake payload, as is (see Owner DMs) |
+| `reply_nonce`  | Required on every item: its queue item's `reply_nonce` from the wake payload, as is (see Replies stay with their run); not on an item for a heartbeat slot, which carries the slot's nonce instead (Unprompted messages) |
+| `owner_dm_nonce` | Required on every item for an owner's own DM: that item's `owner_dm_nonce` from the wake payload, as is (see Owner DMs); and on every item for a heartbeat slot, the slot's (Unprompted messages) |
 | `schedule`     | Reminders and watches to add or cancel for the item's author: `{"v": 1, "changes": [...]}` (see Reminders and watches) |
+| `proactive`    | `"opt-out"` or `"opt-in"`: the author of the message this item answers asked the bot to stop messaging them first, or said it may again (then the monitor asks them itself, with a button only they can use; see Unprompted messages) |
 
 Validation: an item that is not an object, has a field of the wrong
 type, or would send nothing without being `silent: true` (no text,
@@ -142,7 +147,9 @@ starts with `_nl` (those are the monitor's own). An item for an owner's DM witho
 that DM's nonce is refused the same way, before anything else looks at
 it (Owner DMs), and so is an item that answers no open queue item,
 lacks that item's `reply_nonce`, or posts outside that item's channel
-(Replies stay with their run).
+(Replies stay with their run). An item for a heartbeat slot is bound to that slot instead
+(`bound_elsewhere`), before anything else looks at it, and is never
+sent by the ordinary path (Unprompted messages).
 
 Monitor-side guarantees on send:
 
@@ -553,6 +560,265 @@ it every time:
 
 `when-addressed` turns the window off; `off` queues nothing there.
 
+## Unprompted messages
+
+The bot can start a conversation on its own, like a person would:
+`proactive.py`, loaded by the monitor. **Off by default**
+(`proactive.enabled`); the Friends preset turns it on for its server,
+and an owner can turn it on by DM ("reach out sometimes"), with
+`bin/settings.py` or in config.yaml.
+
+### The heartbeat
+
+- At jittered times (`proactive.frequency`: `rarely`, the default, a
+  gap of 12 to 24 hours; `sometimes` 4 to 6 hours; `often` 45 to 75
+  minutes, drawn uniformly) the monitor works out who and where it may
+  reach out to right now. A heartbeat that would land in quiet hours
+  moves to within two hours after they end. The next one is kept in
+  `proactive.json`, so a restart neither skips nor doubles one.
+- When anyone or anywhere is eligible (below) and the day's total
+  allows, it queues ONE item of `kind: "proactive"`, a *slot*: one
+  worker wake, which may (and usually should) end in silence. Nobody
+  eligible: no wake at all. One slot at a time.
+- A slot holds private targets (owners and people, by DM) or public
+  ones (channels), never both, so nothing private shares a run with a
+  public room: heartbeats alternate between the two, taking the other
+  side when one has nobody eligible.
+- The slot lives 15 minutes; one nobody answered leaves the queue then,
+  and so does any `proactive` queue item that is not the live slot (its
+  record was lost, say), every 30 seconds.
+
+```json
+{"message_id": "<a new id>", "kind": "proactive", "channel_id": null,
+ "channel_name": "(no one asked: your call)", "content": "",
+ "settings": null, "history": [], "participants": [],
+ "proactive": {
+  "expires_at": "2026-10-21T15:20:00Z", "max_messages": 1,
+  "local_time": "Tuesday 17:05", "timezone": "Europe/Paris",
+  "targets": [
+   {"channel_id": "<owner's DM>", "type": "owner", "user_id": "<id>",
+    "name": "sam", "owner": true, "where": "DM with sam",
+    "last_from_them": "2026-10-19T20:11:00Z",
+    "last_from_you": "2026-10-19T20:12:00Z", "ended_with": "you",
+    "their_last_message": "replied", "last_unprompted": null,
+    "settings": {"where": "dm", "speaker": "owner", "audience": "private",
+                 "memory": "everything", "length": "normal", "notes": ""}},
+   {"channel_id": "<channel id>", "type": "channel",
+    "where": "Lounge #general", "last_message_at": "2026-10-21T11:02:00Z",
+    "recent_messages": 7, "recent_people": 3, "last_unprompted": null,
+    "settings": {"where": "server", "server": "Lounge",
+                 "channel": "general", "audience": "public",
+                 "memory": "public-only", "length": "normal",
+                 "notes": ""}}]}}
+```
+
+- The new id is a snowflake for the current time with random low bits
+  (it passes every id check and never names a real message), as for
+  the other items the monitor starts.
+- `type` is `owner` (an owner, by DM), `dm` (someone who DMed the bot
+  first) or `channel`. `ended_with` says who sent the last message of
+  that DM (`you` or `them`); `their_last_message` is the ledger code of
+  their latest message (`replied`, `worker-skipped`, ...). No message
+  text is on the item: the worker has its own memory.
+- `channel_id: null`: no typing indicator anywhere for a slot.
+
+### Who and where (eligibility)
+
+Worked out by the monitor at the heartbeat, and again for the one
+target at send time; nothing the worker writes adds a target.
+
+- **Owners**, by DM: `proactive.enabled` on for DMs (`dms`), DMs not
+  off or paused. The DM channel is the known one, else opened as the
+  owners' notices are.
+- **People who DMed the bot first**: a DM of theirs was queued
+  (`note_item_meta`; seeded from `item_meta` the first time), the DM
+  settings still answer them (`who.dms_from`, `who.allow` /
+  `who.ignore` at `dms`, not a bot), and `proactive.enabled` is on for
+  DMs. Nobody else is ever DMed first: Discord treats that as spam.
+- **Server channels**: a channel the bot reads and can post in (not a
+  thread), `proactive.enabled` on there (it scopes like images and
+  video: all servers, a server, a channel or category), `who.replies`
+  not off or paused there, and a server with an owner in it (never an
+  ownerless server, nor one whose owner check is pending).
+- Never in quiet hours (`proactive.quiet_hours`, default `22:00-09:00`;
+  `off` = none): for a person, in their own time zone once they
+  confirmed it with their own button (The person's own button, below),
+  else, and for channels, in `proactive.timezone` (default `UTC`). A
+  person target carries its `local_time` and `timezone`.
+- Never into a conversation: no target whose channel (or, for a
+  person, their DM or their latest message anywhere) had a person's
+  message in the last 30 minutes, no channel where the bot spoke after
+  the last person did, and no channel where no person is known to talk.
+- Never twice without an answer: no second unprompted message to a
+  person (or a channel) until they (a person there) wrote in that same
+  DM (or channel) after the last one, or reacted to it (looked up when
+  it matters, then remembered). A message of theirs anywhere else is
+  no answer.
+- "A person" is never this bot, another bot or a webhook (the
+  history's `bot` flag, and `webhook` for messages with a
+  `webhook_id`): a feed posting in a channel answers nothing and makes
+  no conversation.
+- Never to someone who opted out (below).
+- Caps, counted from `proactive.json` (`sent`): a person at most
+  `proactive.per_person_per_day` (default 1) and
+  `proactive.per_person_per_week` (default 3); a channel at most
+  `proactive.per_channel_per_day` (default 1); in all, a day, by
+  frequency: rarely 2, sometimes 5, often 10.
+
+### The worker's answer: posting to a slot
+
+```json
+[{"item": "<the slot's message_id>", "channel_id": "<a target's channel_id>",
+  "text": "hey, how did the exam go?",
+  "owner_dm_nonce": "<the slot's owner_dm_nonce>"}]
+```
+
+Or, to say nothing (the usual answer), with any target's
+`channel_id`: `{"item": "<slot id>", "channel_id": "...", "silent":
+true, "owner_dm_nonce": "..."}`. All of a slot's items go in one
+append.
+
+An outbox item whose `item` (or `reply_to`) names a slot, live or
+spent, is decided by `proactive.py` in the monitor's binding step for
+items it started (`bind_started`, after a fire's `watch_bind`, before
+the owner-DM gate), and never reaches the ordinary send path (it is
+sent there, through the one `send_fragmented`, the nonce of each part
+seeded with the slot id):
+
+- `item` must be the slot's id; it carries no `reply_to`,
+  `reactions`, `attachments`, `settings`, `schedule` or `proactive`.
+- It has no `reply_nonce` (Replies stay with their run): a slot is the
+  one queue item kind the monitor never mints one for, and
+  `bound_elsewhere` exempts its items from that check, because the slot
+  binds them instead. The wake hook counts a slot as answered only by
+  an outbox entry carrying the slot's nonce, never waits for a
+  `reply_nonce` for it, and never adds one to its payload.
+- It carries the slot's nonce as `owner_dm_nonce` (128 random bits,
+  compared in constant time). The monitor keeps it in `proactive.json`
+  and writes it to `proactive_nonce.json` (mode 600, `{slot id:
+  nonce}`, the live unspent slot only; never `owner_dm_nonces.json`,
+  so nothing takes it for an owner DM's). The wake hook reads both
+  files the same way, hands a slot out alone and only that wake gets
+  it. Without it the item is set aside and the slot is untouched
+  (a worker woken by anyone's message cannot post for a slot).
+- The slot must be fresh (15 minutes) and unspent. Its first item with
+  the right nonce spends it: a `silent` item, a post, or a refused
+  post alike; anything after that is set aside unsent.
+- `channel_id` must be one of the slot's targets, still eligible now
+  (settings, opt-outs, caps, quiet hours, the conversation rules), and
+  the slot allows at most `max_messages` (1) posts.
+- The text gets the usual guardrails (`max_reply_chars`, at most 4
+  `parts`, `@everyone` / `@here` neutralized, each part clamped to
+  Discord's 2000 characters after the rewrites). It goes out as a plain
+  message (a DM in a DM), with `allowed_mentions` `{"parse": []}` in a
+  channel and `{"parse": [], "users": [<that person>]}` in a DM: it can
+  ping at most its one person. A text with a `privacy.never_share`
+  phrase is dropped (not held) unless it goes to an owner.
+- The outgoing secret filter (`guard_outgoing`, in `send_fragmented`)
+  checks it like every send, and knows the slot's nonce as one of the
+  bot's live private codes. A post it blocks is not retried: the slot
+  is used up, the owners hear of it as for any blocked send, and
+  nothing counts toward the caps.
+- The text is fixed when the post is accepted: a failed send is retried
+  (same Discord nonce) for 90 seconds, as replies are, from the copy in
+  `proactive.json`, never from the worker-writable outbox. A post given
+  up on still counts toward the caps and the "never twice without an
+  answer" rule when any of it may have landed (a later part failed, or
+  a timeout); only one that surely never landed (a blocked secret, or
+  its first part refused) does not.
+- Owner DMs keep their rule: an item that names no slot is judged by
+  the owner-DM gate as before, so the slot's nonce opens no owner DM's
+  item and no owner DM channel outside a slot post to that owner.
+- A damaged slot record never blocks the outbox: an item naming a slot
+  that cannot be checked is set aside, and every other item goes on.
+  If `proactive.py` cannot check an item at all, an item shaped like a
+  slot's answer (an `owner_dm_nonce` and no `reply_nonce`, or naming a
+  queued slot) is set aside; every other item takes the ordinary path,
+  where its `reply_nonce` binds it.
+
+Unprompted posts are recorded in `proactive.json` (`sent`, 8 days), where
+the caps count them. They are not in `mention_ledger.json`, so **Why no
+reply?** is unaffected.
+
+### "Stop messaging me"
+
+Anyone can ask the bot to stop messaging them first, in a DM or to the
+bot in a server; owners too, for their check-ins. The worker answers
+that message as usual and adds `"proactive": "opt-out"` to the outbox
+item (`"opt-in"` when they ask for messages again):
+
+- The person is the author of the message the item answers, from the
+  monitor's own record (`item_meta`): a `mention` or `dm` from a person,
+  not a bot, still in the queue (waiting for this reply: not one
+  answered or settled earlier, however long ago); `channel_id` must be
+  that message's channel. There is no field naming the person.
+- The item is a visible reply to that message: it has text (not
+  `silent`, not reactions only, not `standalone`) and its `reply_to`
+  is that message or one of its burst fragments, so the person always
+  sees what was recorded for them. Like every reply it carries that
+  message's `reply_nonce` and passes the rest of Replies stay with
+  their run first, so only the run handed that message can attach it.
+- `opt-in` only on the person's own DM (`kind` `dm`); `opt-out` in a
+  DM or a server. An owner's DM keeps the nonce rule.
+- An `opt-out` is recorded at once (`opted_out` in `proactive.json`):
+  nothing unprompted goes to them again. It is the safe direction.
+- An `opt-in` records nothing by itself. One run may hold several
+  people's messages, each with its `reply_nonce` (the wake hook batches
+  them), so prompt injection in anyone's message in that run could
+  attach an opt-in to the reply to someone else. Instead, when the
+  person has opted out, the monitor DMs them its own question with a
+  **Yes** button (below), and only their own click opts them back in.
+- A wrong value or a wrong item is set aside like any malformed item.
+
+### The person's own button
+
+What a run could be steered into against someone else is asked of that
+person instead: opting back in, and the time zone their quiet hours
+use. When a reply carries `"proactive": "opt-in"` for someone who opted
+out, or a `schedule` action sets (or clears) someone's `tz` (Reminders
+and watches) and the bot may DM them first (an owner, or someone who
+DMed it, with `proactive.enabled` on for DMs and not opted out), the
+monitor DMs them a fixed question of its own ("Okay if I message you
+first again now and then?", or "Should I use <zone> for the night hours
+when I don't message you first?") with one **Yes** button, custom id
+`mdpro:yes:<token>`, right after the reply it follows.
+
+- Only that person's click counts: the interaction's user id must be
+  theirs. Anyone else's click gets an ephemeral "not for you" and
+  changes nothing.
+- It works once (the DM is then edited to say so, without the button)
+  and for 24 hours. Ignoring it changes nothing.
+- At most 3 such buttons a person in 24 hours, one open per question (a
+  newer time zone replaces the open one), kept in `proactive.json`
+  (`asks`, at most 300).
+- Until they tap it, their quiet hours stay in the time zone they last
+  confirmed, else in `proactive.timezone`. Reminders use the new `tz`
+  at once, as before.
+
+### proactive.json (monitor-internal)
+
+Mode 600. `next` and `freq` (the heartbeat), `slot` (the live slot:
+`id`, `nonce`, `at`, `expires`, `targets` `{channel_id: {type,
+user_id}}`, `max_posts`, `posts`, `spent`), `spent` (recent slot ids,
+so a reused one is refused), `sent` (the unprompted posts: `at`,
+`channel_id`, `user_id`, `type`), `people` (who talked to the bot: last
+message time and id, their DM channel when they DMed it, a name, the
+time zone they confirmed), `opted_out`, and `asks` (the open and recent
+buttons: `user_id`, `channel_id`, `what` `in` or `tz`, `tz`, `at`,
+`sent`, `done`). Safe to delete while the monitor is stopped, at the cost
+of the opt-outs and the caps' counts. The owners' DM channels the bot
+opened for check-ins are kept under `owner_dm`, apart from `dm` (they
+DMed the bot first), so a former owner who never DMed it is never a
+`dm` target.
+
+A `proactive.json` that cannot be read (it does not parse, or is too
+deeply nested to load) is moved to
+`proactive.json.bad-<UTC time>` (never overwritten), the owners get one
+DM saying so, and while any such file is there no heartbeat runs and no
+slot post is sent: its opt-outs are never silently lost. Fix it and
+put it back, or delete it, to resume. (If it cannot even be moved, it
+is left in place and never written.)
+
 ## Worker obligations (summary)
 
 1. Answer every item you were handed: a reply in the outbox, or, when
@@ -587,6 +853,9 @@ it every time:
 8. Follow each item's `settings` card: its length, house rules
    (`notes`), audience, and above all `memory`. A `follow_up` item is
    probably for you; answer it `silent` when it is not.
+9. A `proactive` item (a heartbeat slot) is answered once, with one
+   append: at most `max_messages` posts to its targets, or (usually)
+   one `silent` item, each with the slot's `owner_dm_nonce`.
 
 ## Reminders and watches
 
@@ -810,7 +1079,16 @@ looks at it (`watch_bind`):
 
 This path is generic: a fire is a queue item kind plus a binding (the
 person it answers, the place, the messages it may thread under). Other
-monitor-started items can use it.
+monitor-started items use it too: a heartbeat slot (`kind:
+"proactive"`, Unprompted messages) is a queue item kind plus a binding
+(its targets, its nonce, its caps). Every item the monitor starts gets
+its id from one helper (`started_item_id`: a snowflake for now with
+random low bits), and one step, `bind_started`, binds an outbox item
+naming a fire or a slot before the owner-DM gate. Their sends ping one
+person at most (`send_fragmented` with `mentions`). The ledger: a
+fire's reply is ledgered under the fire's id (it counts toward the
+limits) and **Why no reply?** leaves fires out; a slot's post is never
+in the ledger (its own record, `proactive.json`, carries the caps).
 
 ### Discord watches
 
@@ -989,7 +1267,8 @@ replace, never merge; only `style.notes` concatenates (the server's,
 then the channel's). Servers and channels are keyed by quoted
 Discord ids; a `name:` beside one is a label (the engine only warns
 when it is stale). A channel or category may set only `replies`,
-`notes`, `media.enabled` and `plugins.<id>.enabled`. In an owner's
+`notes`, `media.enabled`, `proactive.enabled` and
+`plugins.<id>.enabled`. In an owner's
 own DM, memory is
 always `everything` and limits never apply; that is fixed, not a
 setting. Both files are re-read when they change; no restart.
@@ -1534,7 +1813,8 @@ answers it at once, independent of the main loop, because Discord
 fails an interaction not acknowledged within 3 seconds. Interactions
 (button clicks and modal submits) are dispatched by custom id prefix
 (`mdupd` here, `mdhold` for never_share holds, `mdset` for
-/settings, `mdnl` for settings requests); slash commands by name
+/settings, `mdnl` for settings requests, `mdpro` for the person's own
+button in Unprompted messages); slash commands by name
 (`/settings`):
 
 - From a non-owner, for a version other than the newest announced one,

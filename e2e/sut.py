@@ -84,6 +84,7 @@ COPY_IGNORE = shutil.ignore_patterns(
     "watchdog_state.json", "watchdog.lock", "update_check.json",
     "update_request.json", "directory.json", "owner_dm_nonces.json",
     "owner_items.json", "item_nonces.json", "prompt_outdated.json",
+    "proactive.json", "proactive.json.bad-*", "proactive_nonce.json",
     "nl_journal.json", "telemetry.json", "telemetry_id", "telemetry.wakes",
     "watches.json", "watches.json.bad-*", "watches.lock",
     "web_watches_due.json", "web_watch_results.json", "web_nonces.json",

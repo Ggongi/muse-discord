@@ -219,6 +219,36 @@ def _import_telemetry():
 
 
 TM = _import_telemetry()
+
+
+# Reaching out on its own, unprompted (proactive.py; PROTOCOL.md,
+# "Unprompted messages"). Off by default; when proactive.py cannot be
+# loaded the bot only replies.
+PROACTIVE_FILE = os.path.join(BASE_DIR, "proactive.json")
+PRO_KIND = "proactive"   # a heartbeat slot's queue item kind
+# The live heartbeat slot's nonce, for the wake hook only (mode 600).
+PROACTIVE_NONCE_FILE = os.path.join(BASE_DIR, "proactive_nonce.json")
+
+
+class _NoProactive:
+    def __getattr__(self, name):
+        return lambda *a, **kw: None
+
+
+def _import_proactive():
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "muse_proactive", os.path.join(BASE_DIR, "proactive.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.Proactive(globals())
+    except Exception as e:
+        print(f"proactive.py not loaded ({type(e).__name__}); the bot only "
+              f"replies.", flush=True)
+        return _NoProactive()
+
+
+PRO = _import_proactive()
 # The raw file (test-only keys such as testing: live here).
 CFG = _S0.raw
 if _S0.notice:
@@ -1076,6 +1106,10 @@ def _live_nonces():
         body = (globals().get(cache) or {}).get("body")
         if isinstance(body, dict):
             out |= {v for v in body.values() if isinstance(v, str) and v}
+    try:   # a live heartbeat slot's nonce (proactive.py)
+        out |= {v for v in (PRO.secret_nonces() or ()) if v}
+    except Exception:
+        pass
 
     def walk(v):
         if isinstance(v, dict):
@@ -2365,6 +2399,8 @@ def apply_record(state, rec):
                     "never_share hold discarded by an owner")
             print(f"Owner {rec.get('by')} discarded the held reply in "
                   f"{where}.", flush=True)
+    elif rec.get("kind") == "proactive_yes":
+        PRO.apply_button(rec)   # a person's own Yes (proactive.py)
 
 
 # Interaction dispatch: one handler per key, the custom_id prefix (the
@@ -2598,6 +2634,16 @@ def on_hold_button(ix, rest, uid, record):
 
 
 register_interaction("mdhold", on_hold_button)
+
+
+def on_proactive_button(ix, rest, uid, record):
+    """mdpro:yes:<token>: the Yes on the monitor's own question to one
+    person (proactive.py, asks); anyone may click, only theirs counts."""
+    return PRO.on_button(ix, rest, uid, record) \
+        or ephemeral("That button is no longer active.")
+
+
+register_interaction("mdpro", on_proactive_button, owner_only=False)
 
 
 # ---------------------------------------------------------------------------
@@ -3694,7 +3740,9 @@ def reply_nonces_upkeep(state, queued, now):
             not isinstance(v, dict)
             or now - v.get("at", 0) > OWNER_ITEM_GRACE_SECS)]:
         del n[mid]
-    for mid in queued:
+    for mid, q in queued.items():
+        if q.get("kind") == PRO_KIND:
+            continue   # a heartbeat slot: its slot nonce binds it
         if not (n.get(mid) or {}).get("nonce"):
             n[mid] = {"nonce": secrets.token_hex(16), "at": now}
     reply_nonces_write(state, check=True)
@@ -4606,32 +4654,49 @@ def normalize_parts(item):
 
 
 def send_fragmented(channel_id, parts, reply_to=None, attachments=(),
-                    mentions=None):
+                    mentions=None, nonce_key=None):
     """Send a reply as sequential messages, like a person thinking aloud.
 
     The first part is threaded under reply_to; follow-ups go out as plain
     messages with a typing beat between them. Attachments ride on the last
     part. Raises on the first failure; the caller retries the whole
     reply, and each part's nonce makes Discord return the parts that
-    already landed instead of posting them again.
+    already landed instead of posting them again. mentions: what the
+    parts may ping (default SEND_ALLOWED_MENTIONS); nonce_key: what the
+    nonces derive from besides the text, when not reply_to (a heartbeat
+    slot's id: its posts reply to nothing). Returns the sent messages'
+    ids. The error raised says which part failed (failed_part) and the
+    ids of the parts sent before it (sent_ids).
     """
     # Every part checked before the first goes out: a secret in part 3
     # never leaves parts 1 and 2 half-sent.
     guard_outgoing({"content": list(parts)}, channel_id)   # and joined
     last_idx = len(parts) - 1
+    sent = []
     for i, part in enumerate(parts):
         if i > 0:
             send_typing(channel_id)
             time.sleep(random.uniform(2.0, 4.0))
-        nonce = send_nonce(channel_id, reply_to, parts, i)
+        nonce = send_nonce(channel_id, nonce_key or reply_to, parts, i)
         kw = {"mentions": mentions} if mentions else {}
-        if i == last_idx and attachments:
-            send_reply_with_files(channel_id, part, attachments,
-                                  reply_to if i == 0 else None, nonce, **kw)
-        elif i == 0:
-            send_reply(channel_id, part, reply_to, nonce, **kw)
-        else:
-            send_reply(channel_id, part, nonce=nonce, **kw)
+        try:
+            if i == last_idx and attachments:
+                got = send_reply_with_files(
+                    channel_id, part, attachments,
+                    reply_to if i == 0 else None, nonce, **kw)
+            elif i == 0:
+                got = send_reply(channel_id, part, reply_to, nonce, **kw)
+            else:
+                got = send_reply(channel_id, part, nonce=nonce, **kw)
+        except Exception as e:
+            try:
+                e.failed_part, e.sent_ids = i, list(sent)
+            except Exception:
+                pass
+            raise
+        if isinstance(got, dict) and got.get("id"):
+            sent.append(str(got["id"]))
+    return sent
 
 
 ATTACH_CTYPES = {
@@ -5378,6 +5443,8 @@ def record_history(state, channel_id, messages):
         # The name people see (server nickname or global display name),
         # when it differs from the username: what someone typing "@Name"
         # by hand is most likely to use.
+        if m.get("webhook_id"):
+            entry["webhook"] = True   # not a person (proactive.py)
         display = ((m.get("member") or {}).get("nick")
                    or author.get("global_name"))
         if display and display != entry["author"]:
@@ -5740,11 +5807,38 @@ def settings_card(scope, here, author_id, from_bot, channel_id,
     return card
 
 
+def queued_item_meta(state, qid, index):
+    """Who and where a still-queued item answers (author_id, author,
+    channel_id, kind, dm, bot, guild_id): its item_meta record, else
+    (state.json lost) the queue file's own entry, which only the monitor
+    writes. None when it is not in the queue (index: queue_index()).
+    A schedule action and a "stop messaging me" both bind to it."""
+    if qid not in index["channels"]:
+        return None
+    meta = (state.get("item_meta") or {}).get(qid)
+    if isinstance(meta, dict):
+        return meta
+    q = next((q for q in load_queue() if isinstance(q, dict)
+              and str(q.get("message_id")) == qid), {})
+    return {"author_id": q.get("author_id"), "author": q.get("author"),
+            "channel_id": q.get("channel_id"), "kind": q.get("kind"),
+            "dm": q.get("kind") == "dm", "bot": bool(q.get("from_bot")),
+            "guild_id": q.get("guild_id")}
+
+
+def started_item_id(now=None):
+    """The queue id of an item the monitor starts (a reminder or watch
+    fire, a heartbeat slot): a snowflake for now with random low bits,
+    so it passes every id check and never names a real message."""
+    return W.new_fire_id(now)
+
+
 def note_item_meta(state, mid, **meta):
     """Remember who a queued item answers (bounded): the send path opens
     follow-up windows and applies the never_share backstop from it."""
     m = state.setdefault("item_meta", {})
     m[mid] = meta
+    PRO.note_item(mid, meta)  # who talked to the bot (proactive.py)
     for old in list(m)[:-300]:
         del m[old]
 
@@ -6260,6 +6354,70 @@ def _set_aside_poison(key, exc):
         _reject_outbox([(redact_nonces(i), why) for i in gone[:1]])
 
 
+def bind_started(state, item, settled, remaining, rejects):
+    """The one binding step for outbox items that answer an item the
+    monitor started, run before owner_dm_gate (PROTOCOL.md, "Items the
+    monitor starts"): a reminder or watch fire (watch_bind: its
+    requester, its place) or a heartbeat slot (proactive.py: its
+    targets, nonce and caps; sent there, never by the path below).
+    Returns (fire, handled): handled means the item was settled, set
+    aside or kept for a retry here; fire is a bound fire for the send
+    path below, else None."""
+    fire = watch_bind(item)
+    if isinstance(fire, dict) and fire.get("gone"):
+        print(f"Outbox item for reminder {fire['gone']}: it was "
+              f"settled already; nothing sent.", flush=True)
+        # (Its ledger entry already says how it ended.)
+        settled.append({"item": fire["gone"]})
+        return None, True
+    if isinstance(fire, str):
+        print(f"Refused outbox item for "
+              f"{item.get('channel_name') or '?'}: {fire} (set aside "
+              f"in {os.path.basename(OUTBOX_REJECTED_FILE)})",
+              flush=True)
+        rejects.append((redact_nonces(item), fire))
+        return None, True
+    if fire is not None:
+        return fire, False
+    try:
+        pro = PRO.outbox_item(state, item)
+    except Exception as e:   # never blocks the replies
+        print(f"Proactive outbox error: {e}", flush=True)
+        pro = None
+        if could_name_slot(item):
+            # Never left to the ordinary path: set aside.
+            why = "proactive: its slot could not be checked"
+            print(f"Refused outbox item: {why} (set aside in "
+                  f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
+            rejects.append((redact_nonces(item), why))
+            return None, True
+    if pro is None:
+        return None, False
+    if pro.reject:
+        print(f"Refused outbox item: {pro.reject} (set aside in "
+              f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
+        rejects.append((redact_nonces(item), pro.reject))
+    if pro.retry:
+        remaining.append(item)
+    if pro.spent:
+        settled.append({"item": pro.spent})
+    return None, True
+
+
+def could_name_slot(item):
+    """When proactive.py cannot say: an item shaped like a slot's answer
+    (its nonce field and no reply_nonce) or naming a queued slot."""
+    if item.get("owner_dm_nonce") and not item.get("reply_nonce"):
+        return True
+    names = {str(item[f]) for f in ("item", "reply_to") if item.get(f)}
+    try:
+        return any(isinstance(q, dict) and q.get("kind") == PRO_KIND
+                   and str(q.get("message_id")) in names
+                   for q in load_queue())
+    except Exception:
+        return True
+
+
 def hold_released_ok(state, item):
     """A held reply an owner chose to send (Send anyway): its hold id,
     item and channel are the ones the monitor recorded for it."""
@@ -6326,11 +6484,19 @@ def note_reply_nonce(state, refusal):
 def bound_elsewhere(state, item):
     """True for an outbox item whose own binder has checked it in full,
     so own_channel_problem leaves it alone: a held reply an owner chose
-    to send (hold_released_ok). The one place to add another such
-    binder (a proactive slot with its slot nonce, say). A reminder or
-    watch firing is not one: watch_bind checks its place, and its
-    reply_nonce still binds it to the run that was handed it."""
-    return hold_released_ok(state, item)
+    to send (hold_released_ok), or an item for a heartbeat slot
+    (proactive.py, through bind_started: the slot's own nonce, its
+    targets and caps bind it; it has no reply_nonce). The one place to
+    add another such binder. A reminder or watch firing is not one:
+    watch_bind checks its place, and its reply_nonce still binds it to
+    the run that was handed it."""
+    if hold_released_ok(state, item):
+        return True
+    try:
+        return bool(PRO.names_slot(item))
+    except Exception as e:   # then the reply_nonce check binds it
+        print(f"Proactive: could not check for a slot ({e}).", flush=True)
+        return False
 
 
 def own_channel_problem(state, item, index):
@@ -6426,22 +6592,12 @@ def process_outbox(state):
                   f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
             rejects.append((redact_nonces(item), problem))
             continue
-        # A reply to a reminder or watch firing goes back to its
-        # requester, in its place, under their message: bound here, from
-        # the monitor's record, whatever the item says (watch_bind).
-        fire = watch_bind(item)
-        if isinstance(fire, dict) and fire.get("gone"):
-            print(f"Outbox item for reminder {fire['gone']}: it was "
-                  f"settled already; nothing sent.", flush=True)
-            # (Its ledger entry already says how it ended.)
-            settled.append({"item": fire["gone"]})
-            continue
-        if isinstance(fire, str):
-            print(f"Refused outbox item for "
-                  f"{item.get('channel_name') or '?'}: {fire} (set aside "
-                  f"in {os.path.basename(OUTBOX_REJECTED_FILE)})",
-                  flush=True)
-            rejects.append((redact_nonces(item), fire))
+        # Items the monitor started (reminder and watch fires, heartbeat
+        # slots): bound to their own record before anything else looks
+        # at them, whatever the item says (bind_started).
+        fire, handled = bind_started(state, item, settled, remaining,
+                                     rejects)
+        if handled:
             continue
         # Owner DMs first, before dedup, holds or anything that settles:
         # only the owner-DM-only wake holding the DM's nonce may touch it.
@@ -6473,6 +6629,18 @@ def process_outbox(state):
                   f"{reply_to or item.get('item')}", flush=True)
             _settle(state, item, "replied", "duplicate suppressed")
             settled.append(item)
+            continue
+        # "Stop messaging me": recorded for the author of the message
+        # this item answers (proactive.py); the reply goes out as usual.
+        try:
+            bad = PRO.opt_action(state, item, index)
+        except Exception as e:   # not recorded: the item stays open
+            bad = f"proactive: could not record it ({e})"
+        if bad:
+            print(f"Rejected outbox item for {item.get('channel_name') or '?'}"
+                  f": {bad} (set aside in "
+                  f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
+            rejects.append((redact_nonces(item), bad))
             continue
         sched = None  # a refused schedule action: (line, reason, detail)
         if "schedule" in item:
@@ -7124,16 +7292,7 @@ def _watch_schedule(state, item, index):
     prev = store.read()["done"].get(qid)
     if prev is not None:
         return _watch_outcome(prev)
-    meta = (state.get("item_meta") or {}).get(qid)
-    if not isinstance(meta, dict) and qid in index["channels"]:
-        # No record (state.json lost): the queue file, which only the
-        # monitor writes, says who and where.
-        q = next((q for q in load_queue() if isinstance(q, dict)
-                  and str(q.get("message_id")) == qid), {})
-        meta = {"author_id": q.get("author_id"), "author": q.get("author"),
-                "channel_id": q.get("channel_id"), "kind": q.get("kind"),
-                "dm": q.get("kind") == "dm", "bot": bool(q.get("from_bot")),
-                "guild_id": q.get("guild_id")}
+    meta = queued_item_meta(state, qid, index)
     if not isinstance(meta, dict) or qid not in index["channels"] \
             or meta.get("kind") not in ("mention", "dm"):
         return ("reject", "schedule: item must be an open queue item from "
@@ -7149,6 +7308,7 @@ def _watch_schedule(state, item, index):
     gid = None if dm else (meta.get("guild_id")
                            or (CHANNELS.get(cid) or {}).get("guild_id"))
     changes = item["schedule"]["changes"]
+    fresh = None   # decided on this pass (not read back)
     try:
         if meta.get("bot"):
             raise W.Refused(W.LINES["bot"])
@@ -7185,6 +7345,14 @@ def _watch_schedule(state, item, index):
                     prev = {"ok": False, "line": r.line,
                             "reason": r.reason, "detail": r.detail}
                 W.remember_done(data, qid, prev)
+                fresh = prev
+        for op, value in (fresh or {}).get("done") or []:
+            if op == "tz":
+                try:   # their quiet hours: only their own button moves them
+                    PRO.note_tz(uid, value)
+                except Exception as e:
+                    print(f"Proactive: time zone note error: {e}",
+                          flush=True)
     except W.Refused as r:
         prev = {"ok": False, "line": r.line, "reason": r.reason,
                 "detail": r.detail}
@@ -7502,7 +7670,7 @@ def _watch_fire_group(state, data, uid, cid, es, now, kind, verdicts,
     r0 = es[0][0]
     gid, dm = r0.get("guild_id"), bool(r0.get("dm"))
     name = r0.get("name") or uid
-    fid = fid or W.new_fire_id(now)
+    fid = fid or started_item_id(now)
     key = (uid, cid, gid, dm)
     if key not in verdicts:
         _watch_hold(data, fid, uid, cid, es, kind, now, now, held,
@@ -8961,6 +9129,11 @@ def main():
             watch_tick(state)  # reminders due, watch matches, expiry
         except Exception as e:
             print(f"Reminders and watches error: {e}", flush=True)
+
+        try:
+            PRO.tick(state)  # the heartbeat: reaching out on its own
+        except Exception as e:
+            print(f"Proactive error: {e}", flush=True)
 
         # One REST slice per tick (see "Sliced REST work"): the poll's,
         # or the background job's, alternating when both are due.

@@ -74,7 +74,8 @@ class Web(tw.Base):
         before = json.dumps(self.items(), sort_keys=True)
         self.report({"id": e["id"], "nonce": "b" * 32, "result": "met"},
                     {"id": "wzzzzz", "nonce": e["nonce"], "result": "met"},
-                    {"id": e["id"], "nonce": e["nonce"][:-1] + "0",
+                    {"id": e["id"], "nonce": e["nonce"][:-1]
+                     + ("1" if e["nonce"].endswith("0") else "0"),
                      "result": "met"})
         self.assertEqual(json.dumps(self.items(), sort_keys=True), before)
         self.assertEqual(self.fires(), [])
