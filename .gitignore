@@ -33,6 +33,9 @@ owner_dm_nonces.json
 proactive.json
 proactive.json.bad-*
 proactive_nonce.json
+owner_items.json
+item_nonces.json
+prompt_outdated.json
 nl_journal.json
 watches.json
 watches.json.bad-*

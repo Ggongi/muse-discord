@@ -19,6 +19,7 @@ for k in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
     os.environ.pop(k, None)
 os.environ["NO_PROXY"] = os.environ["no_proxy"] = "*"
 
+from common import signed  # noqa: E402
 import monitor_harness as H  # noqa: E402
 from monitor_harness import G1, OWNER, BOT, msg, chan  # noqa: E402
 
@@ -50,6 +51,16 @@ def drain(*a, **kw):
 
 
 mod.drain_gateway = drain
+_orig_load_state = mod.load_state
+LIVE = {}   # the main loop's state, for signing outbox items
+
+
+def load_state_live():
+    LIVE["state"] = _orig_load_state()
+    return LIVE["state"]
+
+
+mod.load_state = load_state_live
 _orig_stage = mod.stage_trigger
 
 
@@ -189,10 +200,14 @@ elif scenario == "outbox":
     rec["outbox_written"] = []
 
     def write_outbox(inbox, status):
+        # A message the monitor queued there (an outbox item answers one).
+        mid = H.sf(0)
+        mod.queue_edit(add=[{"message_id": mid, "channel_id": "500"}])
         tmp = mod.OUTBOX_FILE + ".w"
         with open(tmp, "w") as f:
-            json.dump([{"channel_id": "500", "reply_to": H.sf(0),
-                        "text": "hello"}], f)
+            json.dump([signed(mod, LIVE["state"], {
+                "item": mid, "channel_id": "500", "reply_to": mid,
+                "text": "hello"})], f)
         os.replace(tmp, mod.OUTBOX_FILE)
         rec["outbox_written"].append(rel(time.time()))
     gw_script += [(3.1, write_outbox), (5.37, write_outbox)]

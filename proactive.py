@@ -347,6 +347,15 @@ class Proactive:
             pass
         return {}
 
+    def secret_nonces(self):
+        """The slot nonce while any slot record holds it (spent too), for
+        the monitor's outgoing secret filter."""
+        try:
+            s = self.data().get("slot")
+            return {s["nonce"]} if self._slot_ok(s) else set()
+        except Exception:
+            return set()
+
     def write_nonces(self):
         """proactive_nonce.json (mode 600, the wake hook's): written when
         it changes."""
@@ -767,6 +776,18 @@ class Proactive:
             print(f"Proactive: queue unreadable ({e}).", flush=True)
 
     # -- the worker's answer to a slot -------------------------------------------
+    def names_slot(self, item):
+        """The slot id an outbox item names (item or reply_to; a live or
+        spent slot), else None: such an item is bound here, by the slot's
+        nonce, never by a reply_nonce (monitor.bound_elsewhere)."""
+        if not isinstance(item, dict):
+            return None
+        d = self.data()
+        s = d.get("slot") if self._slot_ok(d.get("slot")) else {}
+        known = set(d["spent"]) | ({s["id"]} if s else set())
+        names = [str(item[f]) for f in ("item", "reply_to") if item.get(f)]
+        return next((n for n in names if n in known), None)
+
     def outbox_item(self, state, item):
         """None when the outbox item names no slot (it goes the usual way);
         else a Verdict. Posts only to the slot's targets, with its nonce,
@@ -774,9 +795,7 @@ class Proactive:
         never raises: an item naming a slot is then set aside."""
         d = self.data()
         s = d.get("slot") if self._slot_ok(d.get("slot")) else {}
-        names = [str(item[f]) for f in ("item", "reply_to") if item.get(f)]
-        known = set(d["spent"]) | ({s["id"]} if s else set())
-        sid = next((n for n in names if n in known), None)
+        sid = self.names_slot(item)
         if sid is None:
             return None
         try:
@@ -874,7 +893,11 @@ class Proactive:
         except Exception as e:
             code = getattr(e, "code", None)
             post["n"] = post.get("n", 0) + 1
-            if code == 403 or now - post["first"] >= SEND_RETRY_SECS:
+            # A secret in it (the monitor's send guard): never retried,
+            # the slot is used up, nothing counts toward the caps.
+            blocked = isinstance(e, self.m.SecretBlocked)
+            if code == 403 or blocked \
+                    or now - post["first"] >= SEND_RETRY_SECS:
                 post["status"] = "failed"
                 self.data()["sent"] = [x for x in self.data()["sent"]
                                        if not (x.get("slot") == sid and

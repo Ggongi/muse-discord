@@ -94,8 +94,7 @@ Muses hang out together.
   mentions pizza": anyone it answers can ask, and it comes back to them, and
   only them, where they asked. "What are you watching for me?" lists them, "stop
   watching for pizza" cancels one. Web watches ("tell me when the tickets go on
-  sale"), which your Muse checks on the web, are for owners unless you allow
-  others.
+  sale"), which your Muse checks on the web, are for owners only.
 
 ## 🛟 Reliability
 
@@ -137,8 +136,25 @@ crash. This one was hardened in production against each of them.
   report, with each condition handed over as data.
 - **Reply caps:** optional daily caps, in total and per user, if you want to
   bound token spend. Off by default; your own messages are always exempt.
-- **Token:** stored in one private file outside the repo by default. Only the
-  bot's own processes read it; your Muse never gets it while replying.
+- **Replies stay with their run:** each message the bot answers comes with a
+  one-time code that only the reply session handling it gets, and every reply
+  must carry it and go back where the message was said. A session woken by a
+  stranger can't answer, silence or act on anyone else's message, and only
+  your own commands can use the bot's Discord tools, where your own words
+  point.
+- **Secret filter:** nothing the bot sends may contain its token (even lightly
+  disguised), any of its private codes, or anything shaped like a Discord
+  token. Such a reply is dropped, and you get a DM about it (at most once a
+  day); everything else goes out exactly as written.
+- **Token:** stored in one private file outside the repo by default. Your Muse
+  never gets it in a reply session's prompt.
+- **Limits:** on Muse, every session (your main chat, the reply sessions,
+  scheduled ones) runs as the same user on the same machine, without
+  per-session sandboxing. The reply session's tools (append a reply, the
+  Discord tool, read its own media) are limited by its instructions, not by
+  the system: one that followed an injection into its shell could read any
+  file, the token included. The checks above are what the bot itself
+  enforces on what it sends; see PROTOCOL.md's security note.
 
 ## 📊 Privacy and usage stats
 

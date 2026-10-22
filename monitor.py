@@ -172,6 +172,23 @@ def _import_watches():
 
 W = _import_watches()
 
+
+def _import_scan():
+    """secret_scan.py (the outgoing secret filter) from this package."""
+    here = os.path.join(BASE_DIR, "secret_scan.py")
+    cached = sys.modules.get("secret_scan")
+    if cached is not None and os.path.abspath(
+            getattr(cached, "__file__", "") or "") == here:
+        return cached
+    spec = importlib.util.spec_from_file_location("secret_scan", here)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["secret_scan"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+SCAN = _import_scan()
+
 # Anonymous daily usage counts (telemetry.py; README, "Privacy and usage
 # stats"). Off with telemetry.usage_stats: off or MUSE_DISCORD_TELEMETRY=off.
 TELEMETRY_FILE = os.path.join(BASE_DIR, "telemetry.json")
@@ -208,6 +225,7 @@ TM = _import_telemetry()
 # "Unprompted messages"). Off by default; when proactive.py cannot be
 # loaded the bot only replies.
 PROACTIVE_FILE = os.path.join(BASE_DIR, "proactive.json")
+PRO_KIND = "proactive"   # a heartbeat slot's queue item kind
 # The live heartbeat slot's nonce, for the wake hook only (mode 600).
 PROACTIVE_NONCE_FILE = os.path.join(BASE_DIR, "proactive_nonce.json")
 
@@ -1057,7 +1075,114 @@ def api_get(path):
     return _api_call(_do)
 
 
+# ---------------------------------------------------------------------------
+# Secrets never leave in anything the bot sends. On the real platform
+# every session (workers included) runs as the same OS user, so a worker
+# that follows an injection into its shell can read the token file and
+# every nonce file; the nonces bind what it writes to the outbox, but
+# only this filter keeps a secret it read from being posted. Before any
+# send to Discord (replies, fires, owner DMs and notices, edits,
+# interaction responses, uploads), the payload is checked: the bot token
+# itself, any nonce the monitor holds live, or anything shaped like a
+# Discord token (three base64url segments, the first decoding to a
+# snowflake) drops the send (SecretBlocked), logged without the value,
+# and the owners are DMed about it once a day. Any other 32-hex-digit
+# string (a nonce's shape) in visible text is blanked.
+# ---------------------------------------------------------------------------
+class SecretBlocked(Exception):
+    """A send held back because it carried a secret (never retried)."""
+
+
+_SECRET_ALERT = {"day": None, "busy": False}
+
+
+def _live_nonces():
+    """Every nonce the monitor holds live: the values of its flat nonce
+    maps, and the "nonce" fields of owner_items and the web checks
+    (never other fields, such as a check's public group tag)."""
+    out = set()
+    for cache in ("_NL_NONCES_WRITTEN", "_ITEM_NONCES_WRITTEN",
+                  "_WEB_NONCES_WRITTEN"):
+        body = (globals().get(cache) or {}).get("body")
+        if isinstance(body, dict):
+            out |= {v for v in body.values() if isinstance(v, str) and v}
+    try:   # a live heartbeat slot's nonce (proactive.py)
+        out |= {v for v in (PRO.secret_nonces() or ()) if v}
+    except Exception:
+        pass
+
+    def walk(v):
+        if isinstance(v, dict):
+            for k, x in v.items():
+                if k == "nonce" and isinstance(x, str) and x:
+                    out.add(x)
+                else:
+                    walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+    for cache in ("_OWNER_ITEMS_WRITTEN", "_WEB_DUE_WRITTEN"):
+        walk((globals().get(cache) or {}).get("body"))
+    return out
+
+
+def secret_in(text):
+    """What secret text carries, or None (secret_scan.find)."""
+    return SCAN.find(text, TOKEN, _live_nonces())
+
+
+def _payload_strings(v, key=None):
+    if isinstance(v, str):
+        if key != "nonce":   # Discord's own send nonce, derived
+            yield v
+    elif isinstance(v, dict):
+        for k, x in v.items():
+            yield from _payload_strings(x, k)
+    elif isinstance(v, list):
+        for x in v:
+            yield from _payload_strings(x, key)
+
+
+def guard_outgoing(data, where):
+    """Raise SecretBlocked (and log, and tell the owners once a day) when
+    anything data would send carries a secret: any of its strings, or
+    all of them joined (a token split across parts, embed fields or file
+    names). data is returned as is: nothing is ever altered. Every send
+    helper calls it."""
+    texts = list(_payload_strings(data))
+    for text in texts + ["".join(texts)]:
+        what = secret_in(text)
+        if what:
+            print(f"Blocked a send to {where}: it contained {what}; "
+                  f"nothing was sent.", flush=True)
+            _secret_alert(where)
+            raise SecretBlocked(f"blocked: it contained {what}")
+    return data
+
+
+def _secret_alert(where):
+    """DM the owners about a blocked send, once a day (never raises)."""
+    day = time.strftime("%Y-%m-%d")
+    if _SECRET_ALERT["day"] == day or _SECRET_ALERT["busy"]:
+        return
+    _SECRET_ALERT.update(day=day, busy=True)
+    try:
+        for uid in sorted(OWNER_USER_IDS):
+            dm_owner(uid, {"content": (
+                "I blocked a reply that looked like it contained a "
+                "secret (a token or one of my private codes), so that "
+                "reply wasn't sent. monitor.log says where. I tell you "
+                "about this at most once a day."),
+                "allowed_mentions": {"parse": []}})
+    except Exception as e:
+        print(f"Could not alert the owners about a blocked send: {e}",
+              flush=True)
+    finally:
+        _SECRET_ALERT["busy"] = False
+
+
 def api_post(path, data):
+    data = guard_outgoing(data, path)
     body = json.dumps(data).encode()
     req = urllib.request.Request(API + path, data=body, headers=headers())
 
@@ -1798,6 +1923,7 @@ def dm_owner(uid, payload):
     """Send one message payload (content, components, ...) to one
     owner's DM channel. True when it landed. Never raises."""
     try:
+        payload = guard_outgoing(payload, "an owner's DM")
         c = api_post("/users/@me/channels", {"recipient_id": uid})
         api_post(f"/channels/{c['id']}/messages", payload)
         return True
@@ -2260,7 +2386,10 @@ def apply_record(state, rec):
             # Sent through the outbox like any reply (retries, the
             # attachment pipeline, settling); the hold id lets this one
             # item past the never_share check.
-            state.setdefault("hold_released", {})[hid] = time.time()
+            state.setdefault("hold_released", {})[hid] = {
+                "at": time.time(), "qid": hold.get("qid"),
+                "channel_id": str((hold.get("item") or {})
+                                  .get("channel_id"))}
             state.setdefault("released", []).append(
                 dict(hold["item"], _hold=hid))
             print(f"Owner {rec.get('by')} chose Send anyway for the held "
@@ -2321,6 +2450,7 @@ def interaction_callback(ix, response):
     rate-limit backoff, and it answers 204 with no body."""
     path = (f"/interactions/{urllib.parse.quote(str(ix['id']), safe='')}/"
             f"{urllib.parse.quote(str(ix['token']), safe='')}/callback")
+    response = guard_outgoing(response, "an interaction response")
     req = urllib.request.Request(
         API + path, data=json.dumps(response).encode(),
         headers={"User-Agent": "DiscordBot (muse-discord, 1.0)",
@@ -2412,8 +2542,7 @@ def never_share_hit(state, item, qid, parts):
     phrases = settings().get("privacy.never_share", MS.Scope.everywhere())
     if not phrases or not parts:
         return False
-    hid = item.get("_hold")
-    if hid and hid in state.get("hold_released", {}):
+    if hold_released_ok(state, item):
         return False  # an owner chose Send anyway
     meta = state.get("item_meta", {}).get(qid) if qid else None
     if meta:
@@ -2477,7 +2606,9 @@ def expire_holds(state):
             print(f"Held reply in {hold.get('where')} expired undecided; "
                   f"discarded.", flush=True)
     released = state.get("hold_released") or {}
-    for hid in [h for h, t in released.items() if now - t > 2 * 86400]:
+    for hid in [h for h, t in released.items()
+                if now - (t.get("at", 0) if isinstance(t, dict) else t)
+                > 2 * 86400]:
         del released[hid]
 
 
@@ -3058,6 +3189,7 @@ def nl_write_nonces(state):
               > NL.MAX_AGE]:
         del n[k]
     body = {k: v["nonce"] for k, v in n.items()}
+    owner_items_write(state)   # an owner DM's command uses its nonce
     if body == _NL_NONCES_WRITTEN["body"]:
         return
     try:
@@ -3299,8 +3431,9 @@ def redact_nonces(item):
     out = dict(item)
     if OWNER_DM_NONCE_FIELD in out:
         out[OWNER_DM_NONCE_FIELD] = "(redacted)"
-    if "web_nonce" in out:
-        out["web_nonce"] = "(redacted)"
+    for field in ("web_nonce", REPLY_NONCE_FIELD):
+        if field in out:
+            out[field] = "(redacted)"
     if isinstance(out.get("settings"), dict) \
             and "nonce" in out["settings"]:
         out["settings"] = dict(out["settings"], nonce="(redacted)")
@@ -3361,7 +3494,246 @@ def owner_dm_upkeep(state, force=False):
             n[mid]["fragments"] = frags
         print(f"Owner DM {mid} had no nonce; minted one for its next "
               f"wake.", flush=True)
+    owner_items_upkeep(state, queue, now)
     nl_write_nonces(state)
+
+
+# ---------------------------------------------------------------------------
+# Owner commands are bound to their wake too. bin/discord-api.py acts in
+# a channel (read, post, thread, react, pin, unpin, edit, delete-own)
+# only for an open queue item the monitor stamped owner_command (an
+# owner's own message, where abilities.owner_commands is on), with that
+# item's owner_command_nonce: 128 random bits kept in state.json
+# (owner_items) and in owner_items.json (mode 600, the open
+# owner-command items only), never in reply_queue.json. An owner's DM
+# uses its owner_dm_nonce. The wake hook hands the nonce only to a run
+# that holds nothing but owner items (they wake alone), so a run woken
+# by someone else's message cannot act through the tool even when it
+# knows the owner's message id (it is in the channel history).
+# ---------------------------------------------------------------------------
+OWNER_ITEMS_FILE = os.path.join(BASE_DIR, "owner_items.json")
+_OWNER_ITEMS_WRITTEN = {"body": None}
+# A new owner item is kept this long even before the queue file shows
+# it (it is noted before the queue write).
+OWNER_ITEM_GRACE_SECS = 120
+
+
+def owner_own_words(content):
+    """The owner's own words in a message: without quoted lines ("> ...")
+    and code (``` blocks and `inline`), which may be someone else's
+    text pasted in."""
+    text = content if isinstance(content, str) else ""
+    text = re.sub(r"```.*?(```|$)", " ", text, flags=re.S)
+    text = re.sub(r"`[^`\n]*`", " ", text)
+    return "\n".join(ln for ln in text.split("\n")
+                     if not ln.lstrip().startswith(">"))
+
+
+def _norm_name(text):
+    """Lowercased, "-" and "_" read as spaces, whitespace collapsed."""
+    return " ".join(re.sub(r"[-_]", " ", str(text).lower()).split())
+
+
+# Bare channel names ("post this in announcements") that are never one.
+BARE_NAME_STOPWORDS = frozenset(
+    "the a an to in into on of for and or but this that these those it "
+    "its here there me you him her us them my your our their all any "
+    "some channel server thread".split())
+_THREAD_TYPES = (10, 11, 12)
+
+
+def _server_channels(gid):
+    """{id: name} of a server's channels the bot knows (no threads, no
+    categories)."""
+    out = {}
+    for c in _GUILD_CHANNELS.get(str(gid)) or []:
+        if isinstance(c, dict) and c.get("type") not in (4,) + _THREAD_TYPES:
+            out[str(c.get("id"))] = str(c.get("name") or "")
+    for cid, info in CHANNELS.items():
+        if str(info.get("guild_id")) == str(gid) and not info.get("thread") \
+                and str(cid) not in out:
+            out[str(cid)] = str(info.get("name") or "")
+    return out
+
+
+def owner_targets(content, guild_id=None):
+    """Where an owner's own words point, as channel ids resolved now, at
+    queue time: (channels, post_channels). channels: <#id> mentions (the
+    only way to name a thread) and #names, resolved among the command's
+    own server's channels (an owner DM: in the one server that has a
+    channel of that name). post_channels, for `post` only: a channel of
+    the command's own server whose whole name (3+ characters, not a
+    common word; "-", "_" and spaces alike) follows "in", "to" or
+    "into" ("post this in announcements"). Quotes and code are not the
+    owner's words (owner_own_words)."""
+    text = owner_own_words(content)
+    ids = set(re.findall(r"<#([1-9][0-9]{16,19})>", text))
+    names = {n.lower() for n in re.findall(
+        r"(?<![\w&<#])#([^\s#<>@:,;!?()\[\]{}'\"`*~|]{1,100})", text)}
+    if guild_id:
+        pools = [_server_channels(guild_id)]
+    else:
+        pools = [_server_channels(g) for g in
+                 {str(i.get("guild_id")) for i in CHANNELS.values()}
+                 | set(_GUILD_CHANNELS)]
+    for name in names:
+        hits = {cid for pool in pools for cid, n in pool.items()
+                if n.lower() == name}
+        if guild_id or len(hits) == 1:
+            ids |= hits
+    post = set()
+    if guild_id:
+        words = _norm_name(text)
+        for cid, n in _server_channels(guild_id).items():
+            bare = _norm_name(n)
+            if len(bare) >= 3 and bare not in BARE_NAME_STOPWORDS \
+                    and re.search(r"(?<!\w)(?:in|to|into) (?:the )?"
+                                  + re.escape(bare) + r"(?!\w)", words):
+                post.add(cid)
+    return sorted(ids), sorted(post - ids)
+
+
+def note_owner_item(state, mid, dm=False, channel_id=None, content="",
+                    guild_id=None):
+    """Queue item mid is an owner's command: mint its nonce (an owner
+    DM's is its owner_dm_nonce), resolve where the owner's own words
+    point (owner_targets, ids only), and write owner_items.json."""
+    e = state.setdefault("owner_items", {})
+    ids, post = owner_targets(content, guild_id)
+    e[str(mid)] = {"at": time.time(), "channel_id": str(channel_id or ""),
+                   "dm": bool(dm), "channels": ids, "post_channels": post}
+    if not dm:
+        e[str(mid)]["nonce"] = secrets.token_hex(16)
+    for old in list(e)[:-300]:
+        del e[old]
+    owner_items_write(state)
+
+
+def _private_file_ok(path, body):
+    """The file still holds body (it was not lost or mangled)."""
+    try:
+        with open(path) as f:
+            return json.load(f) == body
+    except (OSError, ValueError):
+        return False
+
+
+def owner_items_write(state, check=False):
+    """owner_items.json = {message_id: {nonce, channel_id, dm, channels,
+    post_channels}} for the open owner-command items (written only when that
+    changed; check: also when the file was lost or mangled)."""
+    nl = state.get("nl_nonces") or {}
+    body = {}
+    for mid, e in (state.get("owner_items") or {}).items():
+        if not isinstance(e, dict):
+            continue
+        n = e.get("nonce") or (nl.get(mid) or {}).get("nonce")
+        if n:
+            body[mid] = {"nonce": n, "channel_id": e.get("channel_id"),
+                         "dm": bool(e.get("dm")),
+                         "channels": e.get("channels") or [],
+                         "post_channels": e.get("post_channels") or []}
+    if body == _OWNER_ITEMS_WRITTEN["body"] and not (
+            check and not _private_file_ok(OWNER_ITEMS_FILE, body)):
+        return
+    try:
+        _write_private(OWNER_ITEMS_FILE, body)
+        _OWNER_ITEMS_WRITTEN["body"] = body
+    except OSError as e:
+        print(f"Could not write owner_items.json: {e}", flush=True)
+
+
+def owner_items_upkeep(state, queue, now):
+    """(owner_dm_upkeep) Drop owner items no longer queued; mint one for
+    a queued owner command that has none (state.json lost); rewrite a
+    lost or mangled owner_items.json. Then the same for reply nonces."""
+    e = state.setdefault("owner_items", {})
+    queued = {str(q["message_id"]): q for q in queue
+              if isinstance(q, dict) and q.get("message_id")}
+    for mid in [m for m, v in e.items() if m not in queued and (
+            not isinstance(v, dict)
+            or now - v.get("at", 0) > OWNER_ITEM_GRACE_SECS)]:
+        del e[mid]
+    for mid, q in queued.items():
+        if mid not in e and q.get("owner_command") is True \
+                and str(q.get("author_id")) in OWNER_USER_IDS:
+            note_owner_item(state, mid, dm=_queued_owner_dm(state, q),
+                            channel_id=q.get("channel_id"),
+                            content=q.get("content"),
+                            guild_id=q.get("guild_id"))
+    owner_items_write(state, check=True)
+    reply_nonces_upkeep(state, queued, now)
+
+
+# ---------------------------------------------------------------------------
+# Every queue item is bound to the wake that holds it. The monitor mints
+# each queued item (fires included) a reply_nonce: 128 random bits, kept
+# in state.json (reply_nonces) and item_nonces.json (mode 600, the open
+# items only, read by the wake hook), never in reply_queue.json. The hook
+# adds it only to the wake that holds the item's lease, and every outbox
+# item must echo its item's (own_channel_problem), so a run can answer,
+# silence or put a schedule action on only the items it was handed, not
+# on ones whose ids it saw in history. Spent when the item settles.
+# ---------------------------------------------------------------------------
+REPLY_NONCE_FIELD = "reply_nonce"
+ITEM_NONCES_FILE = os.path.join(BASE_DIR, "item_nonces.json")
+_ITEM_NONCES_WRITTEN = {"body": None}
+_ITEM_NONCES_ALERT = {"day": None}
+
+
+def reply_nonce_mint(state, mid):
+    """Queue item mid's reply_nonce (minted when it has none), written to
+    item_nonces.json before the item reaches the queue file."""
+    n = state.setdefault("reply_nonces", {})
+    e = n.get(str(mid))
+    if not (isinstance(e, dict) and e.get("nonce")):
+        n[str(mid)] = e = {"nonce": secrets.token_hex(16),
+                           "at": time.time()}
+        for old in list(n)[:-1000]:
+            del n[old]
+    reply_nonces_write(state)
+    return e["nonce"]
+
+
+def reply_nonces_write(state, check=False):
+    body = {k: v["nonce"] for k, v in (state.get("reply_nonces")
+                                       or {}).items()
+            if isinstance(v, dict) and v.get("nonce")}
+    if body == _ITEM_NONCES_WRITTEN["body"] and not (
+            check and not _private_file_ok(ITEM_NONCES_FILE, body)):
+        return
+    try:
+        _write_private(ITEM_NONCES_FILE, body)
+        _ITEM_NONCES_WRITTEN["body"] = body
+    except OSError as e:
+        # The wake hook cannot hand out nonces it cannot read, so no
+        # reply can be sent: say so (not "the prompt is out of date").
+        print(f"Could not write item_nonces.json: {e}", flush=True)
+        day = time.strftime("%Y-%m-%d")
+        if _ITEM_NONCES_ALERT["day"] != day:
+            _ITEM_NONCES_ALERT["day"] = day
+            for uid in sorted(OWNER_USER_IDS):
+                dm_owner(uid, {"content": (
+                    "I can't write item_nonces.json in my folder, so I "
+                    "can't send replies. Check the disk space and the "
+                    "folder's permissions; monitor.log has the error."),
+                    "allowed_mentions": {"parse": []}})
+
+
+def reply_nonces_upkeep(state, queued, now):
+    """Every queued item holds a live reply_nonce (minted again when
+    state.json was lost); ones no longer queued are dropped."""
+    n = state.setdefault("reply_nonces", {})
+    for mid in [m for m, v in n.items() if m not in queued and (
+            not isinstance(v, dict)
+            or now - v.get("at", 0) > OWNER_ITEM_GRACE_SECS)]:
+        del n[mid]
+    for mid, q in queued.items():
+        if q.get("kind") == PRO_KIND:
+            continue   # a heartbeat slot: its slot nonce binds it
+        if not (n.get(mid) or {}).get("nonce"):
+            n[mid] = {"nonce": secrets.token_hex(16), "at": now}
+    reply_nonces_write(state, check=True)
 
 
 def is_forwarded(msg):
@@ -3599,6 +3971,7 @@ COMMAND_RETRY_SECS = 60
 
 
 def api_patch(path, data):
+    data = guard_outgoing(data, path)
     body = json.dumps(data).encode()
     req = urllib.request.Request(API + path, data=body, headers=headers(),
                                  method="PATCH")
@@ -4096,6 +4469,7 @@ def reply_reference(message_id):
 
 def send_reply(channel_id, text, reply_to=None, nonce=None,
                components=None, mentions=None):
+    text = guard_outgoing({"content": text}, channel_id)["content"]
     data = {"content": text,
             "allowed_mentions": mentions or SEND_ALLOWED_MENTIONS}
     if components:
@@ -4215,6 +4589,7 @@ def add_reaction(channel_id, message_id, emoji):
     reactions drafted by the worker via the outbox 'reactions' list."""
     encoded = urllib.parse.quote(emoji, safe="")  # "/" stays in the segment
     try:
+        guard_outgoing({"content": emoji}, channel_id)
         req = urllib.request.Request(
             API + f"/channels/{channel_id}/messages/{message_id}"
                  f"/reactions/{encoded}/@me",
@@ -4280,6 +4655,9 @@ def send_fragmented(channel_id, parts, reply_to=None, attachments=(),
     slot's id: its posts reply to nothing). Returns the sent messages'
     ids.
     """
+    # Every part checked before the first goes out: a secret in part 3
+    # never leaves parts 1 and 2 half-sent.
+    guard_outgoing({"content": list(parts)}, channel_id)   # and joined
     last_idx = len(parts) - 1
     sent = []
     for i, part in enumerate(parts):
@@ -4312,6 +4690,8 @@ def send_reply_with_files(channel_id, text, files, reply_to=None,
     """Send a message with file attachments via multipart/form-data.
     files: list of (local_path, filename)."""
     boundary = "----MuseDiscord%d" % int(time.time() * 1000)
+    guard_outgoing({"content": text,
+                    "files": [fname for _, fname in files]}, channel_id)
     payload = {"content": text,
                "allowed_mentions": mentions or SEND_ALLOWED_MENTIONS}
     if reply_to:
@@ -5657,6 +6037,7 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     note_item_meta(state, msg["id"], author_id=author_id,
                    channel_id=msg["channel_id"], bot=from_bot, dm=dm,
                    kind=item["kind"], owner_dm=owner_dm,
+                   owner_command=owner_command,
                    guild_id=guild_id, author=author_name,
                    # Settings requests: never from a forwarded message;
                    # attachments or a reply to someone else's message
@@ -5669,6 +6050,13 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         # before the item reaches the queue file).
         nl_mint_nonce(state, msg["id"], msg["channel_id"],
                       [f["id"] for f in fragments])
+    if owner_command:
+        # bin/discord-api.py's capability for this owner's command.
+        note_owner_item(state, msg["id"], dm=owner_dm,
+                        channel_id=msg["channel_id"], content=content,
+                        guild_id=guild_id)
+    # The capability to answer it at all, for the wake that holds it.
+    reply_nonce_mint(state, msg["id"])
     print(f"Queued {item['kind']}{' (follow-up)' if item['follow_up'] else ''}"
           f" from {msg['author'].get('username')} in "
           f"{cname}{burst_note}: {content[:80]}", flush=True)
@@ -5708,20 +6096,20 @@ def _settle(state, item, status, reason="", replied=False, detail=None):
     the trigger, and a fragment left unsettled would be requeued alone.
     replied=True also adds all those ids to replied_to (send dedup)."""
     reply_to = item.get("reply_to")
-    ids = []
-    if reply_to:
-        aliases = state.get("reply_aliases", {})
-        trigger = aliases.get(reply_to, reply_to)
-        ids = [reply_to]
-        ids += [m for m in [trigger] + [f for f, t in aliases.items()
-                                        if t == trigger]
-                if m not in ids]
-    # The queue item it answers, so a second worker's draft for the
-    # same item is suppressed too.
-    if item.get("item") and item["item"] not in ids:
-        ids.append(item["item"])
-    if not ids:
+    aliases = state.get("reply_aliases", {})
+    # The queue item it answers (its "item", else reply_to's trigger),
+    # and that item's own messages (its burst fragments) only: a
+    # reply_to under some other message is not this item's to settle
+    # (it may be another item's, still open).
+    trigger = item.get("item") or (aliases.get(reply_to, reply_to)
+                                   if reply_to else None)
+    if not trigger:
         return
+    trigger = trigger_of(state, trigger)   # an "item" set to a fragment
+    ids = [trigger] + [f for f, t in aliases.items() if t == trigger]
+    if reply_to and reply_to not in ids \
+            and trigger_of(state, reply_to) == trigger:
+        ids.append(reply_to)
     for mid in ids:
         if replied and mid not in state["replied_to"]:
             state["replied_to"].append(mid)
@@ -5767,6 +6155,8 @@ def _outbox_problem(item):
     if item.get("_retry") is not None \
             and not isinstance(item["_retry"], dict):
         return "_retry was edited (leave it alone)"
+    if item.get("_hold") is not None and not isinstance(item["_hold"], str):
+        return "_hold was edited (leave it alone)"
     if "schedule" in item:
         # Reminders and watches (muse_watches.py): shape only here.
         problems = W.shape_problems(item)
@@ -5987,6 +6377,126 @@ def bind_started(state, item, settled, remaining, rejects):
     return None, True
 
 
+def hold_released_ok(state, item):
+    """A held reply an owner chose to send (Send anyway): its hold id,
+    item and channel are the ones the monitor recorded for it."""
+    hid = item.get("_hold")
+    rec = (state.get("hold_released") or {}).get(hid) \
+        if isinstance(hid, str) else None
+    return isinstance(rec, dict) \
+        and rec.get("channel_id") == str(item.get("channel_id")) \
+        and rec.get("qid") is not None \
+        and str(rec["qid"]) == str(_answered_id(state, item))
+
+
+# An outdated worker prompt (from before reply nonces) writes outbox
+# items without reply_nonce, every one of which is refused: the bot goes
+# silent. STALE_PROMPT_HITS such refusals within STALE_PROMPT_WINDOW
+# mark it (prompt_outdated.json, for bin/doctor.py) and DM the owners
+# once a day; an outbox item that carries its reply_nonce clears it.
+MISSING_REPLY_NONCE = "no reply_nonce (an outdated worker prompt?)"
+STALE_PROMPT_FILE = os.path.join(BASE_DIR, "prompt_outdated.json")
+STALE_PROMPT_HITS = 3
+STALE_PROMPT_WINDOW = 3600
+STALE_PROMPT_DM = ("Your Muse's worker prompt is out of date, so I can't "
+                   "send replies. Ask your Muse: 'Update muse-discord by "
+                   "following UPDATING.md' (it re-renders the prompt).")
+
+
+def note_reply_nonce(state, refusal):
+    """After own_channel_problem: count refusals for a missing
+    reply_nonce (see STALE_PROMPT_HITS); a passing item clears them."""
+    now = time.time()
+    if refusal is None:
+        if state.pop("stale_prompt_hits", None) is not None \
+                or os.path.exists(STALE_PROMPT_FILE):
+            try:
+                os.remove(STALE_PROMPT_FILE)
+            except OSError:
+                pass
+        return
+    if MISSING_REPLY_NONCE not in refusal:
+        return
+    hits = [t for t in state.get("stale_prompt_hits") or []
+            if isinstance(t, (int, float)) and now - t < STALE_PROMPT_WINDOW]
+    hits.append(now)
+    state["stale_prompt_hits"] = hits[-STALE_PROMPT_HITS:]
+    if len(hits) < STALE_PROMPT_HITS:
+        return
+    if not os.path.exists(STALE_PROMPT_FILE):
+        print("WORKER PROMPT OUT OF DATE: outbox items carry no "
+              "reply_nonce; re-render the worker prompt (UPDATING.md).",
+              flush=True)
+        try:
+            atomic_write(STALE_PROMPT_FILE, {"since": now,
+                                             "refused": len(hits)})
+        except OSError:
+            pass
+    day = time.strftime("%Y-%m-%d")
+    if state.get("stale_prompt_alert") != day:
+        state["stale_prompt_alert"] = day
+        for uid in sorted(OWNER_USER_IDS):
+            dm_owner(uid, {"content": STALE_PROMPT_DM,
+                           "allowed_mentions": {"parse": []}})
+
+
+def bound_elsewhere(state, item):
+    """True for an outbox item whose own binder has checked it in full,
+    so own_channel_problem leaves it alone: a held reply an owner chose
+    to send (hold_released_ok), or an item for a heartbeat slot
+    (proactive.py, through bind_started: the slot's own nonce, its
+    targets and caps bind it; it has no reply_nonce). The one place to
+    add another such binder. A reminder or watch firing is not one:
+    watch_bind checks its place, and its reply_nonce still binds it to
+    the run that was handed it."""
+    return hold_released_ok(state, item) or bool(PRO.names_slot(item))
+
+
+def own_channel_problem(state, item, index):
+    """None when this outbox item answers an open queue item, in that
+    item's own channel (a thread, for a message in a thread), and
+    carries that item's reply_nonce (handed only to the wake holding the
+    item's lease); else why it is refused. So a run can neither post
+    anywhere else under a made-up item, nor answer, silence or schedule
+    on an item it was not handed (its id may be in the history it read).
+    An owner's command to post elsewhere goes through bin/discord-api.py
+    with the item's owner_command_nonce. A held reply an owner chose to
+    send was checked when it was first drafted (bound_elsewhere)."""
+    if bound_elsewhere(state, item):
+        return None
+    qid = _answered_id(state, item)
+    if not qid:
+        return "answers no queued message (set item to its message_id)"
+    t = trigger_of(state, qid, index["frags"])
+    cid = index["channels"].get(t)
+    if not cid:
+        return (f"{t} is not an open queue item (answered already, or "
+                f"never queued)")
+    if str(item.get("channel_id")) != cid:
+        return f"channel_id is not the channel of {t}"
+    # It replies (and reacts: reactions go on reply_to) under its own
+    # message or one of its own burst fragments, never under another
+    # open item in the channel.
+    rt = item.get("reply_to")
+    if rt and trigger_of(state, rt, index["frags"]) != t:
+        return f"reply_to is not {t} or one of its fragments"
+    want = ((state.get("reply_nonces") or {}).get(t) or {}).get("nonce")
+    if not want:
+        return f"{t}: no live reply_nonce yet (its next wake gets one)"
+    got = item.get(REPLY_NONCE_FIELD)
+    if got is None:
+        if t not in (_ITEM_NONCES_WRITTEN["body"] or {}):
+            # Never written for the hook: no wake could have had it.
+            return f"{t}: its reply_nonce was never written (see the log)"
+        return (f"{t}: {MISSING_REPLY_NONCE} (copy the item's "
+                f"{REPLY_NONCE_FIELD} from the wake payload)")
+    if not isinstance(got, str) or not hmac.compare_digest(
+            str(want).encode(), got.encode("utf-8", "replace")):
+        return (f"{t}: bad reply_nonce (missing or wrong: copy the item's "
+                f"{REPLY_NONCE_FIELD} from the wake payload)")
+    return None
+
+
 def process_outbox(state):
     """Send replies drafted by the worker, with output guardrails + dedup.
 
@@ -6050,6 +6560,17 @@ def process_outbox(state):
                   f": {refused}; the owner DM stays open (set aside in "
                   f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
             rejects.append((redact_nonces(item), refused))
+            continue
+        # Then: it answers an open queue item it was handed (its
+        # reply_nonce), in that item's channel; a fire's answer too.
+        stray = own_channel_problem(state, item, index)
+        if not bound_elsewhere(state, item):
+            note_reply_nonce(state, stray)
+        if stray:
+            print(f"Refused outbox item for {item.get('channel_name') or '?'}"
+                  f": {stray} (set aside in "
+                  f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
+            rejects.append((redact_nonces(item), stray))
             continue
         reply_to = item.get("reply_to")
         qid = _answered_id(state, item)
@@ -6231,8 +6752,6 @@ def process_outbox(state):
                         detail=sched[2])
             else:
                 _settle(state, item, "replied", replied=True)
-            if item.get("_hold"):
-                state.get("hold_released", {}).pop(item["_hold"], None)
             meta = state.get("item_meta", {}).get(qid) if qid else None
             if parts and meta and not meta.get("bot") \
                     and not meta.get("dm") \
@@ -6248,6 +6767,12 @@ def process_outbox(state):
                              time.time())
         except Exception as e:
             code = getattr(e, "code", None)
+            if isinstance(e, SecretBlocked):
+                # It carried a secret (guard_outgoing logged it and told
+                # the owners): never sent, never retried.
+                _settle(state, item, "skipped", str(e))
+                settled.append(item)
+                continue
             if code == 403:
                 # Permanent permission failure (the bot cannot post in
                 # that channel): drop it, don't retry forever.
@@ -6279,6 +6804,12 @@ def process_outbox(state):
             remaining.append(item)
 
     _OUTBOX_CURRENT["key"] = None
+    # A released hold is used up however its item settled (sent, 403,
+    # a blocked secret, given up).
+    for item in settled:
+        if isinstance(item.get("_hold"), str):
+            (state.get("hold_released") or {}).pop(item["_hold"], None)
+
     # The queue items the settled replies answer. Matched on the outbox
     # item's "item" first; an older worker's item without it matches on
     # reply_to, its burst trigger, or a burst fragment it replied under.
@@ -6294,6 +6825,11 @@ def process_outbox(state):
     nonces = state.get("nl_nonces") or {}
     for qid in done_ids & set(nonces):
         del nonces[qid]   # answered: its capability is spent
+    for qid in done_ids & set(state.get("owner_items") or {}):
+        del state["owner_items"][qid]
+    for qid in done_ids & set(state.get("reply_nonces") or {}):
+        del state["reply_nonces"][qid]
+    reply_nonces_write(state)
     nl_write_nonces(state)
     web = state.get("web_nonces") or {}
     for qid in done_ids & set(web):
@@ -6520,27 +7056,20 @@ def watch_can_set(uid, from_bot, here, matches):
         return False
 
 
-def watch_can_web(uid, from_bot, here, matches):
-    """abilities.web_watches allows uid here (owners always; bots never;
-    default: owners only)."""
-    if from_bot:
-        return False
-    if str(uid) in OWNER_USER_IDS:
-        return True
-    try:
-        return bool(matches(here["abilities.web_watches"]))
-    except Exception:
-        return False
+def watch_can_web(uid, from_bot, here=None, matches=None):
+    """Web watches are the owners' only (no setting: each check is a turn
+    of the owner's Muse reading the web); never a bot."""
+    return not from_bot and str(uid) in OWNER_USER_IDS
 
 
-# Web watch capability. Anyone's message can share a wake with other
-# people's, so a fooled worker could put a stranger's condition on the
-# item of someone who may set web watches (an owner in a server). Each
-# such item (not an owner's DM: its owner_dm_nonce does this already)
-# gets a random web_nonce, kept in state and web_nonces.json (mode 600,
-# read by the wake hook only), which the hook hands only to a wake that
-# holds nothing but that item; a schedule action adding a web watch must
-# echo it. Spent when the item settles.
+# Web watch capability. Web watches are the owners' only, and a fooled
+# worker could put a stranger's condition on an owner's item (an owner's
+# message in a server shares a channel, and its history, with everyone).
+# Each owner's server item (an owner's DM: its owner_dm_nonce does this
+# already) gets a random web_nonce, kept in state and web_nonces.json
+# (mode 600, read by the wake hook only), which the hook hands only to a
+# wake that holds nothing but that item; a schedule action adding a web
+# watch must echo it. Spent when the item settles.
 WEB_NONCES_FILE = os.path.join(BASE_DIR, "web_nonces.json")
 _WEB_NONCES_WRITTEN = {"body": None, "path": None}
 
@@ -6599,6 +7128,7 @@ def watch_web_nonce_upkeep(state):
     for q in queue:
         if not isinstance(q, dict) or q.get("kind") not in ("mention", "dm") \
                 or not (q.get("watches") or {}).get("can_web") \
+                or str(q.get("author_id")) not in OWNER_USER_IDS \
                 or _queued_owner_dm(state, q):
             continue
         mid = str(q.get("message_id"))
@@ -6847,6 +7377,7 @@ def watch_enqueue(state, q):
     note_queued(state, fid)
     if owner_dm and fid not in (state.get("nl_nonces") or {}):
         nl_mint_nonce(state, fid, q["channel_id"])
+    reply_nonce_mint(state, fid)
     queue_edit(add=[q])
     items = (q.get("reminder") or {}).get("items") or []
     print(f"Queued a reminder for {q.get('author')} in "

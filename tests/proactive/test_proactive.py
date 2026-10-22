@@ -77,6 +77,7 @@ class Base(unittest.TestCase):
         for cid in (CH, CH2, CH_G2):
             self.talk(cid, U2, age=HOUR)
         self.out = ""
+        self._rn = {}
 
     # -- helpers -------------------------------------------------------------
     def talk(self, cid, uid, age=0.0, bot=False):
@@ -124,6 +125,20 @@ class Base(unittest.TestCase):
                 msg, "x", self.st, q, dm=dm, guild_id=guild))
         self.m.queue_edit(add=q)
         return msg
+
+    def rn(self, mid):
+        """mid's reply_nonce (#48), remembered after it is spent."""
+        n = ((self.st.get("reply_nonces") or {}).get(mid) or {}).get("nonce")
+        if n:
+            self._rn[mid] = n
+        return self._rn.get(mid)
+
+    def reply(self, msg, **kw):
+        it = {"item": msg["id"], "channel_id": msg["channel_id"],
+              "reply_to": msg["id"], "text": "Got it.",
+              "reply_nonce": self.rn(msg["id"])}
+        it.update(kw)
+        return it
 
     def targets(self, slot):
         return {t["channel_id"] for t in slot["proactive"]["targets"]}
@@ -397,6 +412,30 @@ class Posting(Base):
         slot = self.next_slot("private", 0)
         self.assertEqual(self.targets(slot), {OWNER_DM}, self.out)
 
+    def test_slot_needs_no_reply_nonce_and_gets_none(self):
+        """#48: a slot is bound by its own nonce (bound_elsewhere), never
+        listed for a reply_nonce, so the hook never waits for one or
+        re-wakes it after a post."""
+        with quiet():
+            self.m.owner_dm_upkeep(self.st, force=True)
+        self.assertNotIn(self.slot["message_id"],
+                         self.st.get("reply_nonces") or {})
+        self.assertTrue(self.m.bound_elsewhere(
+            self.st, self.post(self.slot, DM_U1)))
+        self.outbox(self.post(self.slot, DM_U1))
+        self.assertEqual(len(self.sends(DM_U1)), 1, self.out)
+
+    def test_secret_in_a_post_spends_the_slot(self):
+        """The send guard blocks it: nothing sent, the slot used up, no
+        retry, nothing counted toward the caps."""
+        self.outbox(self.post(self.slot, DM_U1, text="code " + self.nonce()))
+        self.assertEqual(self.sends(DM_U1), [], self.out)
+        with open(self.m.OUTBOX_FILE) as f:
+            self.assertEqual(json.load(f), [])
+        self.assertEqual(self.m.PRO.data()["sent"], [])
+        self.assertNotIn(self.slot["message_id"],
+                         [q["message_id"] for q in self.m.load_queue()])
+
     def test_slot_cannot_touch_anything_else(self):
         """The slot's item may not reply under, react to, or act on a
         message, nor carry a settings or opt-out action."""
@@ -463,12 +502,6 @@ class Eligibility(Base):
 
 
 class OptOut(Base):
-    def reply(self, msg, **kw):
-        it = {"item": msg["id"], "channel_id": msg["channel_id"],
-              "reply_to": msg["id"], "text": "Got it."}
-        it.update(kw)
-        return it
-
     def test_opt_out_honoured_and_only_by_the_person(self):
         self.dmed(U1, DM_U1)
         # U2 asks in a server to stop: only U2 is opted out, whatever
@@ -594,8 +627,7 @@ class Robustness(Base):
         self.m.PRO.data()["slot"] = {"nonce": "x" * 32}
         m = self.queue_msg(gmsg(U2, "<@bot> hi", mention=True), dm=False,
                            guild=G1)
-        self.outbox({"item": m["id"], "channel_id": CH, "reply_to": m["id"],
-                     "text": "hey"})
+        self.outbox(self.reply(m, text="hey"))
         self.assertEqual(len(self.sends(CH)), 1, self.out)
 
     def test_orphan_slot_item_leaves_the_queue(self):
@@ -635,20 +667,29 @@ class Hook(unittest.TestCase):
             return json.loads(lines[1])
 
         slot = {"message_id": "7", "kind": "proactive", "channel_id": None,
-                "proactive": {"targets": []}}
+                "queued_at": time.time(), "proactive": {"targets": []}}
+        command = {"message_id": "6", "kind": "mention", "channel_id": "9",
+                   "owner_command": True, "author_id": "1",
+                   "settings": {"where": "server", "speaker": "owner"}}
         mention = {"message_id": "5", "kind": "mention", "channel_id": "9",
                    "settings": {"where": "server", "speaker": "member"}}
         owner = {"message_id": "1", "kind": "dm", "channel_id": "8",
                  "settings": {"where": "dm", "speaker": "owner"}}
         write("owner_dm_nonces.json", {"1": odm})
         write("proactive_nonce.json", {"7": nonce})
-        write("reply_queue.json", [mention, slot, owner])
+        # #48: reply nonces for the rest (never for a slot, which must not
+        # wait for one), and an owner command, which wakes alone too.
+        write("item_nonces.json", {"5": "c" * 32, "1": "d" * 32,
+                                   "6": "e" * 32})
+        write("owner_items.json", {"6": {"nonce": "f" * 32}})
+        write("reply_queue.json", [mention, command, slot, owner])
         got = [(i["message_id"], i.get("owner_dm_nonce"))
                for i in wake()["items"]]
         self.assertEqual(got, [("1", odm)])          # the owner's DM first
         got = [(i["message_id"], i.get("owner_dm_nonce"), i.get("proactive"))
                for i in wake()["items"]]
         self.assertEqual(got, [("7", nonce, {"targets": []})])   # then alone
+        self.assertEqual([i["message_id"] for i in wake()["items"]], ["6"])
         p = wake()
         self.assertEqual([i["message_id"] for i in p["items"]], ["5"])
         self.assertNotIn(nonce, json.dumps(p))
@@ -667,6 +708,11 @@ class Hook(unittest.TestCase):
         write("reply_queue.json", [slot])
         write("reply_outbox.json", [{"item": "7", "silent": True}])
         self.assertEqual([i["message_id"] for i in wake()["items"]], ["7"])
+        # Its real answer (the slot nonce, no reply_nonce) does.
+        os.remove(env["HOOK_STATE"])
+        write("reply_outbox.json", [{"item": "7", "silent": True,
+                                     "owner_dm_nonce": nonce}])
+        self.assertIsNone(wake())
 
 
 if __name__ == "__main__":

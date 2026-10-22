@@ -14,6 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "_lib"))
+from common import signed  # noqa: E402
 import monitor_harness as H  # noqa: E402
 from monitor_harness import (BOT, OWNER, G1, msg, chan, sf,  # noqa: E402
                              HTTPErr)
@@ -374,10 +375,14 @@ class SendDeletedReplyTarget(unittest.TestCase):
         # A server channel the bot reads (the owner-DM gate looks up any
         # channel it cannot place).
         mod.CHANNELS[cid] = {"name": "general", "guild_id": sf()}
+        # The monitor queued rid there (an outbox item answers an open
+        # item, with its reply_nonce).
+        mod.queue_edit(add=[{"message_id": rid, "channel_id": cid}])
         with open(mod.OUTBOX_FILE, "w") as f:
-            json.dump([{"item": rid, "channel_id": cid, "reply_to": rid,
-                        "text": "hello", "reactions": ["\U0001f44d"],
-                        "author": "u", "channel_name": "general"}], f)
+            json.dump([signed(mod, st, {
+                "item": rid, "channel_id": cid, "reply_to": rid,
+                "text": "hello", "reactions": ["\U0001f44d"],
+                "author": "u", "channel_name": "general"})], f)
         reacts = []
 
         def gone(req, timeout=None):

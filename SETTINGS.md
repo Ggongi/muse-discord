@@ -104,7 +104,6 @@ What the owner says, and the key and values to use:
 | Status line, update notices (`defaults`) | `presence.status`, `updates.notify` | text up to 128; on/off |
 | Anonymous usage stats (`defaults`; README, Privacy and usage stats) | `telemetry.usage_stats` | on/off |
 | Who can set reminders and watches | `abilities.reminders` | `everyone`, `owners`, or ids / `role:<id>` |
-| Who can set web watches | `abilities.web_watches` | `owners`, `everyone`, or ids / `role:<id>` |
 | Reaching out on its own (off by default): check-ins with the owner and people who DMed it first (`dms`), quiet channels (a server or channel; `defaults` = all servers) | `proactive.enabled` | on/off |
 | How often it thinks of reaching out (`defaults`) | `proactive.frequency` | `rarely` (1-2 a day), `sometimes` (4-6), `often` (about hourly) |
 | Unprompted messages a person a day / a week, a channel a day (`defaults`) | `proactive.per_person_per_day`, `proactive.per_person_per_week`, `proactive.per_channel_per_day` | 0-5, 0-20, 0-5 |

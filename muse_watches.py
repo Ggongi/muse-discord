@@ -80,9 +80,9 @@ TZ_MAX_USERS = 5000
 # Web watches.
 WEB_EVERY_MIN = 1800            # checked at most every 30 minutes
 WEB_EVERY_MAX = 7 * 86400
-WEB_PLACE_PER_DAY = 48          # checks a day for non-owners, per place
-WEB_TOTAL_PER_DAY = 500         # checks a day in all (owners' too): a
-                                # safety budget, checked when issuing
+WEB_TOTAL_PER_DAY = 500         # checks a day in all: a safety budget,
+                                # checked when issuing (web watches are
+                                # the owners' only)
 WEB_CHECK_SECS = 15 * 60        # a check's nonce lives this long
 WEB_MAX_FAILS = 5               # unknown / no report in a row: it ends
 WEB_REPEAT_SECS = 6 * 3600      # "every time": quiet this long after one
@@ -124,11 +124,8 @@ LINES = {
     "channel": "I can only set reminders and watches where you asked, so "
                "nothing changed.",
     "unknown": "I couldn't set that, so nothing changed.",
-    "web-not-allowed": "Only my owners can set web watches here, so "
-                       "nothing changed.",
-    "web-budget": "I can't set that: checking it that often would go "
-                  "past how many web checks I do a day. Nothing changed; "
-                  "a longer gap between checks may fit.",
+    "web-not-allowed": "Only my owners can set web watches, so nothing "
+                       "changed.",
 }
 # Ledger reasons: monitor.ledger_code maps the prefixes to codes.
 REASON_CAP = "reminders: limit reached"          # -> watch-cap
@@ -449,12 +446,6 @@ def active(data, now=None):
             and (r.get("kind") == "remind" or r.get("until", 0) > now)}
 
 
-def place_key(rec):
-    """Where a web watch's checks count (WEB_PLACE_PER_DAY): its server,
-    or "dm"."""
-    return "dm" if rec.get("dm") else f"server:{rec.get('guild_id')}"
-
-
 # ---------------------------------------------------------------------------
 # Deciding a schedule action (all or nothing)
 # ---------------------------------------------------------------------------
@@ -498,7 +489,8 @@ def decide(data, req, changes, now=None):
     adds = [c for c in changes if c.get("op") == "add"]
     if not req.can_set and adds:
         raise Refused(LINES["not-allowed"], REASON_NOT_ALLOWED)
-    if not req.can_web and any(c.get("check") == "web" for c in adds):
+    if not (req.can_web and req.owner) \
+            and any(c.get("check") == "web" for c in adds):
         raise Refused(LINES["web-not-allowed"], REASON_NOT_ALLOWED,
                       {"kind": "watch-web"})
     items = dict(data["items"])
@@ -555,8 +547,6 @@ def decide(data, req, changes, now=None):
                         "every": c["every"], "repeat": bool(c.get("repeat")),
                         "owner": req.owner, "next_check": now,
                         "check": None, "fails": 0, "checks": 0})
-            if not req.owner:
-                _web_budget_fits(live, rec)
         else:
             m = c["match"]
             until = parse_utc(c["until"]) if "until" in c \
@@ -773,28 +763,6 @@ def note_fired(data, fid, now=None):
 # The checker first screens each condition: one that is more than a
 # plain condition (instructions, "also message...", a URL to post to) is
 # reported "refused", which ends the watch (the requester is told once).
-def _per_day(rec):
-    return 86400.0 / max(WEB_EVERY_MIN, rec.get("every") or WEB_EVERY_MIN)
-
-
-def _web_budget_fits(live, rec):
-    """A non-owner's new web watch must fit the daily check budgets as
-    planned (every active web watch checked on its schedule): non-owners'
-    per place, and the total. (Owners' are never refused; the total
-    still paces their checks, in web_issue.)"""
-    web = [r for r in live.values() if r.get("kind") == "watch-web"]
-    total = sum(_per_day(r) for r in web) + _per_day(rec)
-    here = place_key(rec)
-    place = sum(_per_day(r) for r in web if not r.get("owner")
-                and place_key(r) == here) + _per_day(rec)
-    if total > WEB_TOTAL_PER_DAY or (not rec.get("owner")
-                                     and place > WEB_PLACE_PER_DAY):
-        raise Refused(LINES["web-budget"], REASON_CAP,
-                      {"kind": "watch-web", "per": "budget",
-                       "cap": WEB_TOTAL_PER_DAY if total > WEB_TOTAL_PER_DAY
-                       else WEB_PLACE_PER_DAY})
-
-
 def _utc_day(now):
     return datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d")
 
@@ -814,7 +782,7 @@ def web_issue(data, now=None):
     used = data.setdefault("web", {})
     if used.get("day") != day:
         used.clear()
-        used.update({"day": day, "total": 0, "places": {}})
+        used.update({"day": day, "total": 0})
     gave_up = []
     for i, r in list(data["items"].items()):
         if not isinstance(r, dict) or r.get("kind") != "watch-web" \
@@ -829,19 +797,19 @@ def web_issue(data, now=None):
                 continue
             _backoff(r, now)
             continue
+        if not r.get("owner"):
+            # Set before web watches were the owners' only: it ends (the
+            # requester is told, as for one that gave up).
+            gave_up.append((i, data["items"].pop(i)))
+            continue
         if chk or r.get("next_check", 0) > now:
             continue
-        here = place_key(r)
-        if used["total"] >= WEB_TOTAL_PER_DAY or (
-                not r.get("owner")
-                and used["places"].get(here, 0) >= WEB_PLACE_PER_DAY):
+        if used["total"] >= WEB_TOTAL_PER_DAY:
             tomorrow = datetime.strptime(day, "%Y-%m-%d").replace(
                 tzinfo=timezone.utc).timestamp() + 86400
             r["next_check"] = tomorrow + secrets.randbelow(600)
             continue
         used["total"] += 1
-        if not r.get("owner"):
-            used["places"][here] = used["places"].get(here, 0) + 1
         r["check"] = {"nonce": secrets.token_hex(16), "issued": now,
                       "expires": now + WEB_CHECK_SECS}
         r["checks"] = r.get("checks", 0) + 1

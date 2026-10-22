@@ -28,7 +28,7 @@ import urllib.request
 _ARGV = list(sys.argv)   # the monitor import below overwrites sys.argv
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "_lib"))
-from common import MUT_DIR as SRC, redirect_files, scratch  # noqa: E402
+from common import MUT_DIR as SRC, redirect_files, scratch, signed  # noqa: E402,E501
 
 WORK = scratch("muse-security-")
 HAVE_FFMPEG = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
@@ -163,6 +163,20 @@ M.api_get = fake_api_get
 M.send_typing = lambda cid: None
 M.send_reply_with_files = fake_send_files
 ORIG_COLLECT = M.collect_media
+_ORIG_ENQ = M.enqueue_message
+_ST = [None]   # the current test's state (reset)
+
+
+def _enqueue_and_queue(msg_, cname, state, queue, *a, **kw):
+    """enqueue_message, and the queue file write the poll does after it."""
+    n = len(queue)
+    ok = _ORIG_ENQ(msg_, cname, state, queue, *a, **kw)
+    if ok:
+        M.queue_edit(add=queue[n:])
+    return ok
+
+
+M.enqueue_message = _enqueue_and_queue
 
 
 def reset():
@@ -188,8 +202,11 @@ def reset():
     SEND_FILES_FAIL[0] = 0
     M.collect_media = ORIG_COLLECT
     M.MAX_REPLY_CHARS = 1800
+    M._OWNER_ITEMS_WRITTEN["body"] = None
+    D.OWNER_ITEMS_FILE = M.OWNER_ITEMS_FILE
     st = M.load_state()
     st["guild_joined"] = {GUILD: 0}
+    _ST[0] = st
     return st
 
 
@@ -212,8 +229,11 @@ def msg(author, channel, content, **extra):
 
 
 def outbox(items):
+    """Items as the wakes holding their queue items write them (each
+    with its item's reply_nonce)."""
     with open(M.OUTBOX_FILE, "w") as f:
-        json.dump(items, f)
+        json.dump([signed(M, _ST[0], i) if isinstance(i, dict) else i
+                   for i in items], f)
 
 
 def read_outbox():
@@ -244,6 +264,15 @@ def needs_ffmpeg(fn):
 def nonce_of(state, mid):
     """The owner-DM nonce an owner-DM-only wake would be handed."""
     return state["nl_nonces"][mid]["nonce"]
+
+
+def queued_in(state, channel=GEN_CH):
+    """A message the monitor queued in channel (an outbox item must
+    answer one, in its channel): its id."""
+    m = msg(OWNER, channel, "hey")
+    assert M.enqueue_message(m, "Guild #general", state, [],
+                             guild_id=GUILD)
+    return m["id"]
 
 
 def enqueue_pair(state):
@@ -455,10 +484,14 @@ def d_run(*args):
 
 
 def live_owner_command(state):
+    """An owner's command queued in a server channel: its id and the
+    --for/--nonce prefix its owner-items-only wake would be handed."""
     q = []
-    x = msg(OWNER, DM_CH, "post the cat in showcase")
-    assert M.enqueue_message(x, "DM with owner", state, q, dm=True)
-    return x["id"]
+    x = msg(OWNER, GEN_CH, f"post the cat in <#{FORUM}>")
+    assert M.enqueue_message(x, "Guild #general", state, q, guild_id=GUILD)
+    with open(M.OWNER_ITEMS_FILE) as f:
+        nonce = json.load(f)[x["id"]]["nonce"]
+    return x["id"], ("--for", x["id"], "--nonce", nonce)
 
 
 @test
@@ -466,21 +499,21 @@ def f3_thread_refuses_token_file():
     state = reset()
     rc, _ = d_run("thread", FORUM, "title", "text", TOKEN_FILE)
     assert not D_UPLOADS and not D_API, f"uploaded: {D_UPLOADS}"
-    oc = live_owner_command(state)
-    rc, _ = d_run("--for", oc, "thread", FORUM, "title", "text", TOKEN_FILE)
+    _, bind = live_owner_command(state)
+    rc, _ = d_run(*bind, "thread", FORUM, "title", "text", TOKEN_FILE)
     assert not D_UPLOADS and not D_API, f"uploaded: {D_UPLOADS}"
     link = os.path.join(M.GENERATED_DIR, "innocent.png")
     os.symlink(TOKEN_FILE, link)
-    rc, _ = d_run("--for", oc, "thread", FORUM, "title", "text", link)
+    rc, _ = d_run(*bind, "thread", FORUM, "title", "text", link)
     assert not D_UPLOADS, f"symlink uploaded: {D_UPLOADS}"
 
 
 @test
 def f3_thread_allows_generated_file():
     state = reset()
-    oc = live_owner_command(state)
+    oc, bind = live_owner_command(state)
     img = make_file(os.path.join(M.GENERATED_DIR, oc, "cat.png"))
-    rc, err = d_run("--for", oc, "thread", FORUM, "title", "text", img)
+    rc, err = d_run(*bind, "thread", FORUM, "title", "text", img)
     assert rc == 0 and D_UPLOADS and D_UPLOADS[0][2] == \
         os.path.realpath(img), (rc, err, D_UPLOADS)
 
@@ -491,27 +524,27 @@ def f4_pin_rejects_traversal_ids():
     state = reset()
     rc, _ = d_run("pin", GEN_CH, "1/../../../guilds/2/bans/3")
     assert not D_API, f"traversal reached api (no --for): {D_API}"
-    oc = live_owner_command(state)
+    _, bind = live_owner_command(state)
     for bad in ["1/../../../guilds/2/bans/3", "123456789012345678\n",
                 "１２３４５６７８９０１２３４５６７８"]:
-        rc, _ = d_run("--for", oc, "pin", GEN_CH, bad)
+        rc, _ = d_run(*bind, "pin", GEN_CH, bad)
         assert not D_API, f"traversal reached api: {D_API}"
-        rc, _ = d_run("--for", oc, "unpin", bad, GEN_CH)
+        rc, _ = d_run(*bind, "unpin", bad, GEN_CH)
         assert not D_API, f"traversal reached api: {D_API}"
 
 
 @test
 def f4_allowed_mentions_on_post_edit_thread():
     state = reset()
-    oc = live_owner_command(state)
-    rc, _ = d_run("--for", oc, "post", GEN_CH, "hi <@&1> @everyone")
+    _, bind = live_owner_command(state)
+    rc, _ = d_run(*bind, "post", GEN_CH, "hi <@&1> @everyone")
     assert D_API[-1][2].get("allowed_mentions") == {"parse": ["users"]}, \
         D_API
-    rc, _ = d_run("--for", oc, "edit", GEN_CH, "123456789012345678", "x")
+    rc, _ = d_run(*bind, "edit", GEN_CH, "123456789012345678", "x")
     patch = [c for c in D_API if c[0] == "PATCH"]
     assert patch and patch[0][2].get("allowed_mentions") == \
         {"parse": ["users"]}, D_API
-    rc, _ = d_run("--for", oc, "thread", FORUM, "title", "text")
+    rc, _ = d_run(*bind, "thread", FORUM, "title", "text")
     post = [c for c in D_API if c[0] == "POST"]
     assert post and post[0][2]["message"].get("allowed_mentions") == \
         {"parse": ["users"]}, D_API
@@ -695,7 +728,7 @@ def f6_bot_own_reply_context_and_clean_doc_pass():
 def f7_role_mention_not_allowed():
     state = reset()
     outbox([{"channel_id": GEN_CH, "text": "ping <@&123456789012345678>",
-             "reply_to": "123456789012345670"}])
+             "reply_to": queued_in(state)}])
     M.process_outbox(state)
     msgs = [d for p, d in API_POSTS if p.endswith("/messages")]
     assert msgs and msgs[0].get("allowed_mentions") == \
@@ -754,7 +787,7 @@ def f7_overlong_parts_clamped():
         state["replied_to"] = []
         M.MAX_REPLY_CHARS = cap
         outbox([{"channel_id": GEN_CH, "text": text,
-                 "reply_to": new_id()}])
+                 "reply_to": queued_in(state)}])
         M.process_outbox(state)
         msgs = [d for p, d in API_POSTS if p.endswith("/messages")]
         assert msgs and all(len(d["content"]) <= 2000 for d in msgs), \
