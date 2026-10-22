@@ -110,10 +110,6 @@ servers:
     privacy:
       suspicious: answer
 """
-PLAIN = f"""version: 1
-owners: ["{OWNER}"]
-token_from: env:MUSE_TEST_TOKEN
-"""
 
 
 HOSTILE_MD = ("**b** __u__ @everyone @here <@&55500000000000000001> "

@@ -211,12 +211,9 @@ What the settings scenarios cannot cover on Discord:
   offline suites in `tests/` cover it: `tests/settingsplumb`
   (registration, routing, the 3 s deadline, writes and undo) and
   `tests/settingsui` (every page, for owners, admins and strangers,
-  crawled against Discord's limits and snapshot goldens, forged ids,
-  and the task walkthroughs click by click);
-  on Discord it is tested by hand with the checklist below. To work
-  on the pages' design without Discord, `dev/settings-preview/`
-  renders them locally from the same fixtures. What it
-  does to the bot is covered live: a scenario's `settings` step writes
+  crawled against Discord's limits, forged ids, and the task
+  walkthroughs click by click); on Discord it is tested by hand with
+  the checklist below. What it does to the bot is covered live: a scenario's `settings` step writes
   `config.discord.yaml` through the same `muse_settings` calls (see
   "Adding a scenario").
 
