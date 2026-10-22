@@ -685,12 +685,6 @@ def validate(sc, source=None, fixtures_dir=None):
     return sc
 
 
-def labels_of(sc):
-    """The labels a scenario's send steps define, in order."""
-    return [s["send"]["label"] for s in sc["steps"]
-            if isinstance(s, dict) and "send" in s and "label" in s["send"]]
-
-
 def load_file(path, fixtures_dir=None):
     name = os.path.basename(path)
     try:
