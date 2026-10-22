@@ -1344,10 +1344,19 @@ def quarantine(msg, channel_name, matched_pattern, fragments=()):
         entry["fragments"] = [{"message_id": f["id"],
                                "content": f.get("content", "")}
                               for f in fragments]
-    q = []
-    if os.path.exists(QUARANTINE_FILE):
+    try:
         with open(QUARANTINE_FILE) as f:
             q = json.load(f)
+    except FileNotFoundError:
+        q = []
+    except (OSError, ValueError):
+        q = None
+    if not isinstance(q, list):   # kept for the owner, never emptied
+        with contextlib.suppress(OSError):
+            os.replace(QUARANTINE_FILE, QUARANTINE_FILE + ".bad")
+        print("quarantine.json was unreadable; moved to quarantine.json.bad.",
+              flush=True)
+        q = []
     q.append(entry)
     atomic_write(QUARANTINE_FILE, q[-100:])  # keep last 100
     ledger_record_many([msg["id"]] + [f["id"] for f in fragments],
@@ -4387,11 +4396,17 @@ def flush_pending(state, queue, force=False):
         if force or early or now - entry["first_seen"] >= entry.get(
                 "window", COALESCE_SECS):
             trigger = entry["trigger"]
-            ok = enqueue_message(trigger, entry["channel_name"], state,
-                                 queue, dm=entry["kind"] == "dm",
-                                 fragments=entry["fragments"],
-                                 guild_id=entry["guild_id"],
-                                 follow_up=entry["kind"] == "follow_up")
+            try:
+                ok = enqueue_message(trigger, entry["channel_name"], state,
+                                     queue, dm=entry["kind"] == "dm",
+                                     fragments=entry["fragments"],
+                                     guild_id=entry["guild_id"],
+                                     follow_up=entry["kind"] == "follow_up")
+            except Exception as e:
+                # One poison burst must not hold back every other one:
+                # it is retried (then ledgered) like a failed enqueue.
+                print(f"Enqueue error: {type(e).__name__}: {e}", flush=True)
+                ok = False
             n_frag = len(entry["fragments"])
             why = " (author stopped typing)" if early and not force else ""
             print(f"Flushed {entry['kind']} burst "
