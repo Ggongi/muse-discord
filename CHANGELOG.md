@@ -44,8 +44,7 @@ New:
 
 - Render the worker prompt again: `python3 bin/render-worker-prompt.py`
   with the options you used before. It teaches your Muse how to
-  answer a heartbeat. Until then the feature stays off in practice:
-  turning it on would wake a Muse that doesn't know what to do.
+  answer a heartbeat. Do this before you turn the feature on.
 - If your runtime registered a copy of `hooks/mention-watch.sh`, update
   the copy.
 
