@@ -1378,8 +1378,7 @@ safe_in_new_servers: false # false: all_servers ships it off
 
 Per key: `type` (`on-off`, `choice` with `values`, `number` with
 `min`/`max` and `none`, `text` with `maxlen`, `channel`, `people`,
-`phrases`, `any`), `default`, `scopes`, and optionally `steers_muse`
-(passed to the Muse, not enforced), `risky`, `discord_editable`,
+`phrases`, `any`), `default`, `scopes`, and optionally `risky`, `discord_editable`,
 `hidden`, `allow_names`, `legacy` and `description`
 (`muse_settings.load_manifests`). Every plugin also has `enabled`. A
 config key the manifest does not declare is a load error naming the
