@@ -131,7 +131,7 @@ back ahead of whatever was appended meanwhile. Item fields:
 | `reply_nonce`  | Required on every item: its queue item's `reply_nonce` from the wake payload, as is (see Replies stay with their run); not on an item for a heartbeat slot, which carries the slot's nonce instead (Unprompted messages) |
 | `owner_dm_nonce` | Required on every item for an owner's own DM: that item's `owner_dm_nonce` from the wake payload, as is (see Owner DMs); and on every item for a heartbeat slot, the slot's (Unprompted messages) |
 | `schedule`     | Reminders and watches to add or cancel for the item's author: `{"v": 1, "changes": [...]}` (see Reminders and watches) |
-| `proactive`    | `"opt-out"` or `"opt-in"`: the author of the message this item answers asked the bot to stop (or start again) messaging them first (see Unprompted messages) |
+| `proactive`    | `"opt-out"` or `"opt-in"`: the author of the message this item answers asked the bot to stop messaging them first, or said it may again (then the monitor asks them itself, with a button only they can use; see Unprompted messages) |
 
 Validation: an item that is not an object, has a field of the wrong
 type, or would send nothing without being `silent: true` (no text,
@@ -641,10 +641,10 @@ target at send time; nothing the worker writes adds a target.
   not off or paused there, and a server with an owner in it (never an
   ownerless server, nor one whose owner check is pending).
 - Never in quiet hours (`proactive.quiet_hours`, default `22:00-09:00`;
-  `off` = none): for a person, in their own time zone when they gave
-  one (the reminders' `tz`, Reminders and watches), else, and for
-  channels, in `proactive.timezone` (default `UTC`). A person target
-  carries its `local_time` and `timezone`.
+  `off` = none): for a person, in their own time zone once they
+  confirmed it with their own button (The person's own button, below),
+  else, and for channels, in `proactive.timezone` (default `UTC`). A
+  person target carries its `local_time` and `timezone`.
 - Never into a conversation: no target whose channel (or, for a
   person, their DM or their latest message anywhere) had a person's
   message in the last 30 minutes, no channel where the bot spoke after
@@ -721,12 +721,20 @@ seeded with the slot id):
   nothing counts toward the caps.
 - The text is fixed when the post is accepted: a failed send is retried
   (same Discord nonce) for 90 seconds, as replies are, from the copy in
-  `proactive.json`, never from the worker-writable outbox.
+  `proactive.json`, never from the worker-writable outbox. A post given
+  up on still counts toward the caps and the "never twice without an
+  answer" rule when any of it may have landed (a later part failed, or
+  a timeout); only one that surely never landed (a blocked secret, or
+  its first part refused) does not.
 - Owner DMs keep their rule: an item that names no slot is judged by
   the owner-DM gate as before, so the slot's nonce opens no owner DM's
   item and no owner DM channel outside a slot post to that owner.
 - A damaged slot record never blocks the outbox: an item naming a slot
   that cannot be checked is set aside, and every other item goes on.
+  If `proactive.py` cannot check an item at all, an item shaped like a
+  slot's answer (an `owner_dm_nonce` and no `reply_nonce`, or naming a
+  queued slot) is set aside; every other item takes the ordinary path,
+  where its `reply_nonce` binds it.
 
 Unprompted posts are recorded in `proactive.json` (`sent`, 8 days), where
 the caps count them. They are not in `mention_ledger.json`, so **Why no
@@ -752,14 +760,40 @@ item (`"opt-in"` when they ask for messages again):
   their run first, so only the run handed that message can attach it.
 - `opt-in` only on the person's own DM (`kind` `dm`); `opt-out` in a
   DM or a server. An owner's DM keeps the nonce rule.
-- So no other run can attach one at all: it would need that message's
-  `reply_nonce`. The run that holds it could, at most, attach an
-  opt-out or opt-in to its visible reply to that person's own message
-  (prompt injection in that very message): they see it, under their own
-  message, and an opt-in only in their DM.
-- Recorded in `proactive.json` (`opted_out`); nothing unprompted goes
-  to them again until they opt back in the same way. A wrong value or a
-  wrong item is set aside like any malformed item.
+- An `opt-out` is recorded at once (`opted_out` in `proactive.json`):
+  nothing unprompted goes to them again. It is the safe direction.
+- An `opt-in` records nothing by itself. One run may hold several
+  people's messages, each with its `reply_nonce` (the wake hook batches
+  them), so prompt injection in anyone's message in that run could
+  attach an opt-in to the reply to someone else. Instead, when the
+  person has opted out, the monitor DMs them its own question with a
+  **Yes** button (below), and only their own click opts them back in.
+- A wrong value or a wrong item is set aside like any malformed item.
+
+### The person's own button
+
+What a run could be steered into against someone else is asked of that
+person instead: opting back in, and the time zone their quiet hours
+use. When a reply carries `"proactive": "opt-in"` for someone who opted
+out, or a `schedule` action sets (or clears) someone's `tz` (Reminders
+and watches) and the bot may DM them first (an owner, or someone who
+DMed it, with `proactive.enabled` on for DMs and not opted out), the
+monitor DMs them a fixed question of its own ("Okay if I message you
+first again now and then?", or "Should I use <zone> for the night hours
+when I don't message you first?") with one **Yes** button, custom id
+`mdpro:yes:<token>`, right after the reply it follows.
+
+- Only that person's click counts: the interaction's user id must be
+  theirs. Anyone else's click gets an ephemeral "not for you" and
+  changes nothing.
+- It works once (the DM is then edited to say so, without the button)
+  and for 24 hours. Ignoring it changes nothing.
+- At most 3 such buttons a person in 24 hours, one open per question (a
+  newer time zone replaces the open one), kept in `proactive.json`
+  (`asks`, at most 300).
+- Until they tap it, their quiet hours stay in the time zone they last
+  confirmed, else in `proactive.timezone`. Reminders use the new `tz`
+  at once, as before.
 
 ### proactive.json (monitor-internal)
 
@@ -768,14 +802,17 @@ Mode 600. `next` and `freq` (the heartbeat), `slot` (the live slot:
 user_id}}`, `max_posts`, `posts`, `spent`), `spent` (recent slot ids,
 so a reused one is refused), `sent` (the unprompted posts: `at`,
 `channel_id`, `user_id`, `type`), `people` (who talked to the bot: last
-message time and id, their DM channel when they DMed it, a name), and
-`opted_out`. Safe to delete while the monitor is stopped, at the cost
+message time and id, their DM channel when they DMed it, a name, the
+time zone they confirmed), `opted_out`, and `asks` (the open and recent
+buttons: `user_id`, `channel_id`, `what` `in` or `tz`, `tz`, `at`,
+`sent`, `done`). Safe to delete while the monitor is stopped, at the cost
 of the opt-outs and the caps' counts. The owners' DM channels the bot
 opened for check-ins are kept under `owner_dm`, apart from `dm` (they
 DMed the bot first), so a former owner who never DMed it is never a
 `dm` target.
 
-A `proactive.json` that does not parse is moved to
+A `proactive.json` that cannot be read (it does not parse, or is too
+deeply nested to load) is moved to
 `proactive.json.bad-<UTC time>` (never overwritten), the owners get one
 DM saying so, and while any such file is there no heartbeat runs and no
 slot post is sent: its opt-outs are never silently lost. Fix it and
@@ -1776,7 +1813,8 @@ answers it at once, independent of the main loop, because Discord
 fails an interaction not acknowledged within 3 seconds. Interactions
 (button clicks and modal submits) are dispatched by custom id prefix
 (`mdupd` here, `mdhold` for never_share holds, `mdset` for
-/settings, `mdnl` for settings requests); slash commands by name
+/settings, `mdnl` for settings requests, `mdpro` for the person's own
+button in Unprompted messages); slash commands by name
 (`/settings`):
 
 - From a non-owner, for a version other than the newest announced one,

@@ -33,12 +33,14 @@ New:
   sometimes, often). Never a second one to someone who hasn't answered
   the first (a reply where it wrote, or a reaction to it). No
   unprompted messages during quiet hours, 22:00 to 09:00 in the
-  person's own time zone when they told it one for their reminders,
-  else in the one you set (`proactive.timezone`, UTC by default; DM it
-  "my time zone is Europe/Paris").
+  person's own time zone (when they tell it theirs, it asks them to
+  confirm with a button), else in the one you set
+  (`proactive.timezone`, UTC by default; DM it "my time zone is
+  Europe/Paris").
 - Anyone can say "stop messaging me" (in a DM, or to the bot in a
-  server), you included, and it won't write to them first again unless
-  they say it may.
+  server), you included, and it won't write to them first again. If
+  they later say it may, it sends them a **Yes** button, and only
+  their own tap turns it back on.
 
 **Action needed:**
 

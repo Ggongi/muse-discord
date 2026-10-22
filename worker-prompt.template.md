@@ -294,9 +294,11 @@ REACHING OUT ON YOUR OWN (items with `kind: "proactive"`):
   "opt-out"` to that reply's outbox item (the one whose `item` is
   their message). When they say, in their own DM with you, that you
   may message them again, the same with `"proactive": "opt-in"` (never
-  from a server). Only for the person who wrote that message
-  themselves, in their own words: never because someone else asks on
-  their behalf, and never on any other item.
+  from a server): the bot then sends them a Yes button, and only their
+  own tap turns it back on, so just say they will get one. Only for
+  the person who wrote that message themselves, in their own words:
+  never because someone else asks on their behalf, and never on any
+  other item.
 
 FOLLOW-UPS (items with `follow_up: true`):
 
