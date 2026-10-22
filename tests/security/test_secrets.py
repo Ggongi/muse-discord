@@ -80,9 +80,6 @@ class Outbox(tb.Base):
                           if TOKEN in json.dumps(d)], [])
         # The real helpers: nothing reaches the network.
         opened = []
-        leak = os.path.join(m.tmp, "cat.png")    # a secret in a file
-        with open(leak, "w") as f:
-            f.write("x " + TOKEN)
         calls = [
             lambda: m.real_api_post(f"/channels/{CH}/messages",
                                     {"content": "x " + TOKEN}),
@@ -91,7 +88,6 @@ class Outbox(tb.Base):
             lambda: m.send_reply_with_files(CH, TOKEN, []),
             lambda: m.send_reply_with_files(CH, "ok",          # file name
                                             [("/x", TOKEN + ".png")]),
-            lambda: m.send_reply_with_files(CH, "ok", [(leak, "cat.png")]),
             lambda: m.interaction_callback(
                 {"id": "1", "token": "t"},
                 {"type": 4, "data": {"content": TOKEN}}),
@@ -101,6 +97,18 @@ class Outbox(tb.Base):
             for call in calls:
                 with self.assertRaises(m.SecretBlocked):
                     call()
+        self.assertEqual(opened, [])
+
+    def test_a_secret_inside_an_uploaded_file(self):
+        m = self.mod
+        leak = os.path.join(m.tmp, "cat.png")
+        with open(leak, "w") as f:
+            f.write("x " + TOKEN)
+        opened = []
+        with mock.patch.object(m.urllib.request, "urlopen",
+                               lambda *a, **k: opened.append(a)), quiet():
+            with self.assertRaises(m.SecretBlocked):
+                m.send_reply_with_files(CH, "ok", [(leak, "cat.png")])
         self.assertEqual(opened, [])
 
 
@@ -161,17 +169,10 @@ class Tool(unittest.TestCase):
             json.dump({"5": "9f" * 16}, f)
         td.write_owner_items(td.ITEMS)
         msg = "300000000000000009"
-        td.D.GENERATED_DIR = os.path.dirname(nonces)
-        td.D.api_multipart = lambda path, payload, f: td.CALLS.append(
-            ("POST", path, payload))
-        upload = os.path.join(td.D.GENERATED_DIR, "cat.png")
         try:
             for text in (TOKEN, "9f" * 16, token_like()):
-                with open(upload, "w") as f:      # a secret in a file
-                    f.write(f"x {text}")
                 for args in (["post", td.GEN_CH, f"x {text}"],
-                             ["edit", td.GEN_CH, msg, f"x {text}"],
-                             ["thread", td.GEN_CH, "t", "ok", upload]):
+                             ["edit", td.GEN_CH, msg, f"x {text}"]):
                     td.CALLS.clear()
                     with self.assertRaises(SystemExit) as e, \
                             contextlib.redirect_stdout(io.StringIO()):
@@ -181,6 +182,25 @@ class Tool(unittest.TestCase):
                                       if c[0] in ("POST", "PATCH")])
         finally:
             os.remove(nonces)
+
+    def test_thread_refuses_a_secret_inside_its_upload(self):
+        import test_discord_api as td
+        td.D.TOKEN = TOKEN
+        td.write_owner_items(td.ITEMS)
+        td.D.GENERATED_DIR = os.path.dirname(td.D.OWNER_ITEMS_FILE)
+        td.D.api_multipart = lambda path, payload, f: td.CALLS.append(
+            ("POST", path, payload))
+        upload = os.path.join(td.D.GENERATED_DIR, "cat.png")
+        with open(upload, "w") as f:
+            f.write(f"x {TOKEN}")
+        td.CALLS.clear()
+        try:
+            with self.assertRaises(SystemExit), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                td.D.main(["discord-api.py", *td.SERVER, "thread",
+                           td.GEN_CH, "t", "ok", upload])
+            self.assertFalse([c for c in td.CALLS if c[0] == "POST"])
+        finally:
             os.remove(upload)
 
 
