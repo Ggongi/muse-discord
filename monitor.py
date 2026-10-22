@@ -2660,7 +2660,7 @@ _ADMIN_LOCK = threading.Lock()
 
 class SettingsCtx:
     """What settings_ui.handle gets: safe to use from the interaction
-    thread. write/reset/undo raise muse_settings.SettingsError for an
+    thread. write/undo raise muse_settings.SettingsError for an
     invalid key, value or scope."""
 
     def __init__(self):
@@ -2684,13 +2684,10 @@ class SettingsCtx:
                     _DIRECTORY["channels"].get(str(guild_id)) or []]
 
     def write(self, key, value, by):
+        """One owner's change (no admin rules: never for anyone else)."""
         with _OVERLAY_LOCK:
-            MS.set_value(_SETTINGS.config_path, key, value, by, PLUGINS_DIR)
-        settings()
-
-    def reset(self, key, by):
-        with _OVERLAY_LOCK:
-            MS.reset(_SETTINGS.config_path, key, by, PLUGINS_DIR)
+            MS.set_value(_SETTINGS.config_path, key, value, by, PLUGINS_DIR,
+                         role="owner")
         settings()
 
     def undo(self, scope_prefix, by, **kw):
