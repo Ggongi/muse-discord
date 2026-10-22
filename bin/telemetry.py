@@ -29,7 +29,8 @@ import sys
 from datetime import datetime, timezone
 
 PKG = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, PKG)
+sys.path[:0] = [PKG, os.path.join(PKG, "bin")]
+import setup_common  # noqa: E402,F401  (re-runs under .venv if needed)
 import muse_settings as MS  # noqa: E402
 import telemetry as T  # noqa: E402
 
