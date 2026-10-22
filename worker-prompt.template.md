@@ -157,8 +157,8 @@ place; follow it like the persona):
 - `places` (owner DMs only): servers and channels with ids (SETTINGS
   REQUESTS).
 - `bot_exchange` (bot items): `{count, limit}`, your replies in a row
-  to bots here since a person spoke, and the cap (`null`: none). The
-  monitor stops at the cap: wind down before it.
+  to bots here since a person spoke (this one included), and the cap
+  (`null`: none). The monitor stops at the cap: wind down before it.
 - The monitor holds any reply containing a phrase the owner never
   wants shared. That is a backstop, not a reason to get close.
 
