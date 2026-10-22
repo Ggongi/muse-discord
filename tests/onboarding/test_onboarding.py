@@ -391,7 +391,7 @@ class OwnerlessServer(unittest.TestCase):
             again.sync_guilds(st_again, {}, {})
         self.assertIsNone(again.trigger_kind(stranger, G2))
         # The join DM says so, and answering in G1 is untouched.
-        self.assertIn("none of you is a member", mod.api.dm_posts()[0][
+        self.assertIn("none of you is in", mod.api.dm_posts()[0][
             "content"])
         self.assertEqual(mod.trigger_kind(gmsg(U1, mention=True), G1),
                          "mention")

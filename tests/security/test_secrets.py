@@ -35,7 +35,7 @@ TOKEN = token_like("111000000000000099")
 def alerts(mod):
     """The owner DMs about a blocked send."""
     return [d for p, d in mod.api.posts
-            if p.startswith("/channels/4") and "I blocked a reply"
+            if p.startswith("/channels/4") and "didn't send a reply"
             in (d.get("content") or "")]
 
 

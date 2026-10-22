@@ -1070,10 +1070,9 @@ def _secret_alert(where):
         return
     _SECRET_ALERT.update(day=day, busy=True)
     try:
-        notify_owners("I blocked a reply that looked like it contained a "
-                      "secret (a token or one of my private codes), so "
-                      "that reply wasn't sent. monitor.log says where. I "
-                      "tell you about this at most once a day.")
+        notify_owners("I didn't send a reply because it looked like it "
+                      "held a secret (my bot token or one of my private "
+                      "codes). I tell you about this at most once a day.")
     finally:
         _SECRET_ALERT["busy"] = False
 
@@ -1851,20 +1850,19 @@ def _join_summary(gid, ginfo, channels):
         shown += f", and {len(visible) - 40} more"
     st = settings()
     res = st.resolve(MS.Scope.server(gid, name))
+    seen = f"Channels I can see ({len(visible)}): {shown or 'none'}\n"
     if owners_absent(gid) and OWNER_IN_GUILD.get(gid) is None:
-        return (f"I was added to **{name}** (server ID {gid}). I couldn't "
-                f"check yet whether any of you is a member there, so I "
-                f"answer nobody there for now.\n"
-                f"Channels I can see ({len(visible)}): {shown or 'none'}\n"
-                f"If you want me to talk there, press **Configure** and "
-                f"choose When it answers.")
+        return (f"I was added to **{name}**. I couldn't check yet whether "
+                f"any of you is in that server, so I'm not answering "
+                f"anyone there for now.\n{seen}"
+                f"To let me talk there, press **Configure** and pick When "
+                f"it answers.")
     if owners_absent(gid):
-        return (f"I was added to **{name}** (server ID {gid}), where none "
-                f"of you is a member, so I answer nobody there.\n"
-                f"Channels I can see ({len(visible)}): {shown or 'none'}\n"
-                f"If you want me to talk there, press **Configure** and "
-                f"choose When it answers. To remove me, a server admin "
-                f"there can kick me.")
+        return (f"I was added to **{name}**, a server none of you is in, "
+                f"so I'm not answering anyone there.\n{seen}"
+                f"To let me talk there, press **Configure** and pick When "
+                f"it answers. To remove me, a server admin there can kick "
+                f"me.")
     replies = {"off": "I stay quiet there",
                "when-addressed": "I answer @mentions and replies to my "
                                  "messages there",
@@ -1874,16 +1872,11 @@ def _join_summary(gid, ginfo, channels):
     on = (["image and video generation"] if res.get("media.enabled")
           else []) + [pid for pid in sorted(st.manifests)
                       if res.get(f"plugins.{pid}.enabled")]
-    how = (f"set servers.\"{gid}\" in config.yaml (no restart needed)"
-           if st.layout == "new" else
-           f"add \"{gid}\" to behavior.active_guild_ids in config.yaml "
-           f"(no restart needed)")
-    return (f"I just joined **{name}** (server ID {gid}).\n"
+    return (f"I just joined **{name}**.\n"
             f"{replies.get(res['who.replies'], replies['when-addressed'])}"
-            f". Extras on there: {', '.join(on) or 'none'}.\n"
-            f"Channels I can see ({len(visible)}): {shown or 'none'}\n"
-            f"To change what I do there, press "
-            f"**Configure** (or use /settings), or {how}.")
+            f". Extras on there: {', '.join(on) or 'none'}.\n{seen}"
+            f"To change what I do there, press **Configure**, use "
+            f"/settings, or just tell me here.")
 
 
 # Servers none of the owners is in. A public bot can be
@@ -2197,15 +2190,14 @@ def update_notice_text(info):
         if len(entries) > UPDATE_ENTRIES_SHOWN:
             lines.append(f"- +{len(entries) - UPDATE_ENTRIES_SHOWN} more")
     else:
-        lines.append("What's new is in CHANGELOG.md.")
+        lines.append("See the changelog for what's new.")
     if info.get("action_needed"):
         lines.append("Some changes need a step from you; your Muse walks "
                      "you through them.")
     lines.append(f"**Update now**: your Muse updates to {version} in its "
-                 "main chat by following UPDATING.md, and asks before "
-                 "touching anything you customized. **Later**: skip "
-                 f"{version}; you are asked again when a newer version "
-                 "ships.")
+                 "main chat and asks before touching anything you "
+                 f"changed. **Later**: skip {version}; I'll ask again when "
+                 "a newer version comes out.")
     return "\n".join(lines)[:1990]
 
 
@@ -2385,9 +2377,8 @@ def on_update_button(ix, rest, uid, record):
     if version != announced:
         if release_version(announced) \
                 and release_version(version) < release_version(announced):
-            return ephemeral(f"That update prompt is out of date: "
-                             f"{announced} is out since. Use the newest "
-                             f"prompt.")
+            return ephemeral(f"This message is out of date: {announced} "
+                             f"is out now. Use the newest update message.")
         return ephemeral("That control is no longer active.")
     # Short timeout: the whole answer must land within Discord's 3s.
     if _version_installed(version, timeout=1):
@@ -2408,8 +2399,8 @@ def on_update_button(ix, rest, uid, record):
         line = (f"**Update now** chosen. Your Muse is starting the update "
                 f"to {version} in its main chat.")
     else:
-        line = (f"**Later** chosen. {version} will not be offered again; "
-                f"a newer version will be.")
+        line = (f"**Later** chosen. I won't offer {version} again, only "
+                f"newer versions.")
     record({"kind": "update_choice", "version": version, "action": action,
             "by": uid, "at": now})
     original = (ix.get("message") or {}).get("content") or ""
@@ -2477,10 +2468,10 @@ def hold_reply(state, item, qid, parts):
         "at": time.time(), "qid": qid, "where": where, "to": to}
     _holds_live[hid] = time.time()
     _settle(state, item, "skipped", "held for owner review (never_share)")
-    head = (f"**Held a reply** to {to} in {where}: it contains a phrase "
-            f"from your never_share list, so nothing was posted.\n")
+    head = (f"**I held back a reply** to {to} in {where}: it contains one "
+            f"of your never-share phrases, so I didn't post it.\n")
     tail = ("\n**Send anyway** posts it as written; **Discard** drops "
-            "it. Undecided holds are discarded after 24 hours.")
+            "it. If you don't choose within a day, I drop it.")
     body = "> " + "\n".join(parts).replace("\n", "\n> ")
     room = 1990 - len(head) - len(tail)
     if len(body) > room:
@@ -2518,9 +2509,8 @@ def on_hold_button(ix, rest, uid, record):
     at = _holds_live.get(hid)
     if action not in ("send", "discard") or at is None \
             or time.time() - at >= HOLD_TTL_SECS:
-        return ephemeral("That held reply is no longer waiting (already "
-                         "sent or discarded, or it expired after 24 "
-                         "hours).")
+        return ephemeral("That reply is no longer waiting: it was sent or "
+                         "dropped, or a day went by.")
     _holds_live.pop(hid, None)  # one decision per hold
     record({"kind": "hold_choice", "hold": hid, "action": action,
             "by": uid, "at": int(time.time())})
@@ -2893,10 +2883,9 @@ def _digest_words(c):
 def admin_digest_text(gid, changes):
     name = _directory_name(gid) or (GUILDS.get(gid) or {}).get("name") \
         or gid
-    head = (f"**Server admin changes in {name}** (server ID {gid}), made "
-            f"with /settings:\n")
-    tail = ("\nAdmins can only make me quieter there. To undo one, run "
-            "/settings there and press Undo, or edit config.yaml.")
+    head = f"**A server admin changed my settings in {name}:**\n"
+    tail = ("\nAdmins can only make me quieter. To undo a change, use "
+            "/settings there and press Undo.")
     lines = []
     for c in changes:
         when = datetime.fromtimestamp(c["at"], timezone.utc) \
@@ -3593,10 +3582,9 @@ def reply_nonces_write(state, check=False):
         day = time.strftime("%Y-%m-%d")
         if _ITEM_NONCES_ALERT["day"] != day:
             _ITEM_NONCES_ALERT["day"] = day
-            notify_owners("I can't write item_nonces.json in my folder, so "
-                          "I can't send replies. Check the disk space and "
-                          "the folder's permissions; monitor.log has the "
-                          "error.")
+            notify_owners("I can't save files in my folder, so I can't "
+                          "send replies right now. The disk may be full, "
+                          "or the folder's permissions changed.")
 
 
 def reply_nonces_upkeep(state, queued, now):
@@ -6259,9 +6247,9 @@ MISSING_REPLY_NONCE = "no reply_nonce (an outdated worker prompt?)"
 STALE_PROMPT_FILE = os.path.join(BASE_DIR, "prompt_outdated.json")
 STALE_PROMPT_HITS = 3
 STALE_PROMPT_WINDOW = 3600
-STALE_PROMPT_DM = ("Your Muse's worker prompt is out of date, so I can't "
-                   "send replies. Ask your Muse: 'Update muse-discord by "
-                   "following UPDATING.md' (it re-renders the prompt).")
+STALE_PROMPT_DM = ("My instructions for writing replies are out of date, "
+                   "so I can't send replies. Ask your Muse to update "
+                   "muse-discord; that refreshes them.")
 
 
 def note_reply_nonce(state, refusal):
