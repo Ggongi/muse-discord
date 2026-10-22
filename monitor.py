@@ -1892,8 +1892,8 @@ def _join_summary(gid, ginfo, channels):
     return (f"I just joined **{name}**.\n"
             f"{replies.get(res['who.replies'], replies['when-addressed'])}"
             f". Extras on there: {', '.join(on) or 'none'}.\n{seen}"
-            f"To change what I do there, press **Configure**, use "
-            f"/settings, or just tell me here.")
+            f"To change what I do there, press **Configure** or use "
+            f"/settings{', or just tell me here' if dms_enabled() else ''}.")
 
 
 # Servers none of the owners is in. A public bot can be
