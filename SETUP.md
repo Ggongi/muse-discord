@@ -45,17 +45,30 @@ If your name contains "discord", Discord refuses it: use
 >    click **Save Changes**. (Now only you can add it to servers.)
 > 5. Still on **Bot**, click **Reset Token**, then **Yes, do it!**
 >    (Discord may ask for your password or 2FA code). Click **Copy** and
->    paste it here. It's the bot's password; I'll lock it away.
+>    paste it into the secure box I'm showing you. It's the bot's
+>    password, so it stays out of our chat.
 
-If your runtime has a secret or secure input field, offer it first ("or
-paste it into this secure box"); when it fails, a chat paste is fine.
+With that message, open your runtime's secure input for the token: a
+secret or credential field the owner fills in and you never see. If
+your runtime has none, or it fails (an error, an empty value, or the
+owner can't find it), send instead:
+
+> That box didn't work. Paste the token here instead; I'll lock it away.
 
 ## Step 3: Connect (you)
 
-Write the paste, exactly as it came, to
-`~/.config/muse-discord/incoming/token` with your file-writing tool.
-Never put the token in a shell command (not as an argument, not in a
-heredoc): commands show in the process list. Then run:
+Put the token, exactly as it came, in
+`~/.config/muse-discord/incoming/token`:
+
+- **From the secure input:** write it straight from where your runtime
+  keeps it to that file. For example, redirect an environment variable
+  with `printenv NAME > ~/.config/muse-discord/incoming/token`. Never
+  read, print or check the value yourself; the script below checks it.
+  If the file ends up empty, fall back to the chat paste (step 2).
+- **From a chat paste:** write it with your file-writing tool.
+
+Never put the token itself in a shell command (not as an argument, not
+in a heredoc): commands show in the process list. Then run:
 
 ```bash
 python3 bin/connect-discord.py --name "<your name>" \
@@ -71,7 +84,8 @@ persona to `persona.md`, and prints the invite link. Exit status:
 - **0**: done. Go on.
 - **2**: wrong paste or a reset token. Nothing was saved. Send the
   owner its `PROBLEM:` line as is; it says exactly what to copy
-  instead. Then write the new paste and run it again.
+  instead. Then ask for it again the same way, write it, and run it
+  again.
 - **3**: Discord was unreachable; nothing was saved. Wait a minute,
   then ask for the token again (the file is gone).
 - **4**: saved, but the owner has a portal step. Send each
@@ -86,8 +100,7 @@ Discord username @<name in the note>?" and fix `owners` if not.
 
 Then send (with the `INVITE:` link):
 
-> Got it, and it's stored safely. If you're ever uneasy about it sitting
-> in our chat, press **Reset Token** again and paste me the new one.
+> Got it, and it's stored safely.
 >
 > Now add the bot to your server: click this link, pick your server, and
 > click **Authorize**: <invite link>
