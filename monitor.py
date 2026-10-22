@@ -1980,6 +1980,8 @@ def check_owner_presence(state, guilds, joined=(), every=False):
         due = sorted((e["next"], gid) for gid, e in seen.items()
                      if not e["in"] and e["next"] <= now and gid in guilds)
         for _next, gid in due[:None if every else OWNER_CHECKS_PER_PASS]:
+            if rest_backing_off():
+                break   # the rest stay gated, and are checked later
             e = seen[gid]
             res = owner_member(gid)
             if res is None:

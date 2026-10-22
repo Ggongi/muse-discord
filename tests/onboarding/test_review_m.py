@@ -30,6 +30,29 @@ class FirstRun(unittest.TestCase):
         stranger = gmsg(U1, mention=True, channel=CH_G2, guild=G2)
         self.assertIsNone(mod.trigger_kind(stranger, G2))
 
+    def test_first_run_checks_stop_at_a_rate_limit(self):
+        """The first run checks every server at once (every=True); after a
+        429 it must stop asking (the rest stay gated and are retried),
+        not send one more request per server and owner."""
+        mod = load_monitor(BASE)
+        guilds = {str(700000000000000000 + i): {"name": f"g{i}"}
+                  for i in range(30)}
+        asked = []
+
+        def get(path):
+            if "/members/" in path:
+                asked.append(path)
+                e = HTTPErr(429)
+                mod._note_rate_limit(e)
+                raise e
+            raise HTTPErr(404)
+        mod.api_get = get
+        with quiet():
+            st = mod.load_state()
+            mod.sync_guilds(st, guilds, {})
+        self.assertLessEqual(len(asked), 1, f"{len(asked)} member GETs "
+                             f"after a 429")
+
 
 if __name__ == "__main__":
     unittest.main()
