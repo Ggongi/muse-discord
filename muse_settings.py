@@ -2289,7 +2289,8 @@ def _undo_group(doc, match, accept=None):
     for i in range(len(hist) - 1, -1, -1):
         c = cand(i)
         if c is None or not match(c[2], c[3]) \
-                or (accept is not None and not accept(hist[i])):
+                or (accept is not None and not accept(hist[i])) \
+                or _touched_later(hist, i, c[1]):
             continue
         gid = hist[i].get("group")
         if not gid:
@@ -2408,9 +2409,10 @@ def dump_config(data):
 
 
 def fold(config_path, plugins_dir=None):
-    """Copy the overlay's values into config.yaml and clear them. The file
-    is rewritten (comments are lost); a timestamped backup is kept.
-    Returns (backup path, [folded keys])."""
+    """Copy the overlay's values (not server admins' entries) into
+    config.yaml and clear them. The file is rewritten (comments are
+    lost); a timestamped backup is kept. Returns (backup path, [folded
+    keys]), or (None, []) when there is nothing to fold."""
     with overlay_lock(overlay_path_for(config_path)):
         return _fold(config_path, plugins_dir)
 
@@ -2420,12 +2422,26 @@ def _fold(config_path, plugins_dir):
     if st.layout == "old":
         raise SettingsError("config.yaml uses the old layout; run "
                             "`bin/settings.py migrate` first")
-    if not st.overlay:
+    # A server admin's entry stays in the overlay: in config.yaml it
+    # would be the owners' own value, no longer held to the quieter of
+    # the two (Settings._resolve_key).
+    todo = sorted(((pk, e) for pk, e in st.overlay.items()
+                   if entry_role(e) != "admin"),
+                  key=lambda kv: format_key(*kv[0]))
+    if not todo:
         return None, []
     data = copy.deepcopy(st.raw)
+    # Unquoted ids load as numbers; the paths below use strings.
+    servers = data.get("servers")
+    if isinstance(servers, dict):
+        data["servers"] = servers = {str(k): v for k, v in servers.items()}
+        for block in servers.values():
+            if isinstance(block, dict) \
+                    and isinstance(block.get("channels"), dict):
+                block["channels"] = {str(k): v for k, v in
+                                     block["channels"].items()}
     folded = []
-    for (path, key), entry in sorted(st.overlay.items(),
-                                     key=lambda kv: format_key(*kv[0])):
+    for (path, key), entry in todo:
         spec = st.spec(key)
         if path == ("top",):
             node_path = key.split(".")
