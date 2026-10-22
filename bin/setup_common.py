@@ -31,8 +31,10 @@ try:
     import yaml  # noqa: F401
 except ImportError:
     _venv = venv_python()
-    if _venv and os.path.realpath(sys.executable) \
-            != os.path.realpath(_venv):
+    # Not running in .venv yet (its python3 may be a symlink to this
+    # very binary, so compare prefixes): once there, never again.
+    if _venv and os.path.realpath(sys.prefix) \
+            != os.path.realpath(os.path.join(PKG_DIR, ".venv")):
         os.execv(_venv, [_venv] + sys.argv)
 
 API = "https://discord.com/api/v10"
