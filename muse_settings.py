@@ -959,6 +959,27 @@ CHANNEL_ONLY = ("a channel or category may set only replies, notes, "
                 "plugins.<plugin>.enabled")
 
 
+def spec_of(key, manifests):
+    """The Spec of a settings key (core, bot-wide or a plugin's in
+    manifests), else None."""
+    if key in CORE:
+        return CORE[key]
+    if key in TOP:
+        return TOP[key]
+    parts = key.split(".", 2)
+    if len(parts) == 3 and parts[0] == "plugins" and parts[1] in manifests:
+        return manifests[parts[1]].specs.get(parts[2])
+    return None
+
+
+def _settable_at(spec, kind, key):
+    """key may be set at a layer of this kind (all_servers takes only
+    who.replies and the on/off keys)."""
+    return kind in spec.scopes and (kind != "all_servers"
+                                    or key == "who.replies"
+                                    or key.endswith(".enabled"))
+
+
 class _Parser:
     def __init__(self, file_label, manifests, old=False):
         self.file = file_label
@@ -974,13 +995,7 @@ class _Parser:
         self.errors.append(f"{self.file}: {where}: {msg}")
 
     def spec(self, key):
-        if key in CORE:
-            return CORE[key]
-        if key.startswith("plugins."):
-            parts = key.split(".", 2)
-            if len(parts) == 3 and parts[1] in self.manifests:
-                return self.manifests[parts[1]].specs.get(parts[2])
-        return None
+        return spec_of(key, self.manifests)
 
     def set(self, path, key, value, where, old_name=False):
         """old_name: key came from a moved setting's old spelling, which
@@ -1011,16 +1026,11 @@ class _Parser:
                     f"; valid in {group}: {', '.join(valid)}" if valid
                     else ""))
             return
-        allowed = spec.scopes
-        if kind == "all_servers" and not (key == "who.replies"
-                                          or key.endswith(".enabled")):
-            allowed = ()
-        if kind not in allowed:
-            where_ok = ", ".join(s for s in allowed if not (
-                s == "all_servers" and not (key == "who.replies"
-                                            or key.endswith(".enabled"))))
+        if not _settable_at(spec, kind, key):
+            where_ok = ", ".join(s for s in spec.scopes
+                                 if _settable_at(spec, s, key))
             self.err(where, f"cannot be set at {kind} scope (it can be "
-                     f"set in: {where_ok or 'nowhere'})")
+                     f"set in: {where_ok})")
             return
         ok, v = normalize(spec, value)
         if not ok:
@@ -1223,15 +1233,7 @@ class Settings:
         return False, None, None
 
     def spec(self, key):
-        if key in CORE:
-            return CORE[key]
-        if key in TOP:
-            return TOP[key]
-        if key.startswith("plugins."):
-            parts = key.split(".", 2)
-            if len(parts) == 3 and parts[1] in self.manifests:
-                return self.manifests[parts[1]].specs.get(parts[2])
-        return None
+        return spec_of(key, self.manifests)
 
     def keys(self):
         out = list(CORE)
@@ -1906,9 +1908,7 @@ def _apply_overlay(st):
             elif path == ("top",):
                 if key not in TOP_DISCORD_EDITABLE:
                     reason = "not editable from Discord"
-            elif kind not in spec.scopes or (
-                    kind == "all_servers" and not (
-                        key == "who.replies" or key.endswith(".enabled"))):
+            elif not _settable_at(spec, kind, key):
                 reason = f"cannot be set at {kind} scope"
             elif path[0] == "servers" and (
                     _id_str(path[1]) is None
@@ -1952,8 +1952,7 @@ def check_settable(st, path, key):
             raise SettingsError(f"{keystr}: not editable from Discord")
     elif key in TOP:
         raise SettingsError(f"{keystr}: a bot-wide setting has no scope")
-    elif kind not in spec.scopes or (kind == "all_servers" and not (
-            key == "who.replies" or key.endswith(".enabled"))):
+    elif not _settable_at(spec, kind, key):
         raise SettingsError(f"{keystr}: cannot be set at {kind} scope")
     elif kind == "channel" and not (key in CHANNEL_SHORT.values()
                                     or _is_enabled_key(key)):

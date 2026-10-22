@@ -139,20 +139,10 @@ def known_spec(key, plugins_dir=None):
     manifests alone (config.yaml is not read), else None."""
     if not isinstance(key, str):
         return None
-    key = MS.moved_key(key)  # an older worker's plugins.media.*
-    if key in MS.CORE:
-        return MS.CORE[key]
-    if key in MS.TOP:
-        return MS.TOP[key]
-    parts = key.split(".", 2)
-    if len(parts) == 3 and parts[0] == "plugins":
-        try:
-            m = MS.load_manifests(plugins_dir).get(parts[1])
-        except MS.SettingsError:
-            return None
-        if m is not None:
-            return m.specs.get(parts[2])
-    return None
+    try:   # moved_key: an older worker's plugins.media.*
+        return MS.spec_of(MS.moved_key(key), MS.load_manifests(plugins_dir))
+    except MS.SettingsError:
+        return None
 
 
 def _list_key(key, spec):
