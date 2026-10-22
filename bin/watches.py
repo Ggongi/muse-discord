@@ -30,6 +30,11 @@ def describe(i, r):
     note = f'  "{r["note"]}"' if r.get("note") else ""
     if r.get("kind") == "remind":
         what = f"remind  due {W.iso(r.get('due', 0))}"
+    elif r.get("kind") == "watch-web":
+        every = ", every time" if r.get("repeat") else ""
+        what = (f"web     \"{r.get('what')}\" checked every "
+                f"{int(r.get('every') or 0) // 60} min until "
+                f"{W.iso(r.get('until', 0))}{every}")
     else:
         words = ", ".join(f'"{w}"' for w in r.get("words") or [])
         every = ", every time" if r.get("every") else ""
