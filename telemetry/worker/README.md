@@ -2,101 +2,48 @@
 
 A Cloudflare Worker with a D1 database that receives the anonymous
 daily reports `telemetry.py` sends (README.md, "Privacy and usage
-stats", lists every field). Only the maintainer deploys this; an
-install never needs it.
+stats", lists every field). Only the maintainer deploys it.
 
 | Route | What it does |
 | --- | --- |
-| `POST /v1/report` | One install's report for one UTC day. Validated strictly (`src/validate.js`: known fields only, types, ranges, at most 4 KB); stored by `(install_id, day)`, so a resent day replaces its row. At most 10 reports per install per day (429 after that). Never stores the IP address, headers or the time of the request. |
+| `POST /v1/report` | One install's report for one UTC day, validated strictly (`src/validate.js`: known fields only, types, ranges, at most 4 KB) and stored by `(install_id, day)`, so a resent day replaces its row. At most 10 per install per day (then 429). Never stores the IP address, headers or request time. |
 | `GET /v1/stats` | Public totals: installs active in the last 7 and 30 days, servers (each install's latest count, last 7 days), replies in the last 7 and 30 days. Cached for an hour. |
 | `GET /v1/badge/servers` | A [shields.io endpoint](https://shields.io/badges/endpoint-badge) JSON: "used in N servers". |
 
 Request logs are off in `wrangler.toml` (`[observability] enabled =
 false`): they would hold IP addresses.
 
-## Deploy (once)
+## Deploy
 
-You need Node 18 or newer.
+With Node 18 or newer and a free Cloudflare account, from
+`telemetry/worker`:
 
-1. Make a free Cloudflare account at <https://dash.cloudflare.com/sign-up>
-   (Workers and D1 are on the free plan).
-2. From this directory, log in (opens a browser):
+```bash
+npx wrangler login                     # opens a browser
+npx wrangler d1 create muse-telemetry  # paste its database_id into wrangler.toml
+npx wrangler d1 execute muse-telemetry --remote --file=schema.sql
+npx wrangler deploy                    # prints the Worker's URL
+curl https://muse-telemetry.<your-subdomain>.workers.dev/v1/stats
+```
 
-   ```bash
-   cd telemetry/worker
-   npx wrangler login
-   ```
-
-3. Create the database and paste the `database_id` it prints into
-   `wrangler.toml` (replacing `REPLACE_WITH_YOUR_D1_DATABASE_ID`):
-
-   ```bash
-   npx wrangler d1 create muse-telemetry
-   ```
-
-4. Create the tables:
-
-   ```bash
-   npx wrangler d1 execute muse-telemetry --remote --file=schema.sql
-   ```
-
-5. Deploy:
-
-   ```bash
-   npx wrangler deploy
-   ```
-
-   It prints the Worker's URL, like
-   `https://muse-telemetry.<your-subdomain>.workers.dev`.
-
-6. Check it:
-
-   ```bash
-   curl https://muse-telemetry.<your-subdomain>.workers.dev/v1/stats
-   ```
-
-7. Put that URL (no path, no trailing slash) into `TELEMETRY_URL` in
-   `telemetry.py` at the top of the repository, replacing the empty
-   string and its TODO, and release it. Until then installs keep their
-   counts locally and send nothing.
-
-Commit the `database_id` in `wrangler.toml` if you like: it is not a
-secret (only your Cloudflare login can use it).
-
-### The README badge
-
-Once reports come in, add this to the top of the main README.md
-(with your URL):
+`TELEMETRY_URL` in `telemetry.py` holds that URL (no path, no trailing
+slash). The `database_id` is not a secret. The README badge:
 
 ```markdown
 ![Used in](https://img.shields.io/endpoint?url=https%3A%2F%2Fmuse-telemetry.<your-subdomain>.workers.dev%2Fv1%2Fbadge%2Fservers)
 ```
 
-### Updating the Worker
+## Changing it
 
-Edit `src/`, run the tests, then `npx wrangler deploy` again. A change
-to the report's fields needs `SCHEMA` raised in both `telemetry.py` and
-`src/validate.js` (and a new column in `schema.sql`, applied with
-`npx wrangler d1 execute ... --command "ALTER TABLE ..."`).
-
-A database created before the `ahead` and `modified` columns existed
-needs them added once (no release had sent anything yet, so `SCHEMA`
-stayed 1):
-
-```bash
-npx wrangler d1 execute muse-telemetry --remote --command "ALTER TABLE reports ADD COLUMN ahead INTEGER NOT NULL DEFAULT 0; ALTER TABLE reports ADD COLUMN modified INTEGER NOT NULL DEFAULT 0;"
-```
-
-## Tests
-
-Plain Node, no packages:
-
-```bash
-cd telemetry/worker && node --test
-```
-
-The offline suite `tests/telemetry` also checks that what `telemetry.py`
-builds is a report `src/validate.js` accepts (when `node` is installed).
+Edit `src/`, run the tests (`node --test` here, plain Node), then
+`npx wrangler deploy`. A change to the report's fields needs `SCHEMA`
+raised in both `telemetry.py` and `src/validate.js`, and a new column
+in `schema.sql`, applied with `npx wrangler d1 execute muse-telemetry
+--remote --command "ALTER TABLE reports ADD COLUMN ..."` (a
+database made before the `ahead` and `modified` columns needs both
+added this way, `INTEGER NOT NULL DEFAULT 0`). The offline
+suite `tests/telemetry` checks that what `telemetry.py` builds passes
+`src/validate.js` (when `node` is installed).
 
 ## Looking at the data
 
