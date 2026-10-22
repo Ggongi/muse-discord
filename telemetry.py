@@ -806,13 +806,3 @@ class Recorder:
                           "refused": len(dropped),
                           "ok": not d["pending"]}
         self._flush_locked()
-
-
-class _Null:
-    """Stands in for a Recorder when telemetry.py cannot be loaded."""
-
-    def __getattr__(self, name):
-        return lambda *a, **kw: None
-
-
-NULL = _Null()

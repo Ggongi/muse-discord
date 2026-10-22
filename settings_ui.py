@@ -92,7 +92,7 @@ CATEGORY = 4
 
 # Component types and button styles.
 ROW, BUTTON, STRING_SELECT, TEXT_INPUT = 1, 2, 3, 4
-USER_SELECT, ROLE_SELECT, MENTIONABLE_SELECT, CHANNEL_SELECT = 5, 6, 7, 8
+USER_SELECT, MENTIONABLE_SELECT = 5, 7
 SECTION, TEXT, SEPARATOR, CONTAINER, LABEL = 9, 10, 14, 17, 18
 PRIMARY, SECONDARY, SUCCESS, DANGER = 1, 2, 3, 4
 
@@ -695,23 +695,6 @@ def _scope_at(place, key, path=None):
 def value(R, place, key):
     sc = _scope_at(place, key)
     return R.st.top(key) if sc is None else R.st.get(key, sc)
-
-
-def vl(R, key, v):
-    """A value in plain words."""
-    return ms.value_label(key, v, R.look)
-
-
-def mention_list(value, limit=10):
-    out = []
-    for p in value if isinstance(value, list) else []:
-        p = str(p)
-        out.append(f"<@&{p[5:]}>" if p.startswith("role:") else f"<@{p}>")
-    if not out:
-        return "nobody"
-    more = len(out) - limit
-    out = out[:limit]
-    return ", ".join(out) + (f" and {more} more" if more > 0 else "")
 
 
 def short_date(at):

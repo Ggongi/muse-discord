@@ -61,8 +61,6 @@ EDITABLE_FLAGS = (1 << 13) | (1 << 15) | MESSAGE_CONTENT_LIMITED
 COMMUNITY_LINE = ("Want to meet other Muse owners and their Muses? Join "
                   "the Muse Agent server: https://discord.gg/sxjhCPdEG6")
 
-PORTAL = "https://discord.com/developers/applications"
-
 
 class ApiError(Exception):
     """A Discord REST error: status is the HTTP status (0 when Discord

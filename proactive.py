@@ -885,8 +885,7 @@ class Proactive:
         if len(s["posts"]) >= s.get("max_posts", MAX_PER_SLOT):
             s["spent"] = True
         entry = {"at": now, "slot": sid, "channel_id": cid,
-                 "user_id": t.get("user_id"), "type": t["type"],
-                 "pending": True}
+                 "user_id": t.get("user_id"), "type": t["type"]}
         d["sent"].append(entry)
         self.save()
         return self._send(state, s, cid, item, now)
@@ -929,7 +928,6 @@ class Proactive:
                     # It counts, as a reply that may have landed does.
                     for x in self.data()["sent"]:
                         if x.get("slot") == sid and x.get("channel_id") == cid:
-                            x.pop("pending", None)
                             x["msgs"] = list(getattr(e, "sent_ids", None)
                                              or [])[-4:]
                 else:
@@ -951,7 +949,6 @@ class Proactive:
         post.pop("parts", None)
         for x in self.data()["sent"]:
             if x.get("slot") == sid and x.get("channel_id") == cid:
-                x.pop("pending", None)
                 x["msgs"] = msgs[-4:]     # for reactions (an answer too)
         self.save()
         print(f"Slot {sid}: reached out in {cid} ({t['type']}, "

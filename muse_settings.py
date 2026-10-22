@@ -2,9 +2,8 @@
 """muse-discord settings: schema, validation, scopes, the Discord overlay,
 and the mapping of the old config layout.
 
-One module, read by monitor.py, presence.py, bin/settings.py and (through
-the small command line at the bottom) watchdog.sh and the wake hook.
-Standard library plus PyYAML only.
+One module, read by monitor.py, presence.py, watchdog.sh and the bin/
+tools. Standard library plus PyYAML only.
 
 Layers, least specific first (the most specific value that is set wins):
 
@@ -35,7 +34,6 @@ import copy
 import os
 import re
 import shutil
-import sys
 import tempfile
 import threading
 from datetime import datetime, timezone
@@ -49,7 +47,6 @@ DEFAULT_TOKEN_FILE = "~/.config/muse-discord/bot_token"
 DEFAULT_PERSONA = "persona.md"
 PRESENCE_KINDS = ("watching", "playing", "listening", "streaming",
                   "competing", "custom")
-SCOPE_NAMES = ("everywhere", "dms", "all_servers", "server", "channel")
 _LETTER = {"E": "everywhere", "D": "dms", "A": "all_servers",
            "S": "server", "C": "channel"}
 # Short key names a channel/category entry uses.
@@ -88,10 +85,9 @@ class Spec:
     """One setting's type, default and the scopes that may set it."""
 
     def __init__(self, type, default, scopes, values=(), hidden_values=(),
-                 min=None, max=None, none=False, maxlen=None, steers=False,
-                 risky=False, discord_editable=True, allow_names=False,
-                 hidden=False, legacy=None, description=None, ids=False,
-                 check=None):
+                 min=None, max=None, none=False, maxlen=None, risky=False,
+                 discord_editable=True, allow_names=False, hidden=False,
+                 legacy=None, ids=False, check=None):
         self.type = type
         self.default = default
         self.scopes = _scopes(scopes)
@@ -99,12 +95,11 @@ class Spec:
         self.hidden_values = tuple(hidden_values)
         self.min, self.max, self.none = min, max, none
         self.maxlen = maxlen
-        self.steers, self.risky = steers, risky
+        self.risky = risky
         self.discord_editable = discord_editable
         self.allow_names = allow_names
         self.hidden = hidden
         self.legacy = legacy
-        self.description = description
         # A choice that also takes a list of user ids (who.dms_from:
         # the owners plus those people).
         self.ids = ids
@@ -188,9 +183,8 @@ CORE = {
     "who.bot_exchange_limit": Spec("number", None, "ES", min=1, max=50,
                                    none=True),
     "style.length": Spec("choice", "normal", "EDS",
-                         values=("brief", "normal", "detailed"),
-                         steers=True),
-    "style.notes": Spec("text", "", "EDSC", maxlen=NOTES_MAX, steers=True),
+                         values=("brief", "normal", "detailed")),
+    "style.notes": Spec("text", "", "EDSC", maxlen=NOTES_MAX),
     "abilities.owner_commands": Spec("on-off", True, "ES"),
     # Who can set reminders and watches (muse_watches.py): owners always
     # can; a list names the others who may.
@@ -200,7 +194,7 @@ CORE = {
     # abilities.web_watches is ignored, see RETIRED_KEYS.)
     "privacy.memory": Spec("choice", "public-only", "EDS",
                            values=("everything", "public-only", "nothing"),
-                           steers=True, risky=True),
+                           risky=True),
     "privacy.never_share": Spec("phrases", [], "E", discord_editable=False),
     # "answer" (no check at all) exists only so a migrated
     # injection_quarantine: false keeps behaving as it did.
@@ -298,14 +292,13 @@ TOP_DISCORD_EDITABLE = ("presence.status", "presence.kind",
 # ---------------------------------------------------------------------------
 class Manifest:
     def __init__(self, pid, folder, specs, safe_in_new_servers,
-                 legacy_names=(), hooks=(), core_group=None):
+                 legacy_names=(), core_group=None):
         self.id = pid
         self.core_group = core_group  # a plugin that is core now
         self.folder = folder
         self.specs = specs
         self.safe_in_new_servers = safe_in_new_servers
         self.legacy_names = tuple(legacy_names)
-        self.hooks = tuple(hooks)
 
     def spec_for(self, key):
         """The spec for a settings key or an old param name."""
@@ -383,15 +376,11 @@ def _load_manifests(plugins_dir):
                     values=s.get("values") or (),
                     min=s.get("min", 0 if s["type"] == "number" else None),
                     max=s.get("max"), none=bool(s.get("none")),
-                    maxlen=s.get("maxlen"),
-                    steers=bool(s.get("steers_muse")),
-                    risky=bool(s.get("risky")),
+                    maxlen=s.get("maxlen"), risky=bool(s.get("risky")),
                     discord_editable=s.get("discord_editable", True)
                     is not False,
                     allow_names=bool(s.get("allow_names")),
-                    hidden=bool(s.get("hidden")), legacy=s.get("legacy"),
-                    description=(str(s["description"]).strip()
-                                 if s.get("description") else None))
+                    hidden=bool(s.get("hidden")), legacy=s.get("legacy"))
         else:
             for key, p in (meta.get("params") or {}).items():
                 default = p.get("default") if isinstance(p, dict) else None
@@ -402,8 +391,7 @@ def _load_manifests(plugins_dir):
         safe = meta.get("safe_in_new_servers")
         out[pid] = Manifest(pid, folder, specs,
                             True if safe is None else bool(safe),
-                            legacy_names=[folder] if folder != pid else [],
-                            hooks=meta.get("hooks") or ())
+                            legacy_names=[folder] if folder != pid else [])
     return out
 
 
@@ -565,10 +553,6 @@ def display(spec, v):
     if v is None and spec is not None and spec.type == "number":
         return "none"
     return v
-
-
-def _dumpable(spec, v):
-    return display(spec, v)
 
 
 # ---------------------------------------------------------------------------
@@ -1191,10 +1175,6 @@ class Settings:
     @property
     def updates_notify(self):
         return self.top("updates.notify")
-
-    @property
-    def usage_stats(self):
-        return self.top("telemetry.usage_stats")
 
     def token_sources(self):
         """[("env", NAME) | ("file", path)], tried in order."""
@@ -1835,7 +1815,7 @@ def _parse_new(p, data, aliases, st):
             p.err(sect, "expected a block")
             continue
         for k, val in block.items():
-            if k not in keys or (k == "enabled" and False):
+            if k not in keys:
                 p.err(f"{sect}.{k}", "unknown setting; valid: "
                       + ", ".join(x for x in keys if x != "enabled"))
                 continue
@@ -2102,10 +2082,10 @@ def _write_entry(st, doc, path, key, spec, value, by, now, group=None,
         role = _infer_role(by, st.owners)
     base = st.file_values.get((path, key))
     s, before, _src = st._layer(path, key)
-    entry = {"value": value, "base": _dumpable(spec, base),
+    entry = {"value": value, "base": display(spec, base),
              "by": str(by), "at": now}
     hist = {"key": keystr,
-            "from": _dumpable(spec, before) if s else "inherit",
+            "from": display(spec, before) if s else "inherit",
             "to": value, "by": str(by), "at": now}
     if group:
         hist["group"] = group
@@ -2161,7 +2141,7 @@ def set_value(config_path, keystr, value, by, plugins_dir=None, group=None,
             if not ok:
                 raise SettingsError(f"{keystr}: {norm}; valid: "
                                     f"{spec.valid_text()}")
-            value = _dumpable(spec, norm)
+            value = display(spec, norm)
         if _layer_noop(st, path, key, norm, role):
             return NO_CHANGE
         doc = _read_overlay_doc(st.overlay_path, strict=True)
@@ -2342,21 +2322,6 @@ def _touched_later(hist, j, ks):
     return False
 
 
-def _undo_pick(doc, paths):
-    """(history index, key string, path, key, value to restore) for the
-    newest change at one of paths (no group expansion), or None."""
-    picks = _undo_group(doc, lambda p, _k: p in paths)
-    return picks[0] if picks else None
-
-
-def undo_candidate(st, prefix):
-    """(key string, path, key, value it would restore) for the newest
-    change undo() would revert at this scope, or None (nothing to
-    undo). A grouped change reverts its whole group: see undo_plan."""
-    picks = _undo_group(st.overlay_doc or {}, _undo_match(prefix))
-    return None if not picks else picks[0][1:]
-
-
 def _admin_accept(owners, guild_id):
     gid = str(guild_id)
 
@@ -2486,7 +2451,7 @@ def _fold(config_path, plugins_dir):
         if entry.get("value") == "inherit":
             _del_path(data, node_path)
         else:
-            _set_path(data, node_path, _dumpable(spec, entry["_norm"]))
+            _set_path(data, node_path, display(spec, entry["_norm"]))
         folded.append(format_key(path, key))
     with overlay_lock(st.overlay_path):
         doc = _read_overlay_doc(st.overlay_path, strict=True)
@@ -2754,10 +2719,6 @@ class Place:
     def channel(cls, guild_id, channel_id, category_id=None):
         return cls("channel", guild_id, channel_id, category_id)
 
-    @property
-    def token(self):
-        return format_place(self)
-
     def __eq__(self, other):
         return isinstance(other, Place) and (
             self.kind, self.guild_id, self.channel_id) == (
@@ -2768,9 +2729,6 @@ class Place:
 
     def __repr__(self):
         return f"Place({format_place(self)!r})"
-
-    def server_place(self):
-        return Place.server(self.guild_id) if self.guild_id else None
 
     def scope(self, key=None):
         """The Scope that resolves key here (None for a bot-wide key)."""
@@ -3195,15 +3153,6 @@ def describe_change(place, key, old, new, names=None, path=None):
             f"{value_label(key, new, names)}")
 
 
-def pause_label(place, names=None):
-    """The words for a Pause control at place."""
-    if place.kind == "defaults":
-        return "Pause everywhere"
-    if place.kind == "dms":
-        return "Pause DMs"
-    return f"Pause in {place_name(place, names)}"
-
-
 def _date(at):
     try:
         d = datetime.strptime(str(at), "%Y-%m-%dT%H:%M:%SZ")
@@ -3478,7 +3427,7 @@ def simulate(st, changes, role="owner"):
             raise SettingsError(f"{label(ch.key)}: {norm}; valid: "
                                 f"{spec.valid_text()}")
         new.overlay[(path, ch.key)] = dict(
-            extra, value=_dumpable(spec, norm), _norm=norm, by="", at="")
+            extra, value=display(spec, norm), _norm=norm, by="", at="")
     return new
 
 
@@ -3549,7 +3498,7 @@ def plan_changes(st, changes, role="owner"):
                     and not ch.revert:
                 raise SettingsError(f"{label(ch.key)}: {norm} can only be "
                                     f"set in config.yaml")
-            write = _dumpable(spec, norm)
+            write = display(spec, norm)
         out.append(Planned(ch, path, spec, write, norm,
                            _place_noop(st, ch.place, path, ch.key, norm,
                                        role)))
@@ -3690,7 +3639,7 @@ def _revert(st, doc, picks, by, role=None, ugroup=None):
         below = owner_layer(doc, ks, st.owners)
         in_file = (path, key) in st.file_values
         cur = st.file_values.get((path, key))
-        entry = {"value": "inherit", "base": _dumpable(spec, cur),
+        entry = {"value": "inherit", "base": display(spec, cur),
                  "by": str(by), "at": now}
         if target == "inherit":
             if in_file:
@@ -3705,7 +3654,7 @@ def _revert(st, doc, picks, by, role=None, ugroup=None):
             if in_file and norm == cur:
                 doc["values"].pop(ks, None)   # the file says it already
             else:
-                doc["values"][ks] = dict(entry, value=_dumpable(spec, norm))
+                doc["values"][ks] = dict(entry, value=display(spec, norm))
         if role == "admin" and ks in doc["values"]:
             doc["values"][ks]["role"] = "admin"
             doc["values"][ks]["below"] = below
@@ -3873,7 +3822,7 @@ def _admin_translate(st, path, key, spec, value):
         if below:
             target = below.get("value")
         elif (path, key) in st.file_values:
-            target = _dumpable(spec, st.file_values[(path, key)])
+            target = display(spec, st.file_values[(path, key)])
         else:
             target = "inherit"
         if value == "inherit":
@@ -4549,9 +4498,9 @@ class Watcher:
 
 
 # ---------------------------------------------------------------------------
-# Command line for shell scripts: muse_settings.py [--config P] get NAME
+# One value for watchdog.sh
 # ---------------------------------------------------------------------------
-def shell_value(st, name, pkg_dir):
+def shell_value(st, name, pkg_dir=None):
     if name == "token_file":
         files = [p for k, p in st.token_sources() if k == "file"]
         return os.path.expanduser(files[0]) if files else ""
@@ -4562,30 +4511,4 @@ def shell_value(st, name, pkg_dir):
         return "true" if st.presence_enabled else "false"
     if name == "updates_notify":
         return "true" if st.updates_notify else "false"
-    if name == "persona_file":
-        return os.path.join(pkg_dir, os.path.expanduser(st.persona))
     raise KeyError(name)
-
-
-def _main(argv):
-    pkg = os.path.dirname(os.path.abspath(__file__))
-    cfg = os.environ.get("MUSE_DISCORD_CONFIG") or os.path.join(
-        pkg, "config.yaml")
-    if len(argv) > 2 and argv[1] == "--config":
-        cfg = argv[2]
-        argv = argv[:1] + argv[3:]
-    if len(argv) != 3 or argv[1] != "get":
-        print("usage: muse_settings.py [--config PATH] get NAME",
-              file=sys.stderr)
-        return 2
-    try:
-        st = load(cfg, os.path.join(pkg, "plugins"))
-        print(shell_value(st, argv[2], pkg))
-    except (SettingsError, KeyError) as e:
-        print(f"settings: {e}", file=sys.stderr)
-        return 1
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(_main(sys.argv))
