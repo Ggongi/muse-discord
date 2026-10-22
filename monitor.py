@@ -4562,9 +4562,11 @@ def send_reply_with_files(channel_id, text, files, reply_to=None,
     for path, _ in files:
         with open(path, "rb") as f:
             blobs.append(f.read())
-    # And what the files hold: a worker can write a secret into one.
-    guard_outgoing({"files": [b.decode("latin-1") for b in blobs]},
-                   channel_id)
+    # And what the files hold (a worker can write a secret into one),
+    # with the text and names: joined, a secret split across them shows.
+    guard_outgoing({"content": text,
+                    "data": [b.decode("latin-1") for b in blobs],
+                    "files": [fname for _, fname in files]}, channel_id)
     payload = {"content": text,
                "allowed_mentions": mentions or SEND_ALLOWED_MENTIONS}
     if reply_to:
