@@ -988,8 +988,7 @@ def api_get(path):
 # itself, any nonce the monitor holds live, or anything shaped like a
 # Discord token (three base64url segments, the first decoding to a
 # snowflake) drops the send (SecretBlocked), logged without the value,
-# and the owners are DMed about it once a day. Any other 32-hex-digit
-# string (a nonce's shape) in visible text is blanked.
+# and the owners are DMed about it once a day. Nothing is ever altered.
 # ---------------------------------------------------------------------------
 class SecretBlocked(Exception):
     """A send held back because it carried a secret (never retried)."""
@@ -4483,8 +4482,8 @@ def normalize_parts(item):
 
     The worker drafts long replies as "parts" (2-4 short messages, like a
     person thinking aloud) instead of one "text" blob. Short replies stay a
-    single-element list. Enforces the part cap and the configured total budget
-    (behavior.max_reply_chars).
+    single-element list. Enforces the part cap and max_reply_chars as the
+    budget of all parts together (the later ones are cut first).
     """
     raw = item.get("parts")
     clean = ([p for p in raw if isinstance(p, str) and p.strip()]
@@ -4497,13 +4496,13 @@ def normalize_parts(item):
             parts[-1] = sanitize_reply((parts[-1] + " " + rest).strip())
     else:
         parts = [sanitize_reply(item.get("text", ""))]
-    parts = [p for p in parts if p]
-    total = sum(len(p) for p in parts)
-    if total > MAX_REPLY_CHARS:
-        overflow = total - MAX_REPLY_CHARS
-        parts[-1] = parts[-1][:max(0, len(parts[-1]) - overflow)].rstrip()
-        parts = [p for p in parts if p]
-    return parts
+    out, left = [], MAX_REPLY_CHARS
+    for p in parts:
+        p = p[:left].rstrip()
+        if p:
+            out.append(p)
+            left -= len(p)
+    return out
 
 
 def send_fragmented(channel_id, parts, reply_to=None, attachments=(),

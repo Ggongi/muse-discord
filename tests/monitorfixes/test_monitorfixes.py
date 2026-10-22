@@ -434,5 +434,14 @@ class PoisonBurst(Base):
         self.assertGreater(self.st["pending"][key]["next_try"], time.time())
 
 
+class ReplyBudget(Base):
+    def test_parts_share_one_max_reply_chars(self):
+        cap = self.m.MAX_REPLY_CHARS
+        for parts in (["a" * cap] * 4, ["a" * (cap - 5), "b" * 50]):
+            got = self.m.normalize_parts({"parts": parts})
+            self.assertLessEqual(sum(map(len, got)), cap, got)
+            self.assertEqual(got[0], parts[0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
