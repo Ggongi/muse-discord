@@ -99,22 +99,21 @@ def _config_path():
         BASE_DIR, "config.yaml")
 
 
-def _import_settings_module():
-    """muse_settings.py from this package (next to monitor.py); a copy
-    elsewhere on sys.path otherwise."""
-    here = os.path.join(BASE_DIR, "muse_settings.py")
-    if os.path.isfile(here):
-        cached = sys.modules.get("muse_settings")
-        if cached is not None and os.path.abspath(
-                getattr(cached, "__file__", "") or "") == here:
-            return cached
-        spec = importlib.util.spec_from_file_location("muse_settings", here)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["muse_settings"] = mod
-        spec.loader.exec_module(mod)
-        return mod
-    import muse_settings
-    return muse_settings
+def _import_local(name):
+    """name.py from this package (next to monitor.py), as
+    sys.modules[name]; a copy elsewhere on sys.path otherwise."""
+    here = os.path.join(BASE_DIR, name + ".py")
+    if not os.path.isfile(here):
+        return importlib.import_module(name)
+    cached = sys.modules.get(name)
+    if cached is not None and os.path.abspath(
+            getattr(cached, "__file__", "") or "") == here:
+        return cached
+    spec = importlib.util.spec_from_file_location(name, here)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +125,7 @@ def _import_settings_module():
 # Engine internals (timings, the reply size ceiling, guild_ids) are read
 # once here, from engine: (or their old locations).
 # ---------------------------------------------------------------------------
-MS = _import_settings_module()
+MS = _import_local("muse_settings")
 try:
     _SETTINGS = MS.Watcher(_config_path(), PLUGINS_DIR)
 except MS.SettingsError as e:
@@ -134,60 +133,9 @@ except MS.SettingsError as e:
           file=sys.stderr, flush=True)
     sys.exit(1)
 _S0 = _SETTINGS.current
-
-
-def _import_nl():
-    """settings_nl.py (plain-language settings) from this package."""
-    here = os.path.join(BASE_DIR, "settings_nl.py")
-    cached = sys.modules.get("settings_nl")
-    if cached is not None and os.path.abspath(
-            getattr(cached, "__file__", "") or "") == here:
-        return cached
-    if os.path.isfile(here):
-        spec = importlib.util.spec_from_file_location("settings_nl", here)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["settings_nl"] = mod
-        spec.loader.exec_module(mod)
-        return mod
-    import settings_nl
-    return settings_nl
-
-
-NL = _import_nl()
-
-
-def _import_watches():
-    """muse_watches.py (reminders and watches) from this package."""
-    here = os.path.join(BASE_DIR, "muse_watches.py")
-    cached = sys.modules.get("muse_watches")
-    if cached is not None and os.path.abspath(
-            getattr(cached, "__file__", "") or "") == here:
-        return cached
-    spec = importlib.util.spec_from_file_location("muse_watches", here)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["muse_watches"] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-W = _import_watches()
-
-
-def _import_scan():
-    """secret_scan.py (the outgoing secret filter) from this package."""
-    here = os.path.join(BASE_DIR, "secret_scan.py")
-    cached = sys.modules.get("secret_scan")
-    if cached is not None and os.path.abspath(
-            getattr(cached, "__file__", "") or "") == here:
-        return cached
-    spec = importlib.util.spec_from_file_location("secret_scan", here)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["secret_scan"] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-SCAN = _import_scan()
+NL = _import_local("settings_nl")      # settings requests in plain words
+W = _import_local("muse_watches")      # reminders and watches
+SCAN = _import_local("secret_scan")    # the outgoing secret filter
 
 # Anonymous daily usage counts (telemetry.py; README, "Privacy and usage
 # stats"). Off with telemetry.usage_stats: off or MUSE_DISCORD_TELEMETRY=off.
@@ -354,16 +302,6 @@ if "name" in (_OLD_BEHAVIOR.get("respond_to") or []) \
 if _OLD_BEHAVIOR.get("max_bot_turns") is not None:
     print("WARNING: behavior.max_bot_turns was removed and is ignored; "
           "the worker ends bot conversations by judgment.", flush=True)
-# Informational (the resolved everywhere / DM values at import); the
-# pipeline resolves the settings per scope through settings().
-_E0 = _S0.resolve(MS.Scope.everywhere())
-_D0 = _S0.resolve(MS.Scope.dm())
-BOTS_POLICY = "direct" if _E0["who.bots"] == "when-addressed" else "off"
-DM_POLICY = "off" if _D0["who.replies"] == "off" else (
-    "owner_only" if _D0["who.dms_from"] == "owners" else "open")
-INJECTION_QUARANTINE = _E0["privacy.suspicious"] != "answer"
-DAILY_REPLY_CAP = _E0["limits.per_day"]                  # None = off
-PER_USER_DAILY_CAP = _E0["limits.per_person_per_day"]    # None = off
 # The conversational follow-up window (who.replies: conversational).
 FOLLOW_UP_WINDOW_SECS = 120
 # Test-only (the e2e harness's driver bots stand in for people): these
@@ -462,6 +400,7 @@ API = "https://discord.com/api/v10"
 
 # The bot's own identity, fetched at startup. Used to recognize mentions,
 # skip the bot's own messages, and compute its channel permissions.
+# BOT_USER_ID is the same id (proactive.py reads it).
 BOT_ID = None
 BOT_NAME = None
 BOT_USER_ID = None
@@ -470,9 +409,6 @@ BOT_USER_ID = None
 # reply worker can actually see them (the worker has no network access).
 MAX_MEDIA_BYTES = 8 * 1024 * 1024
 MAX_MEDIA_PER_MESSAGE = 6
-
-# Bot's own user id (fetched at startup); used to skip its own DM messages.
-BOT_USER_ID = None
 MEDIA_TTL_SECS = 3600  # downloaded media older than this is swept each poll
 # Embeds are only downloaded from known media hosts (attachments always
 # come from the chat CDN). Keeps a malicious link unfurl from becoming a
@@ -524,26 +460,12 @@ PDFTOTEXT_TIMEOUT = 30
 GENERATED_TTL_SECS = 3600
 DISCORD_MAX_BYTES = 8 * 1024 * 1024  # unboosted server upload cap
 
-# A message "is an owner command" if it opens with an action verb, optionally
-# Owner-command gating is ID-based, not keyword-based: the monitor stamps
-# owner_command purely from the author's Discord user ID. Deciding whether
-# the owner's message is actually asking the bot to DO something is the
-# worker's job (natural-language understanding), not a regex's.
-# Strangers never get the flag, so the discord-api.py tool stays locked
-# for them no matter what their message text claims.
-
 # Conversation history: rolling window of recent messages kept per
 # channel/DM so the reply worker drafts with context. Stored in state.json,
 # attached to queue items (minus the triggering message itself).
 HISTORY_PER_CHANNEL = 12
 HISTORY_TEXT_CHARS = 300
 HISTORY_ATTACHED = 8
-
-# Burst coalescing: a trigger (mention / DM) waits
-# behavior.coalesce_seconds before entering the reply queue, so
-# rapid-fire follow-ups from the same author in the same channel fold
-# into ONE reply instead of one reply per message. (COALESCE_SECS is
-# resolved from config in the header block.)
 
 # Channels and guilds are discovered live at startup and refreshed
 # periodically: every channel/thread the bot can read, across every
@@ -666,16 +588,6 @@ def _no_access(e):
     return getattr(e, "code", None) in (403, 404)
 
 
-def run_to_end(gen):
-    """Run a sliceable REST generator (one that yields after each
-    request, see "Sliced REST work") to completion; its return value."""
-    while True:
-        try:
-            next(gen)
-        except StopIteration as e:
-            return e.value
-
-
 def discover_channels(previous=None):
     """Return ({channel_id: info}, {guild_id: guild_info}).
 
@@ -693,7 +605,12 @@ def discover_channels(previous=None):
     off from a 429), the previous entries are kept as they were instead
     of unmonitoring those channels (no poll, no sweep) until the next
     refresh."""
-    return run_to_end(discover_channels_iter(previous))
+    gen = discover_channels_iter(previous)
+    while True:
+        try:
+            next(gen)
+        except StopIteration as e:
+            return e.value
 
 
 def discover_channels_iter(previous=None):
@@ -787,29 +704,6 @@ def discover_channels_iter(previous=None):
     return found, guilds_out
 
 
-def discover_threads_for_guild(gid, gname, names_by_id, known_ids,
-                               perms_by_id=None, previous=None):
-    """Return {thread_id: info} for active threads in one guild that the
-    bot can read and whose ids aren't in known_ids yet.
-
-    Forum posts and text-channel threads are separate channels that never
-    appear in /guilds/{id}/channels, so they are discovered via the
-    active-threads endpoint instead. The display name is parent-qualified
-    ("help > <post title>") so logs and queue items show where a message
-    actually lives. Archived threads are skipped on purpose: a reply
-    un-archives a thread, and the next refresh picks it back up.
-
-    A thread's send permission comes from its parent channel: the bot
-    needs Send Messages in Threads there (Send Messages on the parent is
-    also accepted; the send-time 403 net catches any residual mismatch).
-    perms_by_id maps parent channel id -> effective permissions; when it
-    is None (light thread-only refresh), can_send is left unknown.
-    previous: as in discover_channels, kept on transient failures."""
-    return run_to_end(discover_threads_iter(gid, gname, names_by_id,
-                                            known_ids, perms_by_id,
-                                            previous))
-
-
 # Brand-new threads. A thread created since the previous successful
 # thread listing of its guild (or since the monitor started) is seeded at
 # its own id, not at its newest message: a mention posted in it before
@@ -827,8 +721,19 @@ _NEW_THREADS = set()         # thread ids to seed at their start
 
 def discover_threads_iter(gid, gname, names_by_id, known_ids,
                           perms_by_id=None, previous=None):
-    """discover_threads_for_guild as a generator that yields after each
-    request (see discover_channels_iter)."""
+    """{thread_id: info} for the active threads in one guild that the bot
+    can read and whose ids aren't in known_ids yet, as a generator that
+    yields after each request (see discover_channels_iter).
+
+    Forum posts and threads never appear in /guilds/{id}/channels, so
+    they come from the active-threads endpoint. The display name is
+    parent-qualified ("help > <post title>"). Archived threads are
+    skipped: a reply un-archives a thread, and the next refresh picks it
+    up. A thread's send permission comes from its parent (Send Messages
+    in Threads, or Send Messages; the send-time 403 net catches the
+    rest): perms_by_id maps parent id -> permissions, and None (the
+    thread-only refresh) leaves can_send unknown. previous: as in
+    discover_channels, kept on transient failures."""
     out = {}
     previous = previous or {}
     listed_at = time.time()
@@ -953,12 +858,10 @@ def headers():
 
 
 # ---------------------------------------------------------------------------
-# REST rate-limit tracker (2026-10-15, per RATE_LIMIT_BACKOFF_SPEC.md).
-# Discord 429s are per-IP (shared egress), and the old code answered every
-# 429 with another ~40-request poll burst 30s later, keeping the limit
-# tripped. Now any 429 from api_get/api_post records a backoff window
-# (Retry-After honored, else exponential), and the main loop gates all
-# REST-initiated work on it. The gateway path and outbox sends keep running.
+# REST rate limits. Discord 429s are per IP (shared egress), so any 429
+# records a backoff window (Retry-After honored, else exponential), and
+# the main loop holds all REST-initiated work (polls, sweeps, discovery)
+# until it passes. The gateway path and outbox sends keep running.
 # ---------------------------------------------------------------------------
 _rl_until = 0.0
 _rl_backoff_step = 0
@@ -1101,9 +1004,9 @@ def _live_nonces():
     maps, and the "nonce" fields of owner_items and the web checks
     (never other fields, such as a check's public group tag)."""
     out = set()
-    for cache in ("_NL_NONCES_WRITTEN", "_ITEM_NONCES_WRITTEN",
-                  "_WEB_NONCES_WRITTEN"):
-        body = (globals().get(cache) or {}).get("body")
+    for cache in (_NL_NONCES_WRITTEN, _ITEM_NONCES_WRITTEN,
+                  _WEB_NONCES_WRITTEN):
+        body = cache.get("body")
         if isinstance(body, dict):
             out |= {v for v in body.values() if isinstance(v, str) and v}
     try:   # a live heartbeat slot's nonce (proactive.py)
@@ -1121,8 +1024,8 @@ def _live_nonces():
         elif isinstance(v, list):
             for x in v:
                 walk(x)
-    for cache in ("_OWNER_ITEMS_WRITTEN", "_WEB_DUE_WRITTEN"):
-        walk((globals().get(cache) or {}).get("body"))
+    for cache in (_OWNER_ITEMS_WRITTEN, _WEB_DUE_WRITTEN):
+        walk(cache.get("body"))
     return out
 
 
@@ -1167,24 +1070,18 @@ def _secret_alert(where):
         return
     _SECRET_ALERT.update(day=day, busy=True)
     try:
-        for uid in sorted(OWNER_USER_IDS):
-            dm_owner(uid, {"content": (
-                "I blocked a reply that looked like it contained a "
-                "secret (a token or one of my private codes), so that "
-                "reply wasn't sent. monitor.log says where. I tell you "
-                "about this at most once a day."),
-                "allowed_mentions": {"parse": []}})
-    except Exception as e:
-        print(f"Could not alert the owners about a blocked send: {e}",
-              flush=True)
+        notify_owners("I blocked a reply that looked like it contained a "
+                      "secret (a token or one of my private codes), so "
+                      "that reply wasn't sent. monitor.log says where. I "
+                      "tell you about this at most once a day.")
     finally:
         _SECRET_ALERT["busy"] = False
 
 
-def api_post(path, data):
-    data = guard_outgoing(data, path)
-    body = json.dumps(data).encode()
-    req = urllib.request.Request(API + path, data=body, headers=headers())
+def _api_send(method, path, data):
+    body = json.dumps(guard_outgoing(data, path)).encode()
+    req = urllib.request.Request(API + path, data=body, headers=headers(),
+                                 method=method)
 
     def _do():
         with urllib.request.urlopen(req, timeout=20) as r:
@@ -1192,14 +1089,23 @@ def api_post(path, data):
     return _api_call(_do)
 
 
-def atomic_write(path, obj):
-    # A unique temp file per write: with one fixed "<path>.tmp", two
-    # writers (the monitor and the worker) could interleave on the same
-    # temp file and rename each other's half-written JSON into place.
-    try:
-        mode = os.stat(path).st_mode & 0o777
-    except OSError:
-        mode = 0o644
+def api_post(path, data):
+    return _api_send("POST", path, data)
+
+
+def api_patch(path, data):
+    return _api_send("PATCH", path, data)
+
+
+def atomic_write(path, obj, mode=None):
+    """Write JSON to path via a unique temp file and a rename (two writers
+    on one fixed "<path>.tmp" could rename each other's half-written
+    file into place). The file keeps its mode unless mode is given."""
+    if mode is None:
+        try:
+            mode = os.stat(path).st_mode & 0o777
+        except OSError:
+            mode = 0o644
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
                                prefix="." + os.path.basename(path) + ".",
                                suffix=".tmp")
@@ -1249,6 +1155,19 @@ def shared_lock():
         os.close(fd)  # closing the descriptor releases the flock
 
 
+def _read_json(path, kind=dict):
+    """path's JSON: an empty `kind` when the file is missing, None when it
+    is unreadable or not a `kind` (dict or list)."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return kind()
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, kind) else None
+
+
 def load_queue():
     """The queue as it is on disk now (a snapshot: writes are atomic
     renames, so reading needs no lock)."""
@@ -1280,10 +1199,10 @@ def _queue_apply(add=(), drop=None):
 def queue_edit(add=(), drop=None):
     """Apply a delta to reply_queue.json under the shared lock: re-read
     it, remove the items drop(item) is true for, append the items in add
-    whose message_id is not queued yet. The main loop used to write back
-    a copy loaded before slow work (media downloads, the sweep), which
-    resurrected items the worker had removed and deleted items appended
-    meanwhile. Returns the number of items appended."""
+    whose message_id is not queued yet. Never write back a copy loaded
+    before slow work (media downloads, the sweep): it would resurrect
+    removed items and drop ones appended meanwhile. Returns the number
+    of items appended."""
     with shared_lock():
         return _queue_apply(add, drop)
 
@@ -1318,7 +1237,7 @@ def save_state(state):
 
 
 def is_suspicious(content):
-    """Check message against injection patterns. Returns matched pattern or None."""
+    """The injection pattern content matches, else False."""
     lowered = content.lower()
     for pat in INJECTION_PATTERNS:
         if re.search(pat, lowered):
@@ -1344,14 +1263,8 @@ def quarantine(msg, channel_name, matched_pattern, fragments=()):
         entry["fragments"] = [{"message_id": f["id"],
                                "content": f.get("content", "")}
                               for f in fragments]
-    try:
-        with open(QUARANTINE_FILE) as f:
-            q = json.load(f)
-    except FileNotFoundError:
-        q = []
-    except (OSError, ValueError):
-        q = None
-    if not isinstance(q, list):   # kept for the owner, never emptied
+    q = _read_json(QUARANTINE_FILE, list)
+    if q is None:   # kept for the owner, never silently emptied
         with contextlib.suppress(OSError):
             os.replace(QUARANTINE_FILE, QUARANTINE_FILE + ".bad")
         print("quarantine.json was unreadable; moved to quarantine.json.bad.",
@@ -1369,26 +1282,19 @@ def quarantine(msg, channel_name, matched_pattern, fragments=()):
 
 
 # ---------------------------------------------------------------------------
-# Mention ledger (2026-10-15): the durable record that makes silent drops
-# impossible. Every mention/DM reaching a terminal state (replied,
-# quarantined, skipped with a reason) is written here, and the
-# reconciliation sweep (sweep_mentions) diffs recent channel mentions
-# against it and requeues anything unaccounted for. Before this, a mention
-# could die at any pipeline stage (storm, kill mid-cycle, enqueue failure,
-# worker drop) with no trace and no recovery.
+# Mention ledger: the durable record that makes silent drops impossible.
+# Every mention/DM reaching a terminal state (replied, quarantined,
+# skipped with a reason) is written here, and the reconciliation sweep
+# (sweep_mentions) diffs recent channel mentions against it and requeues
+# anything unaccounted for.
 # ---------------------------------------------------------------------------
 LEDGER_TERMINAL = ("replied", "quarantined", "skipped")
 
 
 def _ledger_load():
-    if os.path.exists(LEDGER_FILE):
-        try:
-            with open(LEDGER_FILE) as f:
-                d = json.load(f)
-            if isinstance(d, dict) and isinstance(d.get("entries"), dict):
-                return d
-        except Exception:
-            pass
+    d = _read_json(LEDGER_FILE)
+    if d and isinstance(d.get("entries"), dict):
+        return d
     return {"entries": {}}
 
 
@@ -1451,8 +1357,8 @@ def ledger_record_many(mids, status, reason="", channel_id=None,
     _ledger_save(d)
 
 
-# Reason codes for the ledger (2026-10-19), from the reason text every
-# caller already writes: what /settings' "Why no reply?" explains.
+# Reason codes for the ledger, from the reason text every caller
+# writes: what /settings' "Why no reply?" explains.
 _LEDGER_CODES = (
     ("settings: who.replies is off", "replies-off"),
     ("settings: none of the owners is in", "ownerless"),
@@ -1521,18 +1427,13 @@ def _ledger_terminal(mid):
 
 
 def _quarantine_ids():
-    if os.path.exists(QUARANTINE_FILE):
-        try:
-            with open(QUARANTINE_FILE) as f:
-                ids = set()
-                for e in json.load(f):
-                    ids.add(e.get("message_id"))
-                    ids.update(fr.get("message_id")
-                               for fr in e.get("fragments") or [])
-                return ids
-        except Exception:
-            pass
-    return set()
+    ids = set()
+    for e in _read_json(QUARANTINE_FILE, list) or []:
+        if isinstance(e, dict):
+            ids.add(e.get("message_id"))
+            ids.update(fr.get("message_id") for fr in e.get("fragments") or []
+                       if isinstance(fr, dict))
+    return ids
 
 
 def _snowflake_ts(mid):
@@ -1542,21 +1443,16 @@ def _snowflake_ts(mid):
         return 0.0
 
 
-def rate_allows(state, user_id, channel_id=None, scope=None):
-    """Enforce limits.per_day and limits.per_person_per_day (none = off).
+def rate_block(state, user_id, channel_id=None, scope=None):
+    """Enforce limits.per_day and limits.per_person_per_day (none = off):
+    None when allowed, else the cap that stops it, {"key", "counter"
+    ("everywhere", "server:<id>", "dms": where the cap is set), "cap"}.
     Each cap counts what happens in the scope WHERE IT IS SET (everywhere
     = one total across DMs and every server, a server = that server, dms
     = all DMs), and every cap set along the message's scope applies.
     Owners are never capped or counted: these limits bound abuse and
     token spend from strangers, not the owner's own use of the bot.
     Counted at queue time, one per burst."""
-    return rate_block(state, user_id, channel_id, scope) is None
-
-
-def rate_block(state, user_id, channel_id=None, scope=None):
-    """rate_allows, saying which cap stops it: None (allowed) or {"key",
-    "counter" ("everywhere", "server:<id>", "dms": where the cap is set),
-    "cap"}."""
     if user_id in OWNER_USER_IDS:
         return None
     if scope is None:
@@ -1600,7 +1496,7 @@ def rate_block(state, user_id, channel_id=None, scope=None):
 
 def rate_record(state, user_id, scope=None):
     """Count one queued item against every counter of its scope (see
-    rate_allows). Owners are not counted."""
+    rate_block). Owners are not counted."""
     if user_id in OWNER_USER_IDS:
         return
     rate = state["rate"]
@@ -1911,16 +1807,18 @@ def own_replies_in_run(history, msg):
     return n
 
 
-def notify_owners(text, components=None):
-    """DM every owner (with message components, e.g. buttons, when
-    given). Returns True when at least one DM landed (or there is nobody
-    to tell). Never raises."""
+def notify_owners(text, components=None, flags=None):
+    """DM every owner (with message components, e.g. buttons, and
+    message flags when given). Returns True when at least one DM landed
+    (or there is nobody to tell). Never raises."""
     if not OWNER_USER_IDS:
         print(f"Owner notice (no owners configured): {text}", flush=True)
         return True
     payload = {"content": text[:1990], "allowed_mentions": {"parse": []}}
     if components:
         payload["components"] = components
+    if flags:
+        payload["flags"] = flags
     delivered = False
     for uid in sorted(OWNER_USER_IDS):
         if dm_owner(uid, payload):
@@ -1988,7 +1886,7 @@ def _join_summary(gid, ginfo, channels):
             f"**Configure** (or use /settings), or {how}.")
 
 
-# Servers none of the owners is in (2026-10-21). A public bot can be
+# Servers none of the owners is in. A public bot can be
 # added to any server by anyone with its install link, and there it would
 # answer strangers on the owner's Muse. So in a server where no owner is a
 # member it answers nobody until an owner chooses When it answers for that
@@ -2265,15 +2163,6 @@ def release_version(value):
     return tuple(int(x) for x in m.groups()) if m else None
 
 
-def _read_json_dict(path):
-    try:
-        with open(path) as f:
-            d = json.load(f)
-    except (OSError, ValueError):
-        return {}
-    return d if isinstance(d, dict) else {}
-
-
 def _version_installed(tag, timeout=5):
     """True when HEAD already contains the release tag (updated by hand
     before the notice went out, or since). False when git cannot tell,
@@ -2336,7 +2225,7 @@ def announce_update(state):
     _update_announced["version"] = upd.get("version")
     if not updates_enabled():
         return
-    info = _read_json_dict(UPDATE_CHECK_FILE)
+    info = _read_json(UPDATE_CHECK_FILE) or {}
     version = info.get("latest")
     new = release_version(version)
     last = release_version(upd.get("version"))
@@ -2506,7 +2395,8 @@ def on_update_button(ix, rest, uid, record):
                          f"do.")
     now = int(time.time())
     if action == "now":
-        if _read_json_dict(UPDATE_REQUEST_FILE).get("version") != version:
+        if (_read_json(UPDATE_REQUEST_FILE) or {}).get("version") \
+                != version:
             try:
                 atomic_write(UPDATE_REQUEST_FILE, {
                     "version": version, "requested_at": now, "by": uid})
@@ -2801,14 +2691,11 @@ class SettingsCtx:
         its group) at one scope (scope_prefix as muse_settings.
         scope_prefix gives it, or a Place); the key reverted, or None.
         kw: children, admin_gid, expect (see muse_settings.undo)."""
-        fn = getattr(MS, "undo", None)
-        if fn is None:
-            raise MS.SettingsError("undo is not available in this version")
         if kw.get("admin_gid"):
             kw.setdefault("info", self)
         with _OVERLAY_LOCK:
-            out = fn(_SETTINGS.config_path, scope_prefix, by, PLUGINS_DIR,
-                     **kw)
+            out = MS.undo(_SETTINGS.config_path, scope_prefix, by,
+                          PLUGINS_DIR, **kw)
         settings()
         return out
 
@@ -2868,7 +2755,7 @@ class SettingsCtx:
         """The newest mention-ledger entries for a place (a Place from
         muse_settings: a server, a channel and its threads, or DMs),
         newest first: message_id, channel_id, guild_id, parent_id,
-        author_id (None in entries older than 2026-10-19), author,
+        author_id (None in old entries), author,
         status, code, detail, reason, at."""
         with _DIRECTORY_LOCK:
             where = dict(_DIRECTORY.get("where") or {})
@@ -2906,16 +2793,8 @@ class SettingsCtx:
 
     def names(self, some_id):
         """A server's or channel's name for muse_settings' sentences."""
-        some_id = str(some_id)
-        with _DIRECTORY_LOCK:
-            for g in _DIRECTORY["guilds"]:
-                if g["id"] == some_id:
-                    return g.get("name")
-            for chans in _DIRECTORY["channels"].values():
-                for c in chans:
-                    if str(c.get("id")) == some_id:
-                        return c.get("name")
-        return settings().labels.get(some_id)
+        return _directory_name(some_id) \
+            or settings().labels.get(str(some_id))
 
     def reload(self):
         """A fresh Settings through the monitor's own watcher, so the
@@ -2940,7 +2819,7 @@ class SettingsCtx:
 
 def _outcome(mid, e, where):
     """One ledger entry for /settings. Its server comes from the entry
-    (recorded since 2026-10-19), else from discovery; an entry is a DM's
+    (old entries have none), else from discovery; an entry is a DM's
     only when it says so or its channel is a known DM channel (an
     unmapped server channel is never shown under DMs)."""
     cid = str(e.get("channel_id") or "")
@@ -2977,8 +2856,8 @@ def _show_value(v):
     return str(v)
 
 
-def _digest_name(some_id):
-    """A server's, channel's or person's name for the digest's words."""
+def _directory_name(some_id):
+    """A server's or channel's name from discovery, else None."""
     some_id = str(some_id)
     with _DIRECTORY_LOCK:
         for g in _DIRECTORY["guilds"]:
@@ -2988,7 +2867,12 @@ def _digest_name(some_id):
             for c in chans:
                 if str(c.get("id")) == some_id:
                     return c.get("name")
-    return _USER_NAMES.get(some_id)
+    return None
+
+
+def _digest_name(some_id):
+    """A server's, channel's or person's name for the digest's words."""
+    return _directory_name(some_id) or _USER_NAMES.get(str(some_id))
 
 
 def _digest_words(c):
@@ -3007,10 +2891,8 @@ def _digest_words(c):
 
 
 def admin_digest_text(gid, changes):
-    with _DIRECTORY_LOCK:
-        known = _DIRECTORY["guilds"]
-    name = next((g["name"] for g in known if g["id"] == gid), None) \
-        or (GUILDS.get(gid) or {}).get("name") or gid
+    name = _directory_name(gid) or (GUILDS.get(gid) or {}).get("name") \
+        or gid
     head = (f"**Server admin changes in {name}** (server ID {gid}), made "
             f"with /settings:\n")
     tail = ("\nAdmins can only make me quieter there. To undo one, run "
@@ -3145,33 +3027,15 @@ _NL_UPKEEP = {"settings": None}
 
 
 def _write_private(path, obj):
-    """Atomic JSON write, mode 600 whatever the file had."""
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
-                               prefix="." + os.path.basename(path) + ".",
-                               suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            os.fchmod(f.fileno(), 0o600)
-            json.dump(obj, f)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    """atomic_write, mode 600 whatever the file had."""
+    atomic_write(path, obj, 0o600)
 
 
 def nl_journal(put=None, drop=None):
     """nl_journal.json: read it, or add (put=(token, entry)) or remove
     (drop=token) one entry. Any thread."""
     with _NL_JOURNAL_LOCK:
-        try:
-            with open(NL_JOURNAL_FILE) as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            data = {}
-        data = data if isinstance(data, dict) else {}
+        data = _read_json(NL_JOURNAL_FILE) or {}
         if put is not None:
             data[put[0]] = put[1]
         elif drop is not None and drop in data:
@@ -3632,11 +3496,7 @@ def note_owner_item(state, mid, dm=False, channel_id=None, content="",
 
 def _private_file_ok(path, body):
     """The file still holds body (it was not lost or mangled)."""
-    try:
-        with open(path) as f:
-            return json.load(f) == body
-    except (OSError, ValueError):
-        return False
+    return os.path.exists(path) and _read_json(path) == body
 
 
 def owner_items_write(state, check=False):
@@ -3733,12 +3593,10 @@ def reply_nonces_write(state, check=False):
         day = time.strftime("%Y-%m-%d")
         if _ITEM_NONCES_ALERT["day"] != day:
             _ITEM_NONCES_ALERT["day"] = day
-            for uid in sorted(OWNER_USER_IDS):
-                dm_owner(uid, {"content": (
-                    "I can't write item_nonces.json in my folder, so I "
-                    "can't send replies. Check the disk space and the "
-                    "folder's permissions; monitor.log has the error."),
-                    "allowed_mentions": {"parse": []}})
+            notify_owners("I can't write item_nonces.json in my folder, so "
+                          "I can't send replies. Check the disk space and "
+                          "the folder's permissions; monitor.log has the "
+                          "error.")
 
 
 def reply_nonces_upkeep(state, queued, now):
@@ -3965,14 +3823,7 @@ def nl_upkeep(state):
     if due is None:
         return
     text, components, groups = due
-    payload = {"content": text, "allowed_mentions": {"parse": []},
-               "flags": NL.SUPPRESS_NOTIFICATIONS}
-    if components:
-        payload["components"] = components
-    delivered = not OWNER_USER_IDS
-    for uid in sorted(OWNER_USER_IDS):
-        if dm_owner(uid, payload):
-            delivered = True
+    delivered = notify_owners(text, components, NL.SUPPRESS_NOTIFICATIONS)
     dropped = NL.notice_done(state, delivered)
     for g in groups:
         print(f"Settings (CLI, by {g['by']}): applied "
@@ -3989,18 +3840,6 @@ def nl_upkeep(state):
 _APP_ID = {"id": None}
 _COMMAND_REG = {"done": False, "next_try": 0.0, "last_error": None}
 COMMAND_RETRY_SECS = 60
-
-
-def api_patch(path, data):
-    data = guard_outgoing(data, path)
-    body = json.dumps(data).encode()
-    req = urllib.request.Request(API + path, data=body, headers=headers(),
-                                 method="PATCH")
-
-    def _do():
-        with urllib.request.urlopen(req, timeout=20) as r:
-            return json.load(r)
-    return _api_call(_do)
 
 
 def _command_differs(have, want):
@@ -4525,12 +4364,10 @@ def send_typing(channel_id):
 
 
 # ---------------------------------------------------------------------------
-# Typing indicator. Discord shows one typing ping for ~10s. The main loop
-# used to re-send it every 8s itself, but one iteration can take much
-# longer (a full REST poll, the sweep, discovery, media downloads, a
-# multi-part send), so the indicator kept lapsing and users saw it
-# flicker until the reply arrived. A daemon thread now pings every
-# active channel on its own clock. The main loop only says which
+# Typing indicator. Discord shows one typing ping for ~10s, and one main
+# loop iteration can take longer (media downloads, a multi-part send),
+# so a daemon thread pings every active channel on its own clock and
+# the indicator never lapses. The main loop only says which
 # channels are active (typing_refresh): a channel types while it has a
 # pending burst (not in enqueue back-off) or a queue item, for at most
 # TYPING_MAX_SECS per burst or item so a dead worker does not type
@@ -5094,47 +4931,22 @@ def _fetch_complete(url, max_bytes, timeout, kind):
     return bytes(data), ctype
 
 
-def download_media(url, dest_path):
-    """Download a media URL to dest_path. Returns the content_type if it is
-    an image within the size cap, else None (partial files are removed)."""
+# kind -> (size cap, timeout, the content type it must have: "" = any).
+DOWNLOADS = {"image": (MAX_MEDIA_BYTES, 20, "image/"),
+             "video": (MAX_VIDEO_BYTES, 60, "video/"),
+             "document": (MAX_DOC_BYTES, 20, "")}
+
+
+def download(kind, url, dest_path):
+    """Download a complete file of this kind to dest_path; its content
+    type (a document's may be anything), or None (nothing written)."""
+    cap, timeout, want = DOWNLOADS[kind]
     try:
-        data, ctype = _fetch_complete(url, MAX_MEDIA_BYTES, 20, "image")
+        data, ctype = _fetch_complete(url, cap, timeout, kind)
     except Exception as e:
-        print("Media download failed: %s" % e, flush=True)
+        print(f"{kind.capitalize()} download failed: {e}", flush=True)
         return None
-    if not data or not ctype.startswith("image/"):
-        return None
-    with open(dest_path, "wb") as f:
-        f.write(data)
-    return ctype
-
-
-def download_video(url, dest_path):
-    """Download a video URL to dest_path. Returns content_type if video/* and
-    within the size cap, else None (partial files are removed)."""
-    try:
-        data, ctype = _fetch_complete(url, MAX_VIDEO_BYTES, 60, "video")
-    except Exception as e:
-        print("Video download failed: %s" % e, flush=True)
-        return None
-    if not data or not ctype.startswith("video/"):
-        return None
-    with open(dest_path, "wb") as f:
-        f.write(data)
-    return ctype
-
-
-def download_document(url, dest_path):
-    """Download a document URL to dest_path. Returns the content_type if the
-    download completed within the size cap, else None (partial files are
-    removed). Content type is not filtered here; the caller decides what to
-    extract based on type/extension."""
-    try:
-        data, ctype = _fetch_complete(url, MAX_DOC_BYTES, 20, "document")
-    except Exception as e:
-        print("Document download failed: %s" % e, flush=True)
-        return None
-    if not data:
+    if not data or not ctype.startswith(want):
         return None
     with open(dest_path, "wb") as f:
         f.write(data)
@@ -5345,7 +5157,7 @@ def collect_media(msg):
             break
         vdest = os.path.join(MEDIA_DIR, "%s_%d.vid" % (msg["id"], len(media)))
         try:
-            ctype = download_video(url, vdest)
+            ctype = download("video", url, vdest)
         except Exception as e:
             print("Video download failed (%s): %s" % (name, e), flush=True)
             continue
@@ -5372,7 +5184,7 @@ def collect_media(msg):
         dest = os.path.join(MEDIA_DIR, "%s_%d.doc" % (msg["id"],
                                                       len(documents)))
         try:
-            got_ctype = download_document(url, dest)
+            got_ctype = download("document", url, dest)
         except Exception as e:
             print("Document download failed (%s): %s" % (name, e),
                   flush=True)
@@ -5407,7 +5219,7 @@ def collect_media(msg):
             seen.add(u)
             dest = os.path.join(MEDIA_DIR, "%s_%d.img" % (msg["id"], len(media)))
             try:
-                ctype = download_media(u, dest)
+                ctype = download("image", u, dest)
             except Exception as e:
                 print("Media download failed (%s): %s" % (label, e), flush=True)
                 continue
@@ -5475,11 +5287,10 @@ def record_history(state, channel_id, messages):
 # ---------------------------------------------------------------------------
 # REST watermark vs gateway dedupe. state["last_seen"][cid] is the REST
 # poll's watermark and only the poll advances it (or seeding, the first
-# time a channel is seen). The gateway used to advance it too, so after a
-# session that could not be resumed lost events, the first message past
-# the gap moved the watermark beyond the missed ones and the poll never
-# read them. Now messages the gateway handled above the watermark are
-# remembered in state["gw_seen"][cid], the poll skips those, and both
+# time a channel is seen): if the gateway advanced it, the first message
+# after a gap of lost events would move it past the missed ones. Messages
+# the gateway handled above the watermark are remembered in
+# state["gw_seen"][cid] instead, the poll skips those, and both
 # paths skip anything at or below the watermark: every message is
 # processed once, by whichever path sees it first.
 # ---------------------------------------------------------------------------
@@ -6166,9 +5977,8 @@ def _answered_id(state, item):
 
 def _outbox_problem(item):
     """Why an outbox item cannot be processed, or None. Ids given as
-    numbers are normalized to strings in place. A wrong type used to
-    raise out of process_outbox before its final write, which blocked the
-    outbox and re-sent the earlier items with no reply_to every cycle."""
+    numbers are normalized to strings in place. Checked first, so a
+    wrong type never raises out of process_outbox mid-pass."""
     if not isinstance(item, dict):
         return "not a JSON object"
     for field in ("channel_id", "reply_to", "item"):
@@ -6269,12 +6079,7 @@ def _scrub_nonces(value):
 
 def _reject_outbox(rejects):
     """Set malformed outbox items aside for the owner's review."""
-    try:
-        with open(OUTBOX_REJECTED_FILE) as f:
-            kept = json.load(f)
-        kept = kept if isinstance(kept, list) else []
-    except (OSError, ValueError):
-        kept = []
+    kept = _read_json(OUTBOX_REJECTED_FILE, list) or []
     now = datetime.now(timezone.utc).isoformat()
     kept += [{"rejected_at": now, "reason": reason,
               "item": _scrub_nonces(item)} for item, reason in rejects]
@@ -6369,6 +6174,14 @@ def _set_aside_poison(key, exc):
         _reject_outbox([(redact_nonces(i), why) for i in gone[:1]])
 
 
+def _refuse(rejects, item, why, note=""):
+    """Log a refused outbox item and set it aside (nonces blanked)."""
+    where = item.get("channel_name") if isinstance(item, dict) else None
+    print(f"Refused outbox item for {where or '?'}: {why}{note} (set aside "
+          f"in {os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
+    rejects.append((redact_nonces(item), why))
+
+
 def bind_started(state, item, settled, remaining, rejects):
     """The one binding step for outbox items that answer an item the
     monitor started, run before owner_dm_gate (PROTOCOL.md, "Items the
@@ -6386,11 +6199,7 @@ def bind_started(state, item, settled, remaining, rejects):
         settled.append({"item": fire["gone"]})
         return None, True
     if isinstance(fire, str):
-        print(f"Refused outbox item for "
-              f"{item.get('channel_name') or '?'}: {fire} (set aside "
-              f"in {os.path.basename(OUTBOX_REJECTED_FILE)})",
-              flush=True)
-        rejects.append((redact_nonces(item), fire))
+        _refuse(rejects, item, fire)
         return None, True
     if fire is not None:
         return fire, False
@@ -6401,17 +6210,13 @@ def bind_started(state, item, settled, remaining, rejects):
         pro = None
         if could_name_slot(item):
             # Never left to the ordinary path: set aside.
-            why = "proactive: its slot could not be checked"
-            print(f"Refused outbox item: {why} (set aside in "
-                  f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
-            rejects.append((redact_nonces(item), why))
+            _refuse(rejects, item,
+                    "proactive: its slot could not be checked")
             return None, True
     if pro is None:
         return None, False
     if pro.reject:
-        print(f"Refused outbox item: {pro.reject} (set aside in "
-              f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
-        rejects.append((redact_nonces(item), pro.reject))
+        _refuse(rejects, item, pro.reject)
     if pro.retry:
         remaining.append(item)
     if pro.spent:
@@ -6491,9 +6296,7 @@ def note_reply_nonce(state, refusal):
     day = time.strftime("%Y-%m-%d")
     if state.get("stale_prompt_alert") != day:
         state["stale_prompt_alert"] = day
-        for uid in sorted(OWNER_USER_IDS):
-            dm_owner(uid, {"content": STALE_PROMPT_DM,
-                           "allowed_mentions": {"parse": []}})
+        notify_owners(STALE_PROMPT_DM)
 
 
 def bound_elsewhere(state, item):
@@ -6600,12 +6403,7 @@ def process_outbox(state):
         _OUTBOX_CURRENT["key"] = _outbox_key(item)  # see outbox_pass
         problem = _outbox_problem(item)
         if problem:
-            where = item.get("channel_name") if isinstance(item, dict) \
-                else None
-            print(f"Rejected outbox item for {where or '?'}: {problem} "
-                  f"(set aside in "
-                  f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
-            rejects.append((redact_nonces(item), problem))
+            _refuse(rejects, item, problem)
             continue
         # Items the monitor started (reminder and watch fires, heartbeat
         # slots): bound to their own record before anything else looks
@@ -6618,10 +6416,7 @@ def process_outbox(state):
         # only the owner-DM-only wake holding the DM's nonce may touch it.
         refused = owner_dm_gate(state, item, index)
         if refused:
-            print(f"Refused outbox item for {item.get('channel_name') or '?'}"
-                  f": {refused}; the owner DM stays open (set aside in "
-                  f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
-            rejects.append((redact_nonces(item), refused))
+            _refuse(rejects, item, refused, "; the owner DM stays open")
             continue
         # Then: it answers an open queue item it was handed (its
         # reply_nonce), in that item's channel; a fire's answer too.
@@ -6629,10 +6424,7 @@ def process_outbox(state):
         if not bound_elsewhere(state, item):
             note_reply_nonce(state, stray)
         if stray:
-            print(f"Refused outbox item for {item.get('channel_name') or '?'}"
-                  f": {stray} (set aside in "
-                  f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
-            rejects.append((redact_nonces(item), stray))
+            _refuse(rejects, item, stray)
             continue
         reply_to = item.get("reply_to")
         qid = _answered_id(state, item)
@@ -6652,20 +6444,13 @@ def process_outbox(state):
         except Exception as e:   # not recorded: the item stays open
             bad = f"proactive: could not record it ({e})"
         if bad:
-            print(f"Rejected outbox item for {item.get('channel_name') or '?'}"
-                  f": {bad} (set aside in "
-                  f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
-            rejects.append((redact_nonces(item), bad))
+            _refuse(rejects, item, bad)
             continue
         sched = None  # a refused schedule action: (line, reason, detail)
         if "schedule" in item:
             got = watch_schedule(state, item, index)
             if got and got[0] == "reject":
-                print(f"Refused outbox item for "
-                      f"{item.get('channel_name') or '?'}: {got[1]} (set "
-                      f"aside in {os.path.basename(OUTBOX_REJECTED_FILE)})",
-                      flush=True)
-                rejects.append((redact_nonces(item), got[1]))
+                _refuse(rejects, item, got[1])
                 continue
             sched = got[1:] if got else None
         if "settings" in item:
@@ -8291,11 +8076,6 @@ def drain_gateway(state, inbox, channels):
     (see note_gateway_seen). Messages from servers outside a non-empty
     bot.guild_ids are ignored."""
     mentions, dms = [], []
-    guild_names = {}
-    for info in channels.values():
-        if info.get("guild_id"):
-            guild_names[info["guild_id"]] = info.get("guild_name",
-                                                     info["guild_id"])
     while True:
         try:
             m = inbox.get_nowait()
@@ -8341,11 +8121,10 @@ def drain_gateway(state, inbox, channels):
                     continue
                 if not ch or not ch.get("id"):
                     continue
+                g = ch.get("guild_id") or gid
                 info = {"name": ch.get("name") or "?",
-                        "guild_id": ch.get("guild_id") or gid,
-                        "guild_name": guild_names.get(
-                            ch.get("guild_id") or gid,
-                            ch.get("guild_id") or gid),
+                        "guild_id": g,
+                        "guild_name": (GUILDS.get(g) or {}).get("name") or g,
                         "can_send": None,
                         "thread": ch.get("type") in (10, 11, 12),
                         "parent_id": ch.get("parent_id"),
@@ -8557,35 +8336,6 @@ _HOOK_OWNER = {}        # id(hook fn) -> plugin id
 _LOADED_PLUGINS = set()  # plugin folders already imported
 
 
-def param_for(params, key, guild_id=None, guild_name=None):
-    """Resolve one plugin param for one guild, following the old global
-    + per_guild override pattern (for a plugin the settings know nothing
-    about). Two shapes are supported:
-
-    1. The param itself is {"default": value, "per_guild": {gid-or-name:
-       value}}: a per_guild hit wins, else the default.
-    2. The whole params block has a "per_guild" map of param overrides:
-       params["per_guild"][gid-or-name][key] wins over params[key].
-
-    per_guild keys may be guild IDs or guild (server) names; IDs are
-    tried first. Returns None when the param is unset."""
-    if not isinstance(params, dict):
-        return None
-    pg = params.get("per_guild")
-    if isinstance(pg, dict):
-        for k in (guild_id, guild_name):
-            if k and isinstance(pg.get(k), dict) and key in pg[k]:
-                return pg[k][key]
-    val = params.get(key)
-    if isinstance(val, dict) and ("default" in val or "per_guild" in val):
-        inner = val.get("per_guild") or {}
-        for k in (guild_id, guild_name):
-            if k and k in inner:
-                return inner[k]
-        return val.get("default")
-    return val
-
-
 class PluginAPI:
     """The facade handed to a plugin's register() at load time."""
 
@@ -8604,8 +8354,8 @@ class PluginAPI:
         a list: [] = the owners; daily_cap -> per_day)."""
         st = settings()
         man = st.manifests.get(self._pid or self.name)
-        if man is None:
-            return param_for(self.params, key, guild_id, guild_name)
+        if man is None:   # its plugin.yaml is gone: the values at load
+            return self.params.get(key)
         skey, spec = man.spec_for(key)
         if spec is None:
             return None
@@ -8710,14 +8460,12 @@ def _note_no_send(msg, cname):
 
 
 # ---------------------------------------------------------------------------
-# Sliced REST work (2026-10-18). The main loop used to run the whole REST
-# poll (a request per channel), the sweep, the thread refresh, and
-# discovery inline. Behind a slow proxy (0.6s a request, ~40 channels)
-# one poll blocked the loop for ~23s of every 30, so a DM the gateway had
-# delivered at once sat in the inbox for 25-95s before it was even
-# staged. Now each tick spends about REST_SLICE_SECS on REST reads (at
-# least one request when any is due) and the fast path (gateway drain,
-# staging, burst flushes, typing, the outbox) runs between slices.
+# Sliced REST work. The REST poll (a request per channel), the sweep, the
+# thread refresh and discovery would block the loop for many seconds
+# behind a slow proxy, so each tick spends about REST_SLICE_SECS on REST
+# reads (at least one request when any is due) and the fast path
+# (gateway drain, staging, burst flushes, typing, the outbox) runs
+# between slices.
 #
 # The poll is a rotation over its targets: the owners' DM channels, then
 # every monitored channel. A rotation starts when the previous one has
@@ -8952,6 +8700,13 @@ def discovery_iter(state):
     save_state(state)
 
 
+def _adopt_identity(me, how=""):
+    global BOT_ID, BOT_USER_ID, BOT_NAME
+    BOT_ID = BOT_USER_ID = me.get("id")
+    BOT_NAME = me.get("username")
+    print(f"Bot user id: {BOT_ID}{how}", flush=True)
+
+
 def outbox_waiting(since):
     """True when reply_outbox.json holds a reply written after since (the
     last outbox pass): a cheap stat, as the monitor leaves the file as
@@ -8966,14 +8721,13 @@ def outbox_waiting(since):
 
 
 def main():
-    global BOT_USER_ID, BOT_ID, BOT_NAME, CHANNELS, GUILDS, _FORCE_DISCOVERY
+    global CHANNELS, GUILDS, _FORCE_DISCOVERY
     _acquire_singleton()
     TM.start()
     touch_heartbeat()
-    # Identity FIRST, discovery second: the watchdog's health check waits
+    # Identity first, discovery second: the watchdog's health check waits
     # for the identity marker, and full discovery (a probe per channel
-    # and thread) took ~37s by 2026-10-13, past the watchdog's old 30s
-    # window, so it kept killing healthy monitors mid-startup.
+    # and thread) can take longer than its window.
     #
     # Marker contract with watchdog.sh:
     #   "Bot user id: <id>"    identity confirmed (here, in-loop, or from
@@ -8982,18 +8736,11 @@ def main():
     #                          heal (429 storm, network): the monitor is
     #                          up, keeps retrying, and the gateway still
     #                          delivers. The watchdog counts it as a
-    #                          start; it used to print the "Bot user id"
-    #                          marker here so a 429 storm would not get a
-    #                          gateway-live monitor killed (2026-10-15),
-    #                          which also hid a revoked token.
+    #                          start, without hiding a revoked token.
     #   "TOKEN REJECTED"       a 401: the monitor exits (status 3) and the
     #                          watchdog raises the token alert.
     try:
-        _me = api_get("/users/@me")
-        BOT_USER_ID = _me.get("id")
-        BOT_ID = BOT_USER_ID
-        BOT_NAME = _me.get("username")
-        print(f"Bot user id: {BOT_USER_ID}", flush=True)
+        _adopt_identity(api_get("/users/@me"))
     except Exception as e:
         if getattr(e, "code", None) == 401:
             token_rejected_exit("401 from /users/@me")
@@ -9082,12 +8829,7 @@ def main():
                                 or "gateway closed with code 4004")
         touch_heartbeat()
         if BOT_USER_ID is None and _gateway_status.get("user"):
-            _me = _gateway_status["user"]
-            BOT_USER_ID = _me.get("id")
-            BOT_ID = BOT_USER_ID
-            BOT_NAME = _me.get("username")
-            print(f"Bot user id: {BOT_USER_ID} (from gateway READY)",
-                  flush=True)
+            _adopt_identity(_gateway_status["user"], " (from gateway READY)")
         now = time.time()
         backing = rest_backing_off()
         backoff_seen = backoff_seen or backing
@@ -9225,12 +8967,8 @@ def main():
                 _rl_note_clean_cycle()
                 if BOT_USER_ID is None:
                     try:
-                        _me = api_get("/users/@me")
-                        BOT_USER_ID = _me.get("id")
-                        BOT_ID = BOT_USER_ID
-                        BOT_NAME = _me.get("username")
-                        print(f"Bot user id: {BOT_USER_ID} "
-                              f"(recovered in-loop)", flush=True)
+                        _adopt_identity(api_get("/users/@me"),
+                                        " (recovered in-loop)")
                     except Exception as e:
                         if getattr(e, "code", None) == 401:
                             token_rejected_exit("401 from /users/@me")
