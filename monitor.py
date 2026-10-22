@@ -314,6 +314,11 @@ if TREAT_AS_HUMAN:
           flush=True)
 
 
+def _who(msg):
+    """A message's author object ({} when it has none)."""
+    return msg.get("author") or {}
+
+
 def is_bot_author(author):
     """True when a message author is a bot (Discord's author.bot), unless
     testing.treat_as_human lists its id."""
@@ -1652,7 +1657,7 @@ def people_match(value, user_id, roles=lambda: set()):
 def who_allows(msg, guild_id, resolved):
     """who.allow / who.ignore for a message's author (owners always
     pass; ignore wins over allow)."""
-    author = msg.get("author", {}) or {}
+    author = _who(msg)
     uid = str(author.get("id") or "")
     if uid in OWNER_USER_IDS:
         return True
@@ -1779,7 +1784,7 @@ def addresses_someone_else(msg):
     another user or a role (the bot's own mention is direct address)."""
     if msg.get("message_reference"):
         rm = msg.get("referenced_message") or {}
-        if (rm.get("author", {}) or {}).get("id") != BOT_ID:
+        if _who(rm).get("id") != BOT_ID:
             return True
     if any((m or {}).get("id") != BOT_ID for m in msg.get("mentions") or []):
         return True
@@ -1790,7 +1795,7 @@ def follow_up_open(state, msg):
     """True when msg falls in its author's open follow-up window in its
     channel (and does not address someone else, which closes it)."""
     fu = (state or {}).get("follow_up") or {}
-    author = msg.get("author", {}) or {}
+    author = _who(msg)
     key = f"{msg.get('channel_id')}:{author.get('id')}"
     opened = fu.get(key)
     if opened is None or is_bot_author(author):
@@ -3935,7 +3940,7 @@ def is_mention(msg):
     text containing the bot's name is NOT a mention: in a server whose
     topic shares the bot's name, that made every casual "my muse ..." a
     summons. Whether a bot author may trigger is trigger_kind's call."""
-    author = msg.get("author", {}) or {}
+    author = _who(msg)
     if author.get("id") == BOT_ID:
         return False
     return any(m.get("id") == BOT_ID for m in msg.get("mentions", []))
@@ -3964,7 +3969,7 @@ def trigger_verdict(msg, guild_id=None, state=None):
     """trigger_kind plus why: (kind, refusal). refusal is set only when
     the message addresses the bot directly (addresses_bot) and the
     settings of its scope decline it; ordinary chatter gets None."""
-    author = msg.get("author", {}) or {}
+    author = _who(msg)
     if author.get("id") == BOT_ID:
         return None, None
     gid = guild_id or msg.get("guild_id") \
@@ -4000,7 +4005,7 @@ def note_refused(msg, cname, reason):
     judges by the settings in force when it runs) never answers it
     later, after a setting is relaxed. A deliberately ignored message
     stays ignored. Ordinary chatter is never ledgered."""
-    author = msg.get("author", {}) or {}
+    author = _who(msg)
     ledger_record(msg["id"], "skipped", f"settings: {reason}",
                   channel_id=msg.get("channel_id"),
                   author=author.get("username"), author_id=author.get("id"))
@@ -4017,7 +4022,7 @@ def is_reply_to_bot(msg):
     rm = msg.get("referenced_message")
     if not rm:
         return False
-    return (rm.get("author", {}) or {}).get("id") == BOT_ID
+    return _who(rm).get("id") == BOT_ID
 
 
 def get_reply_context(msg):
@@ -4038,7 +4043,7 @@ def get_reply_context(msg):
             return None
     if not rm:
         return None
-    author = rm.get("author", {}) or {}
+    author = _who(rm)
     return {
         "author": author.get("username", "?"),
         "author_id": author.get("id"),
@@ -4051,13 +4056,12 @@ def hold_fragment(state, channel_id, msg):
     """If (channel, author) already has a burst being coalesced, append this
     message to it as a fragment and return True (caller must not classify it
     independently). The trigger message itself is never a fragment."""
-    author_id = (msg.get("author", {}) or {}).get("id")
+    author_id = _who(msg).get("id")
     key = f"{channel_id}:{author_id}"
     entry = state.get("pending", {}).get(key)
     if entry and msg["id"] != entry["first_id"]:
         entry["fragments"].append(msg)
-        print(f"Holding fragment from "
-              f"{(msg.get('author', {}) or {}).get('username')} in "
+        print(f"Holding fragment from {_who(msg).get('username')} in "
               f"{entry['channel_name']} for one coalesced reply.",
               flush=True)
         return True
@@ -4070,7 +4074,7 @@ def stage_trigger(state, msg, cname, guild_id, kind, dm=False):
     within COALESCE_SECS fold into the same burst; flush_pending() turns
     each matured burst into a single queue item. A second trigger from the
     same author while a burst is open becomes a fragment of it."""
-    author_id = (msg.get("author", {}) or {}).get("id")
+    author_id = _who(msg).get("id")
     key = f"{msg['channel_id']}:{author_id}"
     pending = state.setdefault("pending", {})
     if key in pending:
@@ -4081,9 +4085,8 @@ def stage_trigger(state, msg, cname, guild_id, kind, dm=False):
         if kind == "mention" and entry.get("kind") == "follow_up":
             entry["kind"] = "mention"  # direct address beats a follow-up
         entry["fragments"].append(msg)
-        print(f"Additional trigger from "
-              f"{(msg.get('author', {}) or {}).get('username')} folded into "
-              f"pending burst in {cname}.", flush=True)
+        print(f"Additional trigger from {_who(msg).get('username')} "
+              f"folded into pending burst in {cname}.", flush=True)
         return
     pending[key] = {
         "first_id": msg["id"],
@@ -4100,7 +4103,7 @@ def stage_trigger(state, msg, cname, guild_id, kind, dm=False):
         "fragments": [],
     }
     note_ingested(state, msg["id"])
-    print(f"Staged {kind} from {(msg.get('author', {}) or {}).get('username')} "
+    print(f"Staged {kind} from {_who(msg).get('username')} "
           f"in {cname} for coalescing.", flush=True)
 
 
@@ -4232,6 +4235,7 @@ def flush_pending(state, queue, force=False):
         if force or early or now - entry["first_seen"] >= entry.get(
                 "window", COALESCE_SECS):
             trigger = entry["trigger"]
+            who = _who(trigger).get("username")
             try:
                 ok = enqueue_message(trigger, entry["channel_name"], state,
                                      queue, dm=entry["kind"] == "dm",
@@ -4245,10 +4249,9 @@ def flush_pending(state, queue, force=False):
                 ok = False
             n_frag = len(entry["fragments"])
             why = " (author stopped typing)" if early and not force else ""
-            print(f"Flushed {entry['kind']} burst "
-                  f"({1 + n_frag} message(s)) from "
-                  f"{(trigger.get('author', {}) or {}).get('username')} in "
-                  f"{entry['channel_name']}: queued={ok}{why}", flush=True)
+            print(f"Flushed {entry['kind']} burst ({1 + n_frag} message(s)) "
+                  f"from {who} in {entry['channel_name']}: queued={ok}{why}",
+                  flush=True)
             if ok:
                 del pending[key]
                 flushed = True
@@ -4271,16 +4274,11 @@ def flush_pending(state, queue, force=False):
                     ledger_record_many(
                         [trigger["id"]]
                         + [f["id"] for f in entry["fragments"]],
-                        "skipped",
-                        f"enqueue failed {entry['tries']}x",
-                        channel_id=entry["channel_id"],
-                        author=(trigger.get('author', {}) or {})
-                        .get('username'),
-                        author_id=(trigger.get('author', {}) or {})
-                        .get('id'))
-                    print(f"Dropping burst from "
-                          f"{(trigger.get('author', {}) or {}).get('username')} "
-                          f"in {entry['channel_name']} after 3 failed "
+                        "skipped", f"enqueue failed {entry['tries']}x",
+                        channel_id=entry["channel_id"], author=who,
+                        author_id=_who(trigger).get("id"))
+                    print(f"Dropping burst from {who} in "
+                          f"{entry['channel_name']} after 3 failed "
                           f"enqueues (recorded in mention ledger).",
                           flush=True)
                     del pending[key]
@@ -5258,7 +5256,7 @@ def record_history(state, channel_id, messages):
     for m in sorted(messages, key=lambda x: int(x["id"])):
         if m["id"] in seen_ids:
             continue
-        author = m.get("author", {}) or {}
+        author = _who(m)
         text = (m.get("content") or "")[:HISTORY_TEXT_CHARS]
         if not text and not (m.get("attachments") or m.get("embeds")):
             continue
@@ -5404,7 +5402,7 @@ def classify_message(state, msg, channel_name, guild_id=None):
         # thread", ...) carry the acting user as author: never a
         # trigger, a follow-up or a fragment.
         return None
-    author = msg.get("author", {}) or {}
+    author = _who(msg)
     if author.get("id") == BOT_ID:
         return None  # the bot's own messages: never triggers or fragments
     watch_scan(msg, guild_id)  # Discord watches (cheap; never raises)
@@ -5534,7 +5532,7 @@ def note_dm_refused(msg):
     or a who.dms_from-listed person's is ledgered (see note_refused): the
     sweep covers only their DM channels, and a stranger's DMs stay
     unrecorded."""
-    author = msg.get("author", {}) or {}
+    author = _who(msg)
     if dm_swept_author(author.get("id")) and not is_bot_author(author):
         note_refused(msg, "DM with " + (author.get("username") or "?"),
                      dm_refusal(author) or "who.replies is off for DMs")
@@ -5569,7 +5567,7 @@ def conversation_participants(history, msg, reply_ctx):
             p["you"] = True
         people[pid] = p
 
-    author = msg.get("author", {}) or {}
+    author = _who(msg)
     add(author.get("id"), author.get("username"), is_bot_author(author),
         (msg.get("member") or {}).get("nick") or author.get("global_name"))
     for h in reversed(history):
@@ -8061,7 +8059,7 @@ def drain_gateway(state, inbox, channels):
             continue
         # Recorded even when the poll got here first: the burst holding
         # this message needs to know when its author last spoke.
-        note_activity(cid, (m.get("author", {}) or {}).get("id"), m["id"])
+        note_activity(cid, _who(m).get("id"), m["id"])
         last = state["last_seen"].get(cid)
         if last and int(m["id"]) <= int(last):
             continue  # the poll loop already handled it
@@ -8109,7 +8107,7 @@ def drain_gateway(state, inbox, channels):
             # are even read (dm_sender_allowed): under the default
             # (dms_from: owners) everyone else's DMs are dropped unread
             # and unrecorded; dms.who.replies: off drops all of them.
-            author = m.get("author", {}) or {}
+            author = _who(m)
             if author.get("id") == BOT_ID:
                 record_history(state, cid, [m])
                 note_gateway_seen(state, cid, m["id"])
@@ -8188,7 +8186,7 @@ def sweep_mentions(state, queue, channels, dms=True):
             continue
         for m in sorted(msgs, key=lambda x: int(x["id"])):
             mid = m["id"]
-            author = m.get("author", {}) or {}
+            author = _who(m)
             if author.get("id") == BOT_ID:
                 continue  # (other bots: trigger_kind applies behavior.bots)
             if m.get("type", 0) not in CONVERSATION_TYPES:
@@ -8440,8 +8438,8 @@ def _note_no_send(msg, cname):
               f"messages there.", flush=True)
     ledger_record(msg["id"], "skipped", "no send permission in channel",
                   channel_id=cid,
-                  author=(msg.get("author", {}) or {}).get("username"),
-                  author_id=(msg.get("author", {}) or {}).get("id"))
+                  author=_who(msg).get("username"),
+                  author_id=_who(msg).get("id"))
 
 
 
