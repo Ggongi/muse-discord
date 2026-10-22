@@ -114,8 +114,8 @@ APOLOGY = ("Sorry, something went wrong with /settings. Nothing was "
            "changed by this click; try again in a moment.")
 ADMIN_ONLY_QUIETER = ("Server admins can make the bot quieter here, never "
                       "louder. Ask one of the bot's owners for that.")
-OVERLAY_BROKEN = ("⚠ config.discord.yaml can't be read, so changes from "
-                  "Discord are paused. Fix it on the bot's machine.")
+OVERLAY_BROKEN = ("⚠ I can't read config.discord.yaml, so changes from "
+                  "Discord are paused. Ask your Muse to fix that file.")
 ROLES_ELSEWHERE = ("Roles only count in their own server, so the roles "
                    "you picked were left out.")
 FIXED_NOTE = "-# Fixed. {who} must send again; refused messages stay " \
@@ -1560,9 +1560,11 @@ def explain_outcome(R, o):
                      "nobody here. An owner must turn replies on here.",
         "no-send": f"I can't send messages in {where}; fix it in "
                    f"Discord's channel permissions.",
-        "internal": "I hit an internal error; see monitor.log.",
+        "internal": "I hit an internal error; your Muse can find it in "
+                    "monitor.log.",
         "worker-skipped": "I read it and chose not to answer.",
-        "send-failed": "Sending my reply failed; see monitor.log.",
+        "send-failed": "Sending my reply failed; your Muse can find why "
+                       "in monitor.log.",
         "never-share": "I held my reply: it contained a phrase you never "
                        "share.",
     }.get(code, "I didn't answer it.")
