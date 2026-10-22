@@ -263,10 +263,9 @@ def _cfg_num(section, key, default, cast, name, minimum=None,
              maximum=None):
     """Resolve one numeric setting. Only a missing or null value means
     "use the default": an explicit 0 is honored wherever 0 is a real
-    setting (the old `value or default` silently turned it back into the
-    default). Where a value would busy-loop, divide by zero, or blank
+    setting. Where a value would busy-loop, divide by zero, or blank
     every reply, it is clamped into [minimum, maximum] with a warning
-    printed once, here at import, instead of being silently replaced."""
+    printed once, here at import."""
     raw = section.get(key)
     if raw is None:
         return cast(default)
@@ -1155,6 +1154,12 @@ def shared_lock():
         yield
     finally:
         os.close(fd)  # closing the descriptor releases the flock
+
+
+def _keep_last(d, n):
+    """Bound a dict to its n newest keys (insertion order)."""
+    for k in list(d)[:-n]:
+        del d[k]
 
 
 def _read_json(path, kind=dict):
@@ -3030,6 +3035,25 @@ def _write_private(path, obj):
     atomic_write(path, obj, 0o600)
 
 
+def _publish(path, body, cache, check=False, create=True):
+    """Write body to path (mode 600: the wake hook's private files) when
+    it differs from the last write (cache: {"body"}), or (check) the file
+    was lost or mangled. create=False: an empty body never creates the
+    file. False when the write failed (logged)."""
+    if body == cache.get("body") and cache.get("path", path) == path \
+            and not (check and not _private_file_ok(path, body)):
+        return True
+    if create or body or os.path.exists(path):
+        try:
+            _write_private(path, body)
+        except OSError as e:
+            print(f"Could not write {os.path.basename(path)}: {e}",
+                  flush=True)
+            return False
+    cache.update(body=body, path=path)
+    return True
+
+
 def nl_journal(put=None, drop=None):
     """nl_journal.json: read it, or add (put=(token, entry)) or remove
     (drop=token) one entry. Any thread."""
@@ -3058,8 +3082,7 @@ def nl_mint_nonce(state, mid, channel_id=None, fragments=()):
         n[str(mid)]["channel_id"] = str(channel_id)
     if fragments:
         n[str(mid)]["fragments"] = [str(f) for f in fragments]
-    for old in list(n)[:-300]:
-        del n[old]
+    _keep_last(n, 300)
     nl_write_nonces(state)
 
 
@@ -3072,15 +3095,9 @@ def nl_write_nonces(state):
               if not isinstance(v, dict) or now - v.get("at", 0)
               > NL.MAX_AGE]:
         del n[k]
-    body = {k: v["nonce"] for k, v in n.items()}
     owner_items_write(state)   # an owner DM's command uses its nonce
-    if body == _NL_NONCES_WRITTEN["body"]:
-        return
-    try:
-        _write_private(OWNER_DM_NONCES_FILE, body)
-        _NL_NONCES_WRITTEN["body"] = body
-    except OSError as e:
-        print(f"Could not write owner_dm_nonces.json: {e}", flush=True)
+    _publish(OWNER_DM_NONCES_FILE, {k: v["nonce"] for k, v in n.items()},
+             _NL_NONCES_WRITTEN)
 
 
 # ---------------------------------------------------------------------------
@@ -3488,8 +3505,7 @@ def note_owner_item(state, mid, dm=False, channel_id=None, content="",
                    "dm": bool(dm), "channels": ids, "post_channels": post}
     if not dm:
         e[str(mid)]["nonce"] = secrets.token_hex(16)
-    for old in list(e)[:-300]:
-        del e[old]
+    _keep_last(e, 300)
     owner_items_write(state)
 
 
@@ -3513,14 +3529,7 @@ def owner_items_write(state, check=False):
                          "dm": bool(e.get("dm")),
                          "channels": e.get("channels") or [],
                          "post_channels": e.get("post_channels") or []}
-    if body == _OWNER_ITEMS_WRITTEN["body"] and not (
-            check and not _private_file_ok(OWNER_ITEMS_FILE, body)):
-        return
-    try:
-        _write_private(OWNER_ITEMS_FILE, body)
-        _OWNER_ITEMS_WRITTEN["body"] = body
-    except OSError as e:
-        print(f"Could not write owner_items.json: {e}", flush=True)
+    _publish(OWNER_ITEMS_FILE, body, _OWNER_ITEMS_WRITTEN, check)
 
 
 def owner_items_upkeep(state, queue, now):
@@ -3569,8 +3578,7 @@ def reply_nonce_mint(state, mid):
     if not (isinstance(e, dict) and e.get("nonce")):
         n[str(mid)] = e = {"nonce": secrets.token_hex(16),
                            "at": time.time()}
-        for old in list(n)[:-1000]:
-            del n[old]
+        _keep_last(n, 1000)
     reply_nonces_write(state)
     return e["nonce"]
 
@@ -3579,16 +3587,9 @@ def reply_nonces_write(state, check=False):
     body = {k: v["nonce"] for k, v in (state.get("reply_nonces")
                                        or {}).items()
             if isinstance(v, dict) and v.get("nonce")}
-    if body == _ITEM_NONCES_WRITTEN["body"] and not (
-            check and not _private_file_ok(ITEM_NONCES_FILE, body)):
-        return
-    try:
-        _write_private(ITEM_NONCES_FILE, body)
-        _ITEM_NONCES_WRITTEN["body"] = body
-    except OSError as e:
+    if not _publish(ITEM_NONCES_FILE, body, _ITEM_NONCES_WRITTEN, check):
         # The wake hook cannot hand out nonces it cannot read, so no
         # reply can be sent: say so (not "the prompt is out of date").
-        print(f"Could not write item_nonces.json: {e}", flush=True)
         day = time.strftime("%Y-%m-%d")
         if _ITEM_NONCES_ALERT["day"] != day:
             _ITEM_NONCES_ALERT["day"] = day
@@ -4129,8 +4130,7 @@ def alias_fragments(state, trigger_id, fragments):
     aliases = state.setdefault("reply_aliases", {})
     for f in fragments:
         aliases[f["id"]] = trigger_id
-    for mid in list(aliases)[:-500]:
-        del aliases[mid]
+    _keep_last(aliases, 500)
 # ---------------------------------------------------------------------------
 # Early burst flush. The coalesce window (behavior.coalesce_seconds, or
 # BOT_COALESCE_SECS for bot authors) is the MAXIMUM wait. With the
@@ -5669,8 +5669,7 @@ def note_item_meta(state, mid, **meta):
     m = state.setdefault("item_meta", {})
     m[mid] = meta
     PRO.note_item(mid, meta)  # who talked to the bot (proactive.py)
-    for old in list(m)[:-300]:
-        del m[old]
+    _keep_last(m, 300)
 
 
 def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
@@ -5741,11 +5740,9 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
             hold_suspicious(matched)
             return False
 
-    # 2. Rate limits (also bound token spend). One charge per burst, not
-    #    per fragment.
-    #    A capped burst is dropped at once, not retried: ledgered as
-    #    skipped (terminal), so flush_pending drops its pending entry
-    #    and the author's later messages are judged on their own.
+    # 2. Rate limits (also bound token spend), one charge per burst. A
+    #    capped burst is ledgered as skipped (terminal), so flush_pending
+    #    drops it and the author's later messages are judged on their own.
     capped = rate_block(state, author_id, msg["channel_id"], scope)
     if capped:
         ledger_record_many(burst_ids, "skipped", "daily cap reached",
@@ -5755,9 +5752,7 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         return False
     rate_record(state, author_id, scope)
 
-    # 3. Download viewable media so the worker can see it, and extract
-    #    document text so the worker can read attachments (trigger + every
-    #    fragment).
+    # 3. Media and document text, for the worker to see and read.
     media, documents, unviewable = [], [], []
     for m in [msg] + fragments:
         md, dc, uv = collect_media(m)
@@ -5765,9 +5760,7 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         documents += dc
         unviewable += uv
 
-    # 3b. Reply context: when the trigger used Discord's reply feature, say
-    #     whose message it was replying to so the worker knows whether the
-    #     message was actually addressed to the bot or to someone else.
+    # 3b. Whose message the trigger replies to, if anyone's.
     reply_ctx = get_reply_context(msg)
 
     # 3c. The worker reads extracted document text and the replied-to
@@ -5787,20 +5780,16 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
                 hold_suspicious(f"{matched} (in {where})")
                 return False
 
-    # 4. Attach recent conversation history (excluding the trigger and its
-    #    fragments) so the worker replies with context.
+    # 4. Recent history, without the burst itself.
     history = [h for h in chan_hist
                if h["id"] not in burst_ids][-HISTORY_ATTACHED:]
 
     # 5. Generation permission (media.*) and plugin gates. may_generate
-    #    is PERMISSION, not a decision: the worker still judges from the
-    #    full conversation context whether generation is actually wanted,
-    #    and generates at most once per queue item. Queue time only
-    #    records the permission, plus the single-use approval below
-    #    (keyed by message id, because the worker's outbox item does not
-    #    carry the flag); it must not claim anywhere that generation is
-    #    starting. Plugins may annotate the item via the gate_message
-    #    hook, but never grant may_generate.
+    #    is permission, not a decision: the worker judges whether
+    #    generation is wanted. Queue time records it, plus the single-use
+    #    approval below (keyed by message id: the worker's outbox item
+    #    does not carry the flag). Plugins may annotate the item
+    #    (gate_message), but never grant may_generate.
     def author_matches(who):
         return people_match(who, author_id, lambda: (
             set((msg.get("member") or {}).get("roles") or [])
@@ -5821,9 +5810,8 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         state.setdefault("gen_approved", {})[msg["id"]] = {
             "ts": time.time(), "channel_id": msg["channel_id"]}
 
-    # 6. Owner commands: stamped for the owners' messages only, from the
-    #    verified user ID in code. The worker decides with natural-language
-    #    understanding whether the message asks the bot to DO something.
+    # 6. Owner commands: stamped from the verified author id only; the
+    #    worker decides whether the message asks the bot to do something.
     owner_command = author_id in OWNER_USER_IDS \
         and bool(here["abilities.owner_commands"])
     # The worker replies under the LAST fragment, but the ledger and the
@@ -5924,8 +5912,7 @@ def note_ingested(state, mid):
     split."""
     seen = state.setdefault("ingested_at", {})
     seen.setdefault(mid, time.time())
-    for old in list(seen)[:-200]:
-        del seen[old]
+    _keep_last(seen, 200)
 
 
 def note_queued(state, mid):
@@ -5934,8 +5921,7 @@ def note_queued(state, mid):
     now = time.time()
     queued = state.setdefault("queued_at", {})
     queued[mid] = now
-    for old in list(queued)[:-200]:
-        del queued[old]
+    _keep_last(queued, 200)
     return now
 
 
@@ -6430,13 +6416,8 @@ def process_outbox(state):
     appended meanwhile: writing back the copy read before the sends
     deleted those appends. Settled items (sent, silent, or skipped) also
     leave the queue here, so the worker never has to rewrite it."""
-    try:
-        with open(OUTBOX_FILE) as f:
-            idle = json.load(f) == []
-    except FileNotFoundError:
-        idle = True
-    except (OSError, ValueError):
-        idle = False  # unreadable: _outbox_load sets it aside
+    # (An unreadable outbox is not idle: _outbox_load sets it aside.)
+    idle = _read_json(OUTBOX_FILE, list) == []
     if idle and not os.path.exists(OUTBOX_PROCESSING_FILE) \
             and not state.get("released"):
         return
@@ -6937,20 +6918,9 @@ def watch_write_web_nonces(state):
     for k in [k for k, v in n.items() if not isinstance(v, dict)
               or now - v.get("at", 0) > 86400]:
         del n[k]
-    for k in list(n)[:-300]:
-        del n[k]
-    body = {k: v["nonce"] for k, v in n.items()}
-    if body == _WEB_NONCES_WRITTEN["body"] \
-            and _WEB_NONCES_WRITTEN["path"] == WEB_NONCES_FILE:
-        return
-    if not body and not os.path.exists(WEB_NONCES_FILE):
-        _WEB_NONCES_WRITTEN.update(body=body, path=WEB_NONCES_FILE)
-        return
-    try:
-        _write_private(WEB_NONCES_FILE, body)
-        _WEB_NONCES_WRITTEN.update(body=body, path=WEB_NONCES_FILE)
-    except OSError as e:
-        print(f"Could not write web_nonces.json: {e}", flush=True)
+    _keep_last(n, 300)
+    _publish(WEB_NONCES_FILE, {k: v["nonce"] for k, v in n.items()},
+             _WEB_NONCES_WRITTEN, create=False)
 
 
 def watch_web_nonce_problem(state, item, qid, meta):
@@ -7339,13 +7309,8 @@ def _watch_places_due(data, matches, now):
             recs.append(h["es"][0][0])
     # Web watches that may fire this tick: reports waiting (read, not
     # taken: the tool writes the file atomically), and expired checks.
-    try:
-        with open(WEB_RESULTS_FILE) as f:
-            reps = json.load(f)
-    except (OSError, ValueError):
-        reps = []
-    ids = {r.get("id") for r in reps if isinstance(r, dict)} \
-        if isinstance(reps, list) else set()
+    ids = {r.get("id") for r in _read_json(WEB_RESULTS_FILE, list) or []
+           if isinstance(r, dict)}
     for i, r in data["items"].items():
         chk = r.get("check") if isinstance(r, dict) else None
         if i in ids or (chk and chk.get("expires", 0) <= now):
@@ -7587,18 +7552,8 @@ def _web_tick(state, data, now, verdicts):
 def watch_write_due(data, now=None):
     """web_watches_due.json: the live checks (muse_watches.web_due), for
     hooks/watch-due.sh; written (mode 600) only when it changes."""
-    body = W.web_due(data, now)
-    if body == _WEB_DUE_WRITTEN["body"] \
-            and _WEB_DUE_WRITTEN["path"] == WEB_DUE_FILE:
-        return
-    if not body and not os.path.exists(WEB_DUE_FILE):
-        _WEB_DUE_WRITTEN.update(body=body, path=WEB_DUE_FILE)
-        return
-    try:
-        _write_private(WEB_DUE_FILE, body)
-        _WEB_DUE_WRITTEN.update(body=body, path=WEB_DUE_FILE)
-    except OSError as e:
-        print(f"Could not write web_watches_due.json: {e}", flush=True)
+    _publish(WEB_DUE_FILE, W.web_due(data, now), _WEB_DUE_WRITTEN,
+             create=False)
 
 
 def watch_fire_upkeep(state, now=None):
@@ -8195,14 +8150,9 @@ def sweep_mentions(state, queue, channels, dms=True):
     q_ids = {q.get("message_id") for q in queue}
     outbox_targets = set()
     for path in (OUTBOX_FILE, OUTBOX_PROCESSING_FILE):
-        try:
-            with open(path) as f:
-                for i in json.load(f):
-                    if isinstance(i, dict):
-                        outbox_targets.update((i.get("reply_to"),
-                                               i.get("item")))
-        except Exception:
-            pass
+        for i in _read_json(path, list) or []:
+            if isinstance(i, dict):
+                outbox_targets.update((i.get("reply_to"), i.get("item")))
     quar_ids = _quarantine_ids()
     replied = set(state.get("replied_to", []))
     pending_ids = set()
@@ -8776,7 +8726,7 @@ def main():
     # Daemon thread: it only enqueues raw messages and sets the wake event;
     # the main loop below classifies and stages them. REST polling keeps
     # covering everything as gap repair and full fallback, so a dead
-    # gateway degrades silently to the old 30s cadence.
+    # gateway degrades to the 30s poll.
     token = TOKEN
     _gateway_inbox = pyqueue.Queue()
     _ix_inbox = pyqueue.Queue()  # interactions, see below
