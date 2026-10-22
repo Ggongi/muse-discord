@@ -8295,6 +8295,35 @@ _HOOK_OWNER = {}        # id(hook fn) -> plugin id
 _LOADED_PLUGINS = set()  # plugin folders already imported
 
 
+def param_for(params, key, guild_id=None, guild_name=None):
+    """Resolve one plugin param for one guild, following the old global
+    + per_guild override pattern (for a plugin the settings know nothing
+    about). Two shapes are supported:
+
+    1. The param itself is {"default": value, "per_guild": {gid-or-name:
+       value}}: a per_guild hit wins, else the default.
+    2. The whole params block has a "per_guild" map of param overrides:
+       params["per_guild"][gid-or-name][key] wins over params[key].
+
+    per_guild keys may be guild IDs or guild (server) names; IDs are
+    tried first. Returns None when the param is unset."""
+    if not isinstance(params, dict):
+        return None
+    pg = params.get("per_guild")
+    if isinstance(pg, dict):
+        for k in (guild_id, guild_name):
+            if k and isinstance(pg.get(k), dict) and key in pg[k]:
+                return pg[k][key]
+    val = params.get(key)
+    if isinstance(val, dict) and ("default" in val or "per_guild" in val):
+        inner = val.get("per_guild") or {}
+        for k in (guild_id, guild_name):
+            if k and k in inner:
+                return inner[k]
+        return val.get("default")
+    return val
+
+
 class PluginAPI:
     """The facade handed to a plugin's register() at load time."""
 
@@ -8313,8 +8342,8 @@ class PluginAPI:
         a list: [] = the owners; daily_cap -> per_day)."""
         st = settings()
         man = st.manifests.get(self._pid or self.name)
-        if man is None:   # its plugin.yaml is gone: the values at load
-            return self.params.get(key)
+        if man is None:
+            return param_for(self.params, key, guild_id, guild_name)
         skey, spec = man.spec_for(key)
         if spec is None:
             return None
