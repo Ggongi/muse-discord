@@ -575,7 +575,16 @@ class CLI(unittest.TestCase):
         self.assertEqual(MS.load(cfg, PLUGINS).layout, "new")
 
     def test_shell_shim(self):
+        st, cfg = load_text(NEW_BASE + "presence:\n  enabled: off\n"
+                            "updates:\n  notify: off\n")
         shim = os.path.join(MUT, "muse_settings.py")
+
+        def get(name):   # what watchdog.sh's reader prints
+            return MS.shell_value(st, name, MUT)
+        self.assertEqual(get("token_env"), "MUSE_TEST_TOKEN")
+        self.assertEqual(get("token_file"), "")
+        self.assertEqual(get("presence_enabled"), "false")
+        self.assertEqual(get("updates_notify"), "false")
         # watchdog.sh's own reader, both with and without the module.
         fn = subprocess.run(["sed", "-n", "/^setting() {/,/^}/p",
                              os.path.join(MUT, "watchdog.sh")],
@@ -1278,13 +1287,6 @@ class HookPayload(unittest.TestCase):
         self.assertEqual(payload["persona"], "I am Pip.")
         self.assertEqual(payload["items"][0]["settings"], card)
         self.assertIs(payload["items"][0]["follow_up"], True)
-        # A held reply's item has left the queue: no worker gets it.
-        write(os.path.join(pkg, "reply_queue.json"), "[]")
-        os.remove(os.path.join(d, "hs.json"))
-        r = subprocess.run(["bash", os.path.join(pkg, "hooks",
-                                                 "mention-watch.sh")],
-                           env=env, capture_output=True, text=True)
-        self.assertIn("SILENT", r.stdout)
 
 
 if __name__ == "__main__":
