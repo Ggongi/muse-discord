@@ -2694,10 +2694,10 @@ class SettingsCtx:
                     _DIRECTORY["channels"].get(str(guild_id)) or []]
 
     def write(self, key, value, by):
-        """One owner's change (no admin rules: never for anyone else)."""
+        """One change by `by` (its role inferred: a non-owner is an
+        admin, held to the admin rules)."""
         with _OVERLAY_LOCK:
-            MS.set_value(_SETTINGS.config_path, key, value, by, PLUGINS_DIR,
-                         role="owner")
+            MS.set_value(_SETTINGS.config_path, key, value, by, PLUGINS_DIR)
         settings()
 
     def undo(self, scope_prefix, by, **kw):
