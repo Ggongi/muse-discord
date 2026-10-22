@@ -1393,14 +1393,16 @@ def setter_name(R, place):
     return R.name(place)
 
 
-def _fix_button(R, label, place, key, op, changes=None):
+def _fix_button(R, label, place, key, op):
+    """A Why fix button (fx), shown only when the viewer may make the
+    changes it makes (fix_changes)."""
     if place is None or is_category(R, place):
         return None
-    if changes is not None and not _may_fix(R, changes):
-        return None
     try:
+        if not _may_fix(R, fix_changes(R, place, key, op) or []):
+            return None
         return btn(label, cid("fx", ptok(place), kcode(key), op))
-    except BadId:
+    except (BadId, ms.SettingsError):
         return None
 
 
@@ -1433,22 +1435,18 @@ def explain_outcome(R, o):
         s, _v, src = R.st.layer(path, "who.replies")
         by = f" (by {who_text(R, src[1])})" if src and src[0] == \
             "discord" else ""
-        ch = [ms.Change(setter, "who.replies", "inherit")]
         return (f"I'm off in {setter_name(R, setter)}{by}.",
                 _fix_button(R, "Turn me back on", setter, "who.replies",
-                            "=", ch), True)
+                            "="), True)
     if code == "bots-ignore":
         cur = R.st.get("who.bots", sc)
         if cur != "ignore":
             return ("I ignored other bots then.\n-# Not any more: I answer "
                     "bots that address me now."), None, False
         setter, _p = _setter(R, sc, "who.bots")
-        ch = [ms.Change(setter, "who.bots", "when-addressed")] \
-            if setter else None
         return (f"I ignore other bots in {setter_name(R, setter)}.",
                 _fix_button(R, "Answer bots that @mention me", setter,
-                            "who.bots", "vwhen-addressed", ch)
-                if setter else None, True)
+                            "who.bots", "vwhen-addressed"), True)
     if code in ("not-allowed", "dm-not-allowed") and _ID.fullmatch(aid):
         ign = R.st.get("who.ignore", sc) or []
         if aid in ign:
@@ -1464,22 +1462,16 @@ def explain_outcome(R, o):
                              f"{short_date(src[2])})")
                 elif src and src[0] == "file":
                     added = " (in config.yaml)"
-            fix = None
-            if setter is not None:
-                ch = fix_changes(R, setter, "who.ignore", f"-{aid}")
-                fix = _fix_button(R, f"Stop ignoring {plain(short)}",
-                                  setter, "who.ignore", f"-{aid}", ch)
+            fix = _fix_button(R, f"Stop ignoring {plain(short)}", setter,
+                              "who.ignore", f"-{aid}")
             return (f"I ignore {who_m} in {setter_name(R, setter)}"
                     f"{added}.", fix, True)
         allow = R.st.get("who.allow", sc)
         if isinstance(allow, list) and aid not in allow \
                 and aid not in R.ctx.owners:
             setter, _p = _setter(R, sc, "who.allow")
-            fix = None
-            if setter is not None:
-                ch = [ms.Change(setter, "who.allow", list(allow) + [aid])]
-                fix = _fix_button(R, f"Let {plain(short)} talk to me",
-                                  setter, "who.allow", f"+{aid}", ch)
+            fix = _fix_button(R, f"Let {plain(short)} talk to me", setter,
+                              "who.allow", f"+{aid}")
             return (f"In {setter_name(R, setter)} I only answer people on "
                     f"a list, and {who_m} isn't on it.", fix, True)
         if code == "dm-not-allowed":
@@ -1544,13 +1536,10 @@ def explain_outcome(R, o):
                     "dropped it.\n-# Not any more: I hold those for your "
                     "review now."), None, False
         setter, _p = _setter(R, sc, "privacy.suspicious")
-        ch = [ms.Change(setter, "privacy.suspicious", "hold-for-review")] \
-            if setter else None
         return ("It looked like a prompt-injection attempt, so I dropped "
-                "it.",
-                _fix_button(R, "Hold these for my review", setter,
-                            "privacy.suspicious", "vhold-for-review", ch)
-                if setter else None, True)
+                "it.", _fix_button(R, "Hold these for my review", setter,
+                                   "privacy.suspicious", "vhold-for-review"),
+                True)
     if R.admin and code in ("quarantined", "never-share"):
         return "I held it for my owners to look at.", None, True
     text = {
