@@ -338,8 +338,8 @@ def confirm_buttons(tok):
                    ("Cancel", 2, f"mdnl:no:{tok}"))
 
 
-def _clip(text, n=1990):
-    return text if len(text) <= n else text[:n - 1] + "…"
+def _clip(text):
+    return MS.clip(text, 1990)
 
 
 def _block(head, lines):
@@ -348,22 +348,10 @@ def _block(head, lines):
     return head + "\n" + "\n".join(f"- {x}" for x in lines)
 
 
-def _short_where(text):
-    return text[3:] if text.startswith("In ") else text
-
-
 def undo_lines(st, plan, names):
     """["#general in Work, When it answers → back to Chatty", ...]."""
-    sim = MS.simulate(st, plan)
-    out = []
-    for ch in plan:
-        sc = MS._scope_for(ch.place, ch.key, ch.path)
-        new = sim.top(ch.key) if sc is None else sim.get(ch.key, sc)
-        out.append(_short_where(
-            f"{MS._where(ch.place, ch.key, names, ch.path)}, "
-            f"{MS.label(ch.key)} → back to "
-            f"{MS.value_label(ch.key, new, names)}"))
-    return out
+    return [x[3:] if x.startswith("In ") else x
+            for x in MS.undo_lines(st, plan, names)]
 
 
 def locks_out(st, changes):
@@ -1269,12 +1257,6 @@ def expire(ctx, state):
     return edits, logs
 
 
-def _line_id(h):
-    return json.dumps([h.get("key"), h.get("at"), h.get("by"),
-                       h.get("group"), h.get("to"), bool(h.get("undo"))],
-                      sort_keys=True, default=str)
-
-
 def _layer_effective(st, place, key, path, v):
     """What key resolves to at place when its layer (path) holds v (a
     history line's from / to; "inherit": the layer sets nothing)."""
@@ -1309,27 +1291,13 @@ def new_cli_groups(st, state, names=None):
     noticed at its start. The first time, only the position is saved
     (no flood of old changes). [{group, by, lines, undoable}], oldest
     first."""
-    hist = [h for h in (st.overlay_doc or {}).get("history") or []
-            if isinstance(h, dict)]
-    ids = [_line_id(h) for h in hist]
-    mark = state.get("nl_history_mark")
-    last = {"id": ids[-1] if ids else None,
-            "at": str(hist[-1].get("at") or "") if hist else None}
-    if not isinstance(mark, dict):
-        state["nl_history_mark"] = last
-        return []
-    if mark.get("id") in ids:
-        new = hist[len(ids) - ids[::-1].index(mark["id"]):]
-    else:
-        after = str(mark.get("at") or "")
-        new = [h for h in hist if str(h.get("at") or "") > after]
-    if last != mark:
-        state["nl_history_mark"] = last
+    new, state["nl_history_mark"] = MS.history_since(
+        st.overlay_doc, state.get("nl_history_mark"))
     groups, order = {}, []
-    for h in new:
+    for n, h in enumerate(new):
         if not _cli_line(h):
             continue
-        gid = h.get("group") or "line:" + _line_id(h)
+        gid = h.get("group") or f"line:{n}"
         if gid not in groups:
             groups[gid] = {"group": h.get("group"),
                            "by": str(h.get("by") or "?"), "lines": [],

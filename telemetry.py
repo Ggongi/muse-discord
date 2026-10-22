@@ -277,12 +277,6 @@ def features(st, ms):
     return out
 
 
-def _line_id(h):
-    return json.dumps([h.get("key"), h.get("at"), h.get("by"),
-                       h.get("group"), h.get("to"), bool(h.get("undo"))],
-                      sort_keys=True, default=str)
-
-
 def _is_id(v):
     return isinstance(v, str) and v.isdigit() and 1 <= len(v) <= 25
 
@@ -339,24 +333,6 @@ def preset_of(lines, st, ms):
         if ok:
             return name
     return None
-
-
-def new_history(doc, mark):
-    """(history lines after mark, new mark). The first time (mark None)
-    nothing counts: only the position is taken."""
-    hist = [h for h in (doc or {}).get("history") or []
-            if isinstance(h, dict)]
-    ids = [_line_id(h) for h in hist]
-    last = {"id": ids[-1] if ids else None,
-            "at": str(hist[-1].get("at") or "") if hist else None}
-    if not isinstance(mark, dict):
-        return [], last
-    if mark.get("id") in ids:
-        new = hist[len(ids) - ids[::-1].index(mark["id"]):]
-    else:
-        after = str(mark.get("at") or "")
-        new = [h for h in hist if str(h.get("at") or "") > after]
-    return new, last
 
 
 def count_history(rec, lines, st, ms):
@@ -723,8 +699,8 @@ class Recorder:
             if not on:
                 rec["off"] = True
                 d["pending"] = []   # days of an install that is off now
-            if st is not None:
-                lines, d["history_mark"] = new_history(
+            if st is not None and self.ms is not None:
+                lines, d["history_mark"] = self.ms.history_since(
                     getattr(st, "overlay_doc", None), d.get("history_mark"))
                 count_history(rec, lines, st, self.ms)
             counts = [v for v in (member_counts or {}).values()

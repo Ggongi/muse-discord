@@ -218,9 +218,7 @@ def ptok(place):
 # ---------------------------------------------------------------------------
 # Components
 # ---------------------------------------------------------------------------
-def clip(text, n):
-    text = str(text)
-    return text if len(text) <= n else text[:n - 1] + "…"
+clip = ms.clip
 
 
 _MD = re.compile(r"([\\*_~|>#\[\]()`])")
@@ -487,7 +485,7 @@ class Req:
         self.new = False
         self.banner = None
         self.extra_names, self.extra_users = _harvest_names(ix)
-        self._guilds = None
+        self.inf = ms._Info(ctx)
         self._chans = {}
         self.fixed = None       # whose refusal a Why fix just fixed
         self.check = None       # DMs: the person checked
@@ -517,45 +515,23 @@ class Req:
 
     # -- the directory ------------------------------------------------------
     def guilds(self):
-        if self._guilds is None:
-            out = {}
-            try:
-                raw = self.ctx.guilds() or []
-            except Exception:
-                raw = []
-            for g in raw:
-                if isinstance(g, dict) and g.get("id"):
-                    out[str(g["id"])] = g
-            self._guilds = out
-        return self._guilds
+        return self.inf.guilds()
 
     def channels(self, gid):
         gid = str(gid)
         if gid not in self._chans:
-            out = {}
-            try:
-                raw = self.ctx.channels(gid) or []
-            except Exception:
-                raw = []
-            for c in raw:
-                if isinstance(c, dict) and c.get("id"):
-                    out[str(c["id"])] = c
-            self._chans[gid] = out
+            self._chans[gid] = {str(c["id"]): c
+                                for c in self.inf.channels(gid) or []}
         return self._chans[gid]
 
     def chan(self, gid, cid_):
         return self.channels(gid).get(str(cid_))
 
     def category_of(self, gid, cid_):
-        ch = self.chan(gid, cid_) or {}
-        parent = str(ch.get("parent_id") or "") or None
-        if parent and (self.chan(gid, parent) or {}).get("type") == CATEGORY:
-            return parent
-        return None
+        return self.inf.category_of(gid, cid_)
 
     def members(self, gid):
-        n = (self.guilds().get(str(gid)) or {}).get("member_count")
-        return n if isinstance(n, int) and not isinstance(n, bool) else None
+        return self.inf.members(gid)
 
     def can_see(self, gid, cid_):
         """False when the bot cannot read the channel."""
@@ -673,28 +649,12 @@ class Val:
         self.path = ms.place_path(st, place, key)
         self.set, self.here, self.src = st.layer(self.path, key)
         self.value = ms.place_value(st, place, key)
-        sc = _scope_at(place, key, self.path)
-        self.inherited = copy_default(key) if sc is None \
-            else st.value_without(sc, key, self.path)
-
-
-def copy_default(key):
-    spec = ms.TOP.get(key) or ms.CORE.get(key)
-    return spec.default if spec is not None else None
-
-
-def _scope_at(place, key, path=None):
-    """The Scope key resolves in at place (None: bot-wide)."""
-    if path is not None and place.kind == "defaults":
-        return {("everywhere",): ms.Scope.everywhere(),
-                ("all_servers",): ms.Scope("all_servers"),
-                ("dms",): ms.Scope.dm()}.get(path)
-    return place.scope(key)
+        self.inherited = st.value_without(
+            ms._scope_for(place, key, self.path), key, self.path)
 
 
 def value(R, place, key):
-    sc = _scope_at(place, key)
-    return R.st.top(key) if sc is None else R.st.get(key, sc)
+    return ms.place_value(R.st, place, key)
 
 
 def short_date(at):
@@ -895,14 +855,9 @@ def say_change(R, place, key, old, new, path=None):
 def say_undo(R, plan):
     """What an Undo of plan would make, as "In #general, Replies back to
     chat freely"."""
-    sim = ms.simulate(R.st, plan)
-    parts = []
-    for ch in plan:
-        sc = _scope_at(ch.place, ch.key, ch.path)
-        new = sim.top(ch.key) if sc is None else sim.get(ch.key, sc)
-        parts.append(f"{ui_where(R, ch.place, ch.path)}, "
-                     f"{ui_label(ch.key)} back to {ui_value(R, ch.key, new)}")
-    return "; ".join(parts)
+    return "; ".join(f"{ui_where(R, ch.place, ch.path)}, {ui_label(ch.key)} "
+                     f"back to {ui_value(R, ch.key, new)}"
+                     for ch, new in ms.undo_results(R.st, plan))
 
 
 # ---------------------------------------------------------------------------
@@ -2186,7 +2141,7 @@ def do_undo(R, place, expect=None, origin=None, confirmed=False):
         R.reload()
         for ch in plan:
             try:
-                sc = _scope_at(ch.place, ch.key, ch.path)
+                sc = ms._scope_for(ch.place, ch.key, ch.path)
                 R.ctx.notify_owners_admin_change(
                     R.admin_gid, R.uid,
                     ms.format_key(ms.change_path(before, ch), ch.key),

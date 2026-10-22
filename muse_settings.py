@@ -31,8 +31,12 @@ migrate` converts the file for good.
 """
 import contextlib
 import copy
+import fcntl
+import hashlib
+import json
 import os
 import re
+import secrets
 import shutil
 import tempfile
 import threading
@@ -1647,7 +1651,6 @@ def overlay_lock(overlay_path):
     if key in held:
         yield
         return
-    import fcntl
     fd = os.open(key + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -2004,7 +2007,6 @@ def new_group_id(prefix="g"):
     """A fresh history group id: prefix + 10 random hex characters, e.g.
     "g3f9a1c2b7d" (group ids are at most 24 characters: custom_ids carry
     them)."""
-    import secrets
     return f"{prefix}{secrets.token_hex(5)}"
 
 
@@ -2513,7 +2515,6 @@ def _del_path(d, parts):
 # ---------------------------------------------------------------------------
 def _known_guilds(state_path):
     try:
-        import json
         with open(state_path) as f:
             known = (json.load(f) or {}).get("known_guilds") or {}
         return {str(k): str(v) for k, v in known.items()}
@@ -3076,7 +3077,7 @@ def _people_text(ids, look):
     return ", ".join(shown[:-1]) + " and " + shown[-1]
 
 
-def _clip(text, n):
+def clip(text, n):
     text = str(text)
     return text if len(text) <= n else text[:n - 1] + "…"
 
@@ -3106,7 +3107,7 @@ def value_label(key, value, names=None):
         return (n if str(n).startswith("#") else f"#{n}") if n \
             else f"channel {value}"
     if t == "text":
-        return f'"{_clip(value, 60)}"' if value else "(empty)"
+        return f'"{clip(value, 60)}"' if value else "(empty)"
     return str(value)
 
 
@@ -3567,6 +3568,28 @@ def apply(config_path, changes, by, group=None, plugins_dir=None,
 
 
 # -- groups -------------------------------------------------------------------
+def _line_id(h):
+    return json.dumps([h.get("key"), h.get("at"), h.get("by"),
+                       h.get("group"), h.get("to"), bool(h.get("undo"))],
+                      sort_keys=True, default=str)
+
+
+def history_since(doc, mark):
+    """(the overlay history lines after mark, the new mark). With no mark
+    yet (the first call) nothing counts: only the position is taken."""
+    hist = [h for h in (doc or {}).get("history") or []
+            if isinstance(h, dict)]
+    ids = [_line_id(h) for h in hist]
+    last = {"id": ids[-1] if ids else None,
+            "at": str(hist[-1].get("at") or "") if hist else None}
+    if not isinstance(mark, dict):
+        return [], last
+    if mark.get("id") in ids:
+        return hist[len(ids) - ids[::-1].index(mark["id"]):], last
+    after = str(mark.get("at") or "")
+    return [h for h in hist if str(h.get("at") or "") > after], last
+
+
 def _group_lines(doc, group):
     return [(i, h) for i, h in enumerate(doc.get("history") or [])
             if isinstance(h, dict) and h.get("group") == group
@@ -3713,9 +3736,26 @@ def _undo_ident(doc, picks):
     h = (doc.get("history") or [])[picks[0][0]]
     if h.get("group"):
         return h["group"]
-    import hashlib
     raw = f"{h.get('key')}|{h.get('to')}|{h.get('at')}|{h.get('by')}"
     return "h" + hashlib.sha1(raw.encode()).hexdigest()[:10]
+
+
+def undo_results(st, plan):
+    """[(change, the value in force after it)] for an Undo's plan."""
+    sim = simulate(st, plan)
+    out = []
+    for ch in plan:
+        sc = _scope_for(ch.place, ch.key, ch.path)
+        out.append((ch, sim.top(ch.key) if sc is None
+                    else sim.get(ch.key, sc)))
+    return out
+
+
+def undo_lines(st, plan, names=None):
+    """["In #general, When it answers → back to Chatty", ...]."""
+    return [f"{_where(ch.place, ch.key, names, ch.path)}, {label(ch.key)} "
+            f"→ back to {value_label(ch.key, new, names)}"
+            for ch, new in undo_results(st, plan)]
 
 
 def undo_preview(st, prefix, include_children=False, names=None,
@@ -3734,15 +3774,7 @@ def undo_preview(st, prefix, include_children=False, names=None,
     names = _chain_names(names, names_from(None, st))
     plan = [Change(place_of_path(p), k, t, path=p)
             for _i, _ks, p, k, t in picks]
-    sim = simulate(st, plan)
-    parts = []
-    for ch in plan:
-        sc = _scope_for(ch.place, ch.key, ch.path)
-        new = sim.top(ch.key) if sc is None else sim.get(ch.key, sc)
-        parts.append(f"{_where(ch.place, ch.key, names, ch.path)}, "
-                     f"{label(ch.key)} → back to "
-                     f"{value_label(ch.key, new, names)}")
-    text = "Undo: " + "; ".join(parts)
+    text = "Undo: " + "; ".join(undo_lines(st, plan, names))
     pp = prefix if isinstance(prefix, Place) else (
         Place.defaults() if str(prefix) == "defaults"
         else place_of_path(parse_scope_prefix(prefix)))
