@@ -782,9 +782,8 @@ Who and where come from the monitor's own records, never the outbox:
   the original message its `message_id`. A bot's request is refused.
 - `abilities.reminders` (owners, everyone or a list; default everyone)
   must allow the requester there. Owners always may. Web watches are
-  the owners' only, with no setting (an old `abilities.web_watches` is
-  ignored, with one log line), and need the item's `web_nonce` outside
-  an owner's DM (Web watches).
+  the owners' only, with no setting, and need the item's `web_nonce`
+  outside an owner's DM (Web watches).
 - A watch's `in` must be a server the bot is in, not ownerless, that
   the requester is a member of (`GET /guilds/<id>/members/<user>`; 404:
   not a member; any other failure refuses), and for a channel, one
