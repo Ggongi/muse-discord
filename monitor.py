@@ -3749,18 +3749,12 @@ def nl_outbox_item(state, item):
                          nonce=send_nonce(cid, rt, [rec["text"]], 0),
                          components=rec.get("components"))
     except Exception as e:
-        now = time.time()
-        first = retry.get("first", now)
-        if getattr(e, "code", None) == 403 or now - first >= SEND_RETRY_SECS:
+        if isinstance(e, SecretBlocked) or getattr(e, "code", None) == 403 \
+                or not _retry_later(item, retry, e):
             print(f"Giving up on the settings reply for item "
                   f"{item.get('item')}: {e}", flush=True)
             _settle(state, item, "skipped", f"send failed: {e}"[:200])
             return "settled"
-        n = retry.get("n", 0) + 1
-        item["_retry"] = {"first": first, "n": n,
-                          "next": now + min(30, 2 ** n)}
-        print(f"Failed to send the settings reply (attempt {n}; retrying, "
-              f"same nonce): {e}", flush=True)
         return "retry"
     NL.sent(state, item["item"], (msg or {}).get("id"))
     _settle(state, item, rec["status"], rec["reason"], replied=True)
@@ -6112,6 +6106,25 @@ SEND_RETRY_SECS = 90
 # place, so no reply would ever go out again. outbox_pass counts the
 # failures per item and sets one aside after OUTBOX_POISON_TRIES.
 OUTBOX_POISON_TRIES = 3
+
+
+def _retry_later(item, retry, exc, **keep):
+    """After a failed send: schedule the next try in item["_retry"]
+    (growing gaps; keep: more fields to carry) and say True, or False
+    once SEND_RETRY_SECS have passed since the first failure. The send
+    may well have landed (a timeout after Discord created the message
+    looks exactly like a failure), so it stops before the nonce window
+    closes rather than risk a duplicate."""
+    now = time.time()
+    first = retry.get("first", now)
+    if now - first >= SEND_RETRY_SECS:
+        return False
+    n = retry.get("n", 0) + 1
+    item["_retry"] = dict(keep, first=first, n=n,
+                          next=now + min(30, 2 ** n))
+    print(f"Send failed (attempt {n}; retrying, same nonce): {exc}",
+          flush=True)
+    return True
 _OUTBOX_CURRENT = {"key": None}
 _OUTBOX_POISON = {}
 
@@ -6615,27 +6628,15 @@ def process_outbox(state):
                 _settle(state, item, "skipped", "403 missing access")
                 settled.append(item)
                 continue
-            now = time.time()
-            first = retry.get("first", now)
-            if now - first >= SEND_RETRY_SECS:
-                # The send may well have landed (a timeout after Discord
-                # created the message looks exactly like a failure), so
-                # stop before the nonce window closes rather than risk a
-                # duplicate.
-                print(f"Giving up on reply to {item.get('author')} in "
-                      f"{item.get('channel_name')} after "
-                      f"{SEND_RETRY_SECS}s of send errors: {e}", flush=True)
-                _settle(state, item, "skipped", f"send failed: {e}"[:200])
-                settled.append(item)
+            if _retry_later(item, retry, e, attachments=gen_files,
+                            picked=retry.get("picked", picked)):
+                remaining.append(item)
                 continue
-            n = retry.get("n", 0) + 1
-            item["_retry"] = {"first": first, "n": n,
-                              "next": now + min(30, 2 ** n),
-                              "attachments": gen_files,
-                              "picked": retry.get("picked", picked)}
-            print(f"Failed to send reply (attempt {n}; retrying, same "
-                  f"nonce): {e}", flush=True)
-            remaining.append(item)
+            print(f"Giving up on reply to {item.get('author')} in "
+                  f"{item.get('channel_name')} after "
+                  f"{SEND_RETRY_SECS}s of send errors: {e}", flush=True)
+            _settle(state, item, "skipped", f"send failed: {e}"[:200])
+            settled.append(item)
 
     _OUTBOX_CURRENT["key"] = None
     # A released hold is used up however its item settled (sent, 403,
