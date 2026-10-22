@@ -54,7 +54,7 @@ printf -v now '%(%s)T' -1
 # pgrep finds one.
 monitor_alive() {
     local pid="" arg1=""
-    IFS= read -r pid < "$PKG_DIR/monitor.pid" 2>/dev/null || true
+    IFS= read -r pid 2>/dev/null < "$PKG_DIR/monitor.pid" || true
     if [[ $pid =~ ^[0-9]+$ ]] \
         && { IFS= read -r -d '' _ && IFS= read -r -d '' arg1; } \
             2>/dev/null < "/proc/$pid/cmdline" \
