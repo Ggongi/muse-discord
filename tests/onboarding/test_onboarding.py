@@ -391,7 +391,7 @@ class OwnerlessServer(unittest.TestCase):
             again.sync_guilds(st_again, {}, {})
         self.assertIsNone(again.trigger_kind(stranger, G2))
         # The join DM says so, and answering in G1 is untouched.
-        self.assertIn("none of you is a member", mod.api.dm_posts()[0][
+        self.assertIn("none of you is in", mod.api.dm_posts()[0][
             "content"])
         self.assertEqual(mod.trigger_kind(gmsg(U1, mention=True), G1),
                          "mention")
@@ -411,6 +411,21 @@ class OwnerlessServer(unittest.TestCase):
         with quiet():
             mod3.sync_guilds(st3, mod3.GUILDS, mod3.CHANNELS)
         self.assertEqual(mod3.trigger_kind(stranger, G2), "mention")
+
+    def test_lost_state_keeps_the_gate(self):
+        """With state.json gone, every server is checked again: one no
+        owner is in stays quiet."""
+        from settings_harness import (G1, G2, CH_G2, OWNER, U1, gmsg,
+                                      load_monitor, quiet)
+        mod = load_monitor(f'version: 1\nowners: ["{OWNER}"]\n')
+        mod.api.members[(G1, OWNER)] = []
+        st = mod.load_state()
+        with quiet():
+            mod.sync_guilds(st, mod.GUILDS, mod.CHANNELS)
+        stranger = gmsg(U1, mention=True, channel=CH_G2, guild=G2)
+        self.assertIsNone(mod.trigger_kind(stranger, G2))
+        self.assertEqual(mod.trigger_kind(gmsg(U1, mention=True), G1),
+                         "mention")
 
 
 class OwnerChecks(unittest.TestCase):
