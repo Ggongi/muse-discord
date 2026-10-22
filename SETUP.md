@@ -47,8 +47,9 @@ If your name contains "discord", Discord refuses it: use
 >    (Discord may ask for your password or 2FA code). Click **Copy** and
 >    paste it here. It's the bot's password; I'll lock it away.
 
-If your runtime has a secret or secure input field, offer it first ("or
-paste it into this secure box"); when it fails, a chat paste is fine.
+Don't offer a secret vault or secure credential field instead: the bot
+needs the real token for its connection to Discord, and a vault only
+hands you a stand-in. A chat paste is the way.
 
 ## Step 3: Connect (you)
 
@@ -86,8 +87,7 @@ Discord username @<name in the note>?" and fix `owners` if not.
 
 Then send (with the `INVITE:` link):
 
-> Got it, and it's stored safely. If you're ever uneasy about it sitting
-> in our chat, press **Reset Token** again and paste me the new one.
+> Got it, and it's stored safely.
 >
 > Now add the bot to your server: click this link, pick your server, and
 > click **Authorize**: <invite link>
