@@ -1171,7 +1171,7 @@ class Settings:
 
     # -- top level ---------------------------------------------------------
     def top(self, key):
-        v = self._layer(("top",), key)
+        v = self.layer(("top",), key)
         return v[1] if v[0] else TOP[key].default
 
     @property
@@ -1208,8 +1208,8 @@ class Settings:
         return [str(g) for g in self.engine.get("guild_ids") or []]
 
     # -- layers ------------------------------------------------------------
-    def _layer(self, path, key):
-        """(set?, value, source) for one layer."""
+    def layer(self, path, key):
+        """(set?, value, source) for one layer path (see chain())."""
         if path == ("builtin",):
             spec = self.spec(key)
             default = spec.default if spec is not None else None
@@ -1293,7 +1293,7 @@ class Settings:
         """(value, [(name, set?, value, source)] for every layer)."""
         rows = []
         for path, name in chain:
-            s, v, src = self._layer(path, key)
+            s, v, src = self.layer(path, key)
             rows.append((name, path, s, v, src))
         if key == "style.notes":
             base, extra = "", []
@@ -1325,7 +1325,7 @@ class Settings:
         it: a server admin's entry is replaced by what it covers."""
         ov = self.overlay.get((path, key))
         if ov is None or entry_role(ov) != "admin":
-            s, v, _src = self._layer(path, key)
+            s, v, _src = self.layer(path, key)
             return s, v
         below = _entry_below(ov, self.overlay_doc or {},
                              format_key(path, key), self.owners)
@@ -1383,10 +1383,6 @@ class Settings:
             out.append((key, value, src, rows))
         return out
 
-    def layer(self, path, key):
-        """(set?, value, source) for one layer path (see chain())."""
-        return self._layer(path, key)
-
     def trace(self, scope, key):
         """(value, [(name, path, set?, value, source)] for every layer of
         scope's chain, least specific first)."""
@@ -1408,7 +1404,7 @@ class Settings:
         for path, name in self.chain(scope):
             if path[0] in ("builtin", "builtin_all_servers"):
                 continue
-            s, v, _src = self._layer(path, key)
+            s, v, _src = self.layer(path, key)
             if not s or v is None:
                 continue
             if path[0] == "everywhere":
@@ -2016,7 +2012,7 @@ def _layer_noop(st, path, key, value, role="owner"):
     if role != "admin" and entry_role(st.overlay.get((path, key))) \
             == "admin":
         return False
-    s, cur, _src = st._layer(path, key)
+    s, cur, _src = st.layer(path, key)
     if value == "inherit":
         return not s
     return s and cur == value
@@ -2068,10 +2064,7 @@ def owner_layer(doc, keystr, owners):
         return {}
     if entry_role(cur, owners) != "admin":
         return {"value": cur["value"]}
-    below = cur.get("below")
-    if isinstance(below, dict):
-        return dict(below)
-    return _below_from_history(doc, keystr, owners)
+    return _entry_below(cur, doc, keystr, owners)
 
 
 def _write_entry(st, doc, path, key, spec, value, by, now, group=None,
@@ -2082,7 +2075,7 @@ def _write_entry(st, doc, path, key, spec, value, by, now, group=None,
     if role is None:
         role = _infer_role(by, st.owners)
     base = st.file_values.get((path, key))
-    s, before, _src = st._layer(path, key)
+    s, before, _src = st.layer(path, key)
     entry = {"value": value, "base": display(spec, base),
              "by": str(by), "at": now}
     hist = {"key": keystr,
@@ -3441,7 +3434,7 @@ def _place_noop(st, place, path, key, norm, role="owner"):
         return False
     if _layer_noop(st, path, key, norm, role):
         return True
-    if norm == "inherit" or st._layer(path, key)[0]:
+    if norm == "inherit" or st.layer(path, key)[0]:
         return False
     if path == ("top",):
         return TOP[key].default == norm
@@ -3864,7 +3857,7 @@ def _admin_translate(st, path, key, spec, value):
             if ok1 and ok2 and a == b:
                 return target, True
         return value, False
-    s, pin, _src = st._layer(path, key)
+    s, pin, _src = st.layer(path, key)
     if s:   # an owner's entry or config.yaml sets this layer
         if value == "inherit":
             raise SettingsError(
