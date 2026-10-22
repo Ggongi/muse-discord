@@ -53,18 +53,19 @@ def main(argv=None):
             print(json.dumps(live, indent=1, sort_keys=True))
         elif not live:
             print("No reminders or watches.")
-        for i, r in sorted(live.items(), key=lambda kv: kv[1].get(
-                "due") or kv[1].get("until", 0)):
-            if not args.json:
+        else:
+            for i, r in sorted(live.items(), key=lambda kv: kv[1].get(
+                    "due") or kv[1].get("until", 0)):
                 print(describe(i, r))
         return 0
+    ids = list(dict.fromkeys(args.ids))   # an id named twice is one
     with store.edit() as data:
-        missing = [i for i in args.ids if i not in data["items"]]
+        missing = [i for i in ids if i not in data["items"]]
         if missing:
             print(f"Not found (nothing changed): {', '.join(missing)}",
                   file=sys.stderr)
             return 1
-        for i in args.ids:
+        for i in ids:
             print(f"Cancelled: {describe(i, data['items'].pop(i))}")
     return 0
 
