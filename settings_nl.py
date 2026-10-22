@@ -981,48 +981,34 @@ def _decide(ctx, state, item, iid, meta, uid, cid, target, st, age, now):
         return Result(rec, [f"Settings (DM) from {who}: confirm asked (mdnl "
                             f"{tok}), {len(plan.lines)} change(s), "
                             f"{len(plan.warnings)} warning(s)"])
-    if plan.kind == "apply":
-        tok = new_token()
-        text = done_text(plan, "Done:", lead)
-        rec = _outcome("replied", "settings: applied", text,
-                       undo_button(tok), cid, target, "applied", now)
-        rec.update(phase="applying", group=group, undo_token=tok,
-                   nonce=(item.get("settings") or {}).get("nonce"))
-        state.setdefault("nl_outcomes", {})[iid] = rec
-        _add(ctx, state, "undo", tok, {"owner": uid, "group": group,
-                                       "at": now, "channel_id": cid})
-        ctx.save(state)
-        try:
-            ctx.apply(plan.changes, uid, role="owner", group=group)
-        except Exception as e:
-            if not group_written(ctx.reload(), group):
-                (state.get("nl_undo") or {}).pop(tok, None)
-                with ctx.live.lock:
-                    ctx.live.undo.pop(tok, None)
-                rec.update(_outcome("replied", "settings: refused "
-                                    "(invalid)", _clip(INVALID + _failed(e)
-                                                       + "."),
-                                    None, cid, target, "invalid", now))
-                ctx.save(state)
-                return Result(rec, [f"Settings (DM) from {who}: nothing "
-                                    f"changed ({_failed(e)})"])
-            # Else written after all (the error came after the write).
-        rec["phase"] = "ready"
-        ctx.save(state)
-        return Result(rec, [f"Settings (DM) from {who}: applied {group}: "
-                            + "; ".join(plan.lines)])
-    # An undo (by message): never undoable itself, so no button.
+    # Applied now. An undo (by message) is never undoable itself: no
+    # button.
+    apply = plan.kind == "apply"
+    tok = new_token() if apply else None
     rec = _outcome("replied", "settings: applied",
-                   done_text(plan, "Undone:", lead), None, cid, target,
+                   done_text(plan, "Done:" if apply else "Undone:", lead),
+                   undo_button(tok) if apply else None, cid, target,
                    "applied", now)
     rec.update(phase="applying", group=group,
                nonce=(item.get("settings") or {}).get("nonce"))
     state.setdefault("nl_outcomes", {})[iid] = rec
+    if apply:
+        rec["undo_token"] = tok
+        _add(ctx, state, "undo", tok, {"owner": uid, "group": group,
+                                       "at": now, "channel_id": cid})
     ctx.save(state)
     try:
-        _run_undo(ctx, plan, uid, group)
+        if apply:
+            ctx.apply(plan.changes, uid, role="owner", group=group)
+        else:
+            _run_undo(ctx, plan, uid, group)
     except Exception as e:
+        # Unless written after all (the error came after the write).
         if not group_written(ctx.reload(), group):
+            if tok:
+                (state.get("nl_undo") or {}).pop(tok, None)
+                with ctx.live.lock:
+                    ctx.live.undo.pop(tok, None)
             rec.update(_outcome("replied", "settings: refused (invalid)",
                                 _clip(INVALID + _failed(e) + "."), None,
                                 cid, target, "invalid", now))
@@ -1031,8 +1017,9 @@ def _decide(ctx, state, item, iid, meta, uid, cid, target, st, age, now):
                                 f"changed ({_failed(e)})"])
     rec["phase"] = "ready"
     ctx.save(state)
-    return Result(rec, [f"Settings (DM) from {who}: undid "
-                        f"{plan.group or plan.ident}: "
+    did = f"applied {group}" if apply \
+        else f"undid {plan.group or plan.ident}"
+    return Result(rec, [f"Settings (DM) from {who}: {did}: "
                         + "; ".join(plan.lines)])
 
 
