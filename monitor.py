@@ -6350,6 +6350,59 @@ def own_channel_problem(state, item, index):
     return None
 
 
+def _reply_attachments(state, item, retry):
+    """(gen_id, approval, attachments, gen_files) for a reply: only
+    generated files bound to the queue item it answers
+    (generated/<its message_id>/), under the monitor's live may_generate
+    approval for that item (gen_approved; the outbox item does not carry
+    the flag), and only into the channel the item came from. No approval,
+    no files: generation is gated in code. attachments are (send path,
+    filename) for the send; gen_files [send path, original] pairs, kept
+    in _retry so a retry re-attaches the same files."""
+    gen_id = _gen_item_id(state, item)
+    approval = _gen_approval(state, gen_id)
+    if approval and approval.get("channel_id") != item.get("channel_id"):
+        print(f"Note: generation approval for item {gen_id} belongs to "
+              f"channel {approval.get('channel_id')}, not "
+              f"{item.get('channel_id')}; no attachments", flush=True)
+        approval = None
+    attachments, gen_files = [], []
+    if approval and "attachments" in retry:
+        # A retry: the files the first attempt resolved. Re-checked,
+        # because the outbox (and so _retry) is worker-writable.
+        for pair in retry.get("attachments") or []:
+            if isinstance(pair, list) and len(pair) == 2 \
+                    and len(_validate_gen_paths(pair, gen_id)) == 2:
+                attachments.append((pair[0], os.path.basename(pair[0])))
+                gen_files.append(pair)
+    elif approval:
+        candidates = _validate_gen_paths(item.get("attachments"), gen_id)
+        if not candidates:
+            # The media tool usually returns a remote URL or handle, not
+            # the local filename, so the worker can't name the file.
+            found = _discover_generated(state, gen_id)
+            if found:
+                print(f"Attaching discovered generated file: {found}",
+                      flush=True)
+                candidates.append(found)
+            else:
+                print(f"Note: approved generation for {gen_id} but no "
+                      f"file in generated/{gen_id}/", flush=True)
+        for rp in candidates:
+            send_path, fname = fit_for_discord(rp)
+            if send_path:
+                attachments.append((send_path, fname))
+                gen_files.append([send_path, rp])
+            else:
+                print(f"Attachment too large even compressed: {rp}",
+                      flush=True)
+    elif item.get("attachments"):
+        print(f"Note: reply to {item.get('reply_to')} listed attachments "
+              f"without a live generation approval for its item; dropped",
+              flush=True)
+    return gen_id, approval, attachments, gen_files
+
+
 def process_outbox(state):
     """Send replies drafted by the worker, with output guardrails + dedup.
 
@@ -6493,56 +6546,8 @@ def process_outbox(state):
             typing_clear(typing_keys)
             settled.append(item)
             continue
-        # Attachments: only generated files bound to the queue item this
-        # reply answers (generated/<its message_id>/), under the
-        # monitor's live may_generate approval for that item (tracked in
-        # gen_approved; the worker's outbox item doesn't carry the flag),
-        # and only into the channel the item came from. There is no
-        # fallback for files without an approval: generation is gated in
-        # code. Nothing is committed before the send succeeds: a retry
-        # re-attaches the same files (kept in _retry), and the approval
-        # (single-use), gen_sent and the media.per_day count settle once.
-        gen_id = _gen_item_id(state, item)
-        approval = _gen_approval(state, gen_id)
-        if approval and approval.get("channel_id") != item.get("channel_id"):
-            print(f"Note: generation approval for item {gen_id} belongs to "
-                  f"channel {approval.get('channel_id')}, not "
-                  f"{item.get('channel_id')}; no attachments", flush=True)
-            approval = None
-        attachments = []  # (send_path, filename) for the send
-        gen_files = []    # [send_path, original] pairs, for _retry
-        if approval and "attachments" in retry:
-            # A retry: the files the first attempt resolved. Re-checked,
-            # because the outbox (and so _retry) is worker-writable.
-            for pair in retry.get("attachments") or []:
-                ok = isinstance(pair, list) and len(pair) == 2 \
-                    and len(_validate_gen_paths(pair, gen_id)) == 2
-                if ok:
-                    attachments.append((pair[0], os.path.basename(pair[0])))
-                    gen_files.append(pair)
-        elif approval:
-            candidates = _validate_gen_paths(item.get("attachments"), gen_id)
-            if not candidates:
-                # The media tool usually returns a remote URL/handle, not the
-                # local filename, so the worker can't name the file. Find it.
-                found = _discover_generated(state, gen_id)
-                if found:
-                    print(f"Attaching discovered generated file: {found}", flush=True)
-                    candidates.append(found)
-                else:
-                    print(f"Note: approved generation for {gen_id} but no "
-                          f"file in generated/{gen_id}/", flush=True)
-            for rp in candidates:
-                send_path, fname = fit_for_discord(rp)
-                if send_path:
-                    attachments.append((send_path, fname))
-                    gen_files.append([send_path, rp])
-                else:
-                    print(f"Attachment too large even compressed: {rp}", flush=True)
-        elif item.get("attachments"):
-            print(f"Note: reply to {reply_to} listed attachments without a "
-                  f"live generation approval for its item; dropped",
-                  flush=True)
+        gen_id, approval, attachments, gen_files = _reply_attachments(
+            state, item, retry)
         # The reply is about to land, which ends the indicator: stop
         # typing for this item now, or a ping right after the send would
         # show typing again for ~10s.
@@ -6657,18 +6662,13 @@ def process_outbox(state):
             done_ids.add(item["reply_to"])
             done_frags.add(item["reply_to"])
 
-    nonces = state.get("nl_nonces") or {}
-    for qid in done_ids & set(nonces):
-        del nonces[qid]   # answered: its capability is spent
-    for qid in done_ids & set(state.get("owner_items") or {}):
-        del state["owner_items"][qid]
-    for qid in done_ids & set(state.get("reply_nonces") or {}):
-        del state["reply_nonces"][qid]
+    # Answered: every capability those items held is spent.
+    for key in ("nl_nonces", "owner_items", "reply_nonces", "web_nonces"):
+        held = state.get(key) or {}
+        for qid in done_ids & set(held):
+            del held[qid]
     reply_nonces_write(state)
     nl_write_nonces(state)
-    web = state.get("web_nonces") or {}
-    for qid in done_ids & set(web):
-        del web[qid]      # the same for a web watch capability
     watch_write_web_nonces(state)
 
     def answered(q):
@@ -6891,7 +6891,7 @@ def watch_can_set(uid, from_bot, here, matches):
         return False
 
 
-def watch_can_web(uid, from_bot, here=None, matches=None):
+def watch_can_web(uid, from_bot):
     """Web watches are the owners' only (no setting: each check is a turn
     of the owner's Muse reading the web); never a bot."""
     return not from_bot and str(uid) in OWNER_USER_IDS
@@ -6981,7 +6981,7 @@ def watch_card(uid, guild_id, dm, from_bot, here, matches):
         return W.card(watch_store().read(), uid, guild_id, dm,
                       owner_dm=owner and dm and not from_bot,
                       can_set=watch_can_set(uid, from_bot, here, matches),
-                      can_web=watch_can_web(uid, from_bot, here, matches))
+                      can_web=watch_can_web(uid, from_bot))
     except Exception as e:
         print(f"Reminders and watches: no list for an item ({e})",
               flush=True)
@@ -7104,7 +7104,7 @@ def _watch_schedule(state, item, index):
         def matches(who):
             return people_match(who, uid, lambda: member_roles(gid, uid))
         can = watch_can_set(uid, False, here, matches)
-        can_web = can and watch_can_web(uid, False, here, matches)
+        can_web = can and watch_can_web(uid, False)
         if can_web and any(c.get("op") == "add" and c.get("check") == "web"
                            for c in changes):
             # (Without the right, decide refuses it in plain words.)
@@ -8114,7 +8114,7 @@ def drain_gateway(state, inbox, channels):
                         "guild_id": g,
                         "guild_name": (GUILDS.get(g) or {}).get("name") or g,
                         "can_send": None,
-                        "thread": ch.get("type") in (10, 11, 12),
+                        "thread": ch.get("type") in _THREAD_TYPES,
                         "parent_id": ch.get("parent_id"),
                         "private": ch.get("type") == 12}
                 if not info["thread"] and ch.get("parent_id"):
