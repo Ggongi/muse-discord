@@ -4230,6 +4230,7 @@ def flush_pending(state, queue, force=False):
                 "window", COALESCE_SECS):
             trigger = entry["trigger"]
             who = _who(trigger).get("username")
+            n_queue = len(queue)
             try:
                 ok = enqueue_message(trigger, entry["channel_name"], state,
                                      queue, dm=entry["kind"] == "dm",
@@ -4239,7 +4240,10 @@ def flush_pending(state, queue, force=False):
             except Exception as e:
                 # One poison burst must not hold back every other one:
                 # it is retried (then ledgered) like a failed enqueue.
+                # Whatever it appended goes too, or the duplicate check
+                # below would take the burst for queued.
                 print(f"Enqueue error: {type(e).__name__}: {e}", flush=True)
+                del queue[n_queue:]
                 ok = False
             n_frag = len(entry["fragments"])
             why = " (author stopped typing)" if early and not force else ""
