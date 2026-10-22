@@ -24,7 +24,14 @@ in at a few points; everything else is here:
   again"): an outbox item answering a person's own message carries
   "proactive": "opt-out" | "opt-in"; the person is that message's
   author from the monitor's own record, never a field the worker
-  writes.
+  writes. An opt-out is recorded; an opt-in only asks (below).
+- Asks: what a run could be steered into against someone (opting them
+  back in; the time zone their quiet hours use, note_tz) is never
+  taken from the outbox. The monitor DMs that person its own message
+  with a Yes button (custom_id mdpro:yes:<token>), and only their own
+  click records it (on_button on the interaction thread, apply_button
+  in the main loop). A button lives ASK_SECS, works once, and a person
+  gets at most ASKS_PER_DAY of them.
 - note_item(mid, meta): every queued message (who wrote, where, when):
   whom the bot may DM first (only people who DMed it), and whether
   someone answered the last unprompted message.
@@ -46,8 +53,8 @@ anyone else, and the caps bound the rest.
 
 proactive.json (mode 600, monitor-internal): the next heartbeat, the
 live slot, spent slot ids, the unprompted messages sent (for the caps),
-who has messaged the bot, and opt-outs. One that does not parse is
-moved aside (proactive.json.bad-<time>), the owners are told, and no
+who has messaged the bot, opt-outs and asks. One that cannot be read
+is moved aside (proactive.json.bad-<time>), the owners are told, and no
 heartbeat runs while such a file is there: the opt-outs in it are never
 silently lost. Standard library only.
 """
@@ -57,6 +64,7 @@ import json
 import os
 import random
 import secrets
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -87,6 +95,11 @@ SEND_RETRY_SECS = 90                # as the monitor's sends (nonce window)
 TEXT_KINDS = ("mention", "dm")      # queued messages that count as talking
 FORBIDDEN = ("reply_to", "reactions", "attachments", "settings",
              "schedule", FIELD)     # never on a slot's outbox item
+ASK_KEY = "mdpro"                   # an ask's button: mdpro:yes:<token>
+ASK_SECS = DAY                      # a button works this long, once
+ASKS_PER_DAY = 3                    # buttons one person gets in a day
+ASKS_MAX = 300                      # ask records kept in all
+ASK_SEND_SECS = 10 * 60             # an ask not sent by then is dropped
 
 
 def iso(ts):
@@ -183,6 +196,10 @@ class Proactive:
         self._nonce_written = None
         self._alert = None       # an owner notice owed (a bad store)
         self._readonly = False   # a bad store that could not be moved
+        # The open asks, for the interaction thread (only the main loop
+        # touches the store): {token: (user_id, at)}.
+        self._lock = threading.Lock()
+        self._live = {}
 
     # -- the store ------------------------------------------------------------
     def path(self):
@@ -199,19 +216,20 @@ class Proactive:
                     d = json.load(f)
             except FileNotFoundError:
                 pass
-            except (OSError, ValueError) as e:
-                d = self._set_aside(p, e)
+            except Exception as e:   # any damage (deep nesting too)
+                d = self._set_aside(p, f"{type(e).__name__}: {e}"[:200])
             if d is not None and not isinstance(d, dict):
                 d = self._set_aside(p, "not a JSON object")
             d = d if isinstance(d, dict) else {}
             for k, empty in (("spent", {}), ("sent", []), ("people", {}),
-                             ("opted_out", {})):
+                             ("opted_out", {}), ("asks", {})):
                 if not isinstance(d.get(k), type(empty)):
                     d[k] = empty
             if not self._slot_ok(d.get("slot")):
                 d["slot"] = None
             d["v"] = VERSION
             self._data = d
+            self._sync_live()
         return self._data
 
     def _set_aside(self, p, why):
@@ -261,15 +279,14 @@ class Proactive:
         return self.st().get(key, self.m.MS.Scope.everywhere())
 
     def tz_of(self, uid=None):
-        """A person's own time zone when they gave one (reminders and
-        watches: "my time zone is ..."), else proactive.timezone."""
+        """A person's own time zone when they confirmed it with their
+        own button (note_tz), else proactive.timezone. Never the
+        reminders' tz as such: a run can set that on anyone's message
+        it holds."""
         if uid:
-            try:
-                tz = self.m.watch_store().read()["tz"].get(str(uid))
-                if tz:
-                    return tz
-            except Exception:
-                pass
+            p = self.data()["people"].get(str(uid)) or {}
+            if isinstance(p.get("tz"), str) and p["tz"]:
+                return p["tz"]
         return self.every("proactive.timezone")
 
     def quiet_now(self, now, uid=None):
@@ -703,6 +720,7 @@ class Proactive:
     def tick(self, state, now=None):
         """Main loop: slot upkeep, then the heartbeat when it is due."""
         now = self.clock() if now is None else now
+        self.send_asks(now)   # each pass: right after the reply it follows
         if now < self._next_tick:
             return
         self._next_tick = now + TICK_SECS
@@ -896,15 +914,33 @@ class Proactive:
             # A secret in it (the monitor's send guard): never retried,
             # the slot is used up, nothing counts toward the caps.
             blocked = isinstance(e, self.m.SecretBlocked)
+            # A part may have landed: any part after the first (on this
+            # or an earlier attempt), or the first one when the error
+            # does not say it was refused (a timeout can land).
+            part = getattr(e, "failed_part", None)
+            if part != 0 or getattr(e, "sent_ids", None):
+                post["landed"] = True
+            refused = isinstance(code, int) and 400 <= code < 500
+            maybe = not blocked and (post.get("landed") or not refused)
             if code == 403 or blocked \
                     or now - post["first"] >= SEND_RETRY_SECS:
                 post["status"] = "failed"
-                self.data()["sent"] = [x for x in self.data()["sent"]
-                                       if not (x.get("slot") == sid and
-                                               x.get("channel_id") == cid)]
+                if maybe:
+                    # It counts, as a reply that may have landed does.
+                    for x in self.data()["sent"]:
+                        if x.get("slot") == sid and x.get("channel_id") == cid:
+                            x.pop("pending", None)
+                            x["msgs"] = list(getattr(e, "sent_ids", None)
+                                             or [])[-4:]
+                else:
+                    self.data()["sent"] = [
+                        x for x in self.data()["sent"]
+                        if not (x.get("slot") == sid
+                                and x.get("channel_id") == cid)]
                 self.save()
                 print(f"Slot {sid}: could not post to {cid} ({e}); "
-                      f"dropped.", flush=True)
+                      f"dropped{' (part of it may have landed)' if maybe else ''}.",
+                      flush=True)
                 return Verdict(spent=sid)
             post["next"] = now + min(30, 2 ** post["n"])
             self.save()
@@ -963,10 +999,167 @@ class Proactive:
         d = self.data()
         if v == "opt-out":
             d["opted_out"][uid] = self.clock()
-        else:
-            d["opted_out"].pop(uid, None)
-        self.save()
-        print(f"Proactive: {uid} {'opted out' if v == 'opt-out' else 'opted back in'}"
-              f" (item {qid}).", flush=True)
+            self._close_asks(uid, "in")
+            self.save()
+            print(f"Proactive: {uid} opted out (item {qid}).", flush=True)
+        elif uid in d["opted_out"]:
+            # Never recorded from the outbox (one run may hold several
+            # people's messages): the person's own button records it.
+            self.ask(uid, str(meta["channel_id"]), "in")
         return None
+
+    # -- asks: the person's own button ---------------------------------------
+    def _sync_live(self):
+        """The open asks, for on_button (the interaction thread)."""
+        d, now = self._data or {}, self.clock()
+        live = {t: (a.get("user_id"), a.get("at", 0))
+                for t, a in (d.get("asks") or {}).items()
+                if isinstance(a, dict) and a.get("sent")
+                and not a.get("done") and now - a.get("at", 0) < ASK_SECS}
+        with self._lock:
+            self._live = live
+
+    def _close_asks(self, uid, what):
+        for a in self.data()["asks"].values():
+            if a.get("user_id") == uid and a.get("what") == what:
+                a["done"] = True
+        self._sync_live()
+
+    def ask(self, uid, cid, what, tz=None):
+        """DM person uid (in their DM channel cid) the monitor's own
+        question with a Yes button: what "in" (message them first
+        again) or "tz" (use tz for their quiet hours). Sent by
+        send_asks; at most ASKS_PER_DAY a person, one open per kind."""
+        d, now = self.data(), self.clock()
+        asks = d["asks"]
+        for t in [t for t, a in asks.items() if not isinstance(a, dict)
+                  or now - a.get("at", 0) >= ASK_SECS]:
+            del asks[t]
+        mine = [a for a in asks.values() if a.get("user_id") == uid]
+        if any(a.get("what") == what and not a.get("done")
+               and a.get("tz") == tz for a in mine):
+            return            # that very question is open already
+        if len(mine) >= ASKS_PER_DAY:
+            print(f"Proactive: no new button for {uid} ({what}): "
+                  f"{ASKS_PER_DAY} in a day already.", flush=True)
+            return
+        self._close_asks(uid, what)        # a newer question replaces it
+        asks[secrets.token_hex(8)] = {"user_id": uid, "channel_id": cid,
+                                      "what": what, "tz": tz, "at": now,
+                                      "sent": False, "n": 0, "next": 0}
+        for old in sorted(asks, key=lambda t: asks[t]["at"])[:-ASKS_MAX]:
+            del asks[old]
+        self.save()
+        print(f"Proactive: asking {uid} with a button ({what}).", flush=True)
+
+    def note_tz(self, uid, tz):
+        """A schedule action set person uid's time zone (the reminders'):
+        their quiet hours move only when they confirm it themselves, and
+        only someone the bot may DM first is asked."""
+        uid = str(uid)
+        d = self.data()
+        p = d["people"].get(uid) or {}
+        if tz == p.get("tz") or uid in d["opted_out"]:
+            return
+        dm_here = self.st().resolve(self.m.MS.Scope.dm())
+        if not dm_here["proactive.enabled"] or dm_here["who.replies"] == "off":
+            return
+        if uid in self.m.OWNER_USER_IDS:
+            cid = self.owner_dm_channel(uid)
+        elif p.get("dm") and self.m.dm_refusal(
+                {"id": uid, "username": p.get("name") or uid}) is None:
+            cid = p["dm"]
+        else:
+            return
+        if cid:
+            self.ask(uid, cid, "tz", tz)
+
+    def ask_text(self, a):
+        if a["what"] == "in":
+            q = "Okay if I message you first again now and then?"
+        else:
+            tz = a.get("tz") or (f"the default time zone "
+                                 f"({self.every('proactive.timezone')})")
+            q = (f"Should I use {tz} for the night hours when I don't "
+                 f"message you first?")
+        return (f"{q} Tap **Yes** if so; otherwise nothing changes. "
+                f"(Only you can tap it, for 24 hours.)")
+
+    def send_asks(self, now):
+        """Send the asks not sent yet (each pass of the main loop);
+        retried for ASK_SEND_SECS, then dropped."""
+        d = self._data if self._data is not None else self.data()
+        owed = [(t, a) for t, a in d["asks"].items()
+                if isinstance(a, dict) and not a.get("sent")
+                and not a.get("done") and a.get("next", 0) <= now]
+        if not owed or self.m.rest_backing_off():
+            return
+        for tok, a in owed:
+            try:
+                self.m.send_reply(
+                    a["channel_id"], self.ask_text(a), None, nonce=tok,
+                    components=[{"type": 1, "components": [
+                        {"type": 2, "style": 1, "label": "Yes",
+                         "custom_id": f"{ASK_KEY}:yes:{tok}"}]}],
+                    mentions={"parse": []})
+                a["sent"], a["at"] = True, now
+            except Exception as e:
+                a["n"] = a.get("n", 0) + 1
+                a["next"] = now + min(30, 2 ** a["n"])
+                if getattr(e, "code", None) == 403 \
+                        or now - a["at"] >= ASK_SEND_SECS:
+                    a["done"] = True
+                print(f"Proactive: could not send the button to "
+                      f"{a['user_id']} ({e}).", flush=True)
+            self._dirty = True
+        self._sync_live()
+        self.save()
+
+    def on_button(self, ix, rest, uid, record):
+        """mdpro:yes:<token>, on the interaction thread: only the person
+        asked, once, while it is open. record() hands it to the main
+        loop (apply_button)."""
+        verb, _, tok = str(rest).partition(":")
+        with self._lock:
+            rec = self._live.get(tok)
+            if verb != "yes" or rec is None \
+                    or self.clock() - rec[1] >= ASK_SECS:
+                return None
+            if rec[0] != str(uid):
+                return {"type": 4, "data": {
+                    "content": "That button is not for you.", "flags": 64,
+                    "allowed_mentions": {"parse": []}}}
+            del self._live[tok]
+        record({"kind": "proactive_yes", "token": tok, "by": str(uid)})
+        original = (ix.get("message") or {}).get("content") or ""
+        line = "**Yes**: done."
+        return {"type": 7, "data": {
+            "content": original[:1990 - len(line)] + "\n\n" + line,
+            "components": [], "allowed_mentions": {"parse": []}}}
+
+    def apply_button(self, rec):
+        """Main loop: the person's own Yes (on_button). Checked again
+        here: the ask open, theirs."""
+        d = self.data()
+        tok = str(rec.get("token") or "")
+        a = d["asks"].get(tok)
+        if not isinstance(a, dict) or a.get("done") or not a.get("sent") \
+                or a.get("user_id") != str(rec.get("by")) \
+                or self.clock() - a.get("at", 0) >= ASK_SECS:
+            return
+        a["done"] = True
+        uid = a["user_id"]
+        if a["what"] == "in":
+            d["opted_out"].pop(uid, None)
+            print(f"Proactive: {uid} opted back in (their button).",
+                  flush=True)
+        else:
+            p = d["people"].setdefault(uid, {})
+            if a.get("tz"):
+                p["tz"] = a["tz"]
+            else:
+                p.pop("tz", None)
+            print(f"Proactive: {uid} confirmed their time zone.", flush=True)
+        self._sync_live()
+        self.save()
 

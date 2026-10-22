@@ -2399,6 +2399,8 @@ def apply_record(state, rec):
                     "never_share hold discarded by an owner")
             print(f"Owner {rec.get('by')} discarded the held reply in "
                   f"{where}.", flush=True)
+    elif rec.get("kind") == "proactive_yes":
+        PRO.apply_button(rec)   # a person's own Yes (proactive.py)
 
 
 # Interaction dispatch: one handler per key, the custom_id prefix (the
@@ -2632,6 +2634,16 @@ def on_hold_button(ix, rest, uid, record):
 
 
 register_interaction("mdhold", on_hold_button)
+
+
+def on_proactive_button(ix, rest, uid, record):
+    """mdpro:yes:<token>: the Yes on the monitor's own question to one
+    person (proactive.py, asks); anyone may click, only theirs counts."""
+    return PRO.on_button(ix, rest, uid, record) \
+        or ephemeral("That button is no longer active.")
+
+
+register_interaction("mdpro", on_proactive_button, owner_only=False)
 
 
 # ---------------------------------------------------------------------------
@@ -4653,7 +4665,8 @@ def send_fragmented(channel_id, parts, reply_to=None, attachments=(),
     parts may ping (default SEND_ALLOWED_MENTIONS); nonce_key: what the
     nonces derive from besides the text, when not reply_to (a heartbeat
     slot's id: its posts reply to nothing). Returns the sent messages'
-    ids.
+    ids. The error raised says which part failed (failed_part) and the
+    ids of the parts sent before it (sent_ids).
     """
     # Every part checked before the first goes out: a secret in part 3
     # never leaves parts 1 and 2 half-sent.
@@ -4666,14 +4679,21 @@ def send_fragmented(channel_id, parts, reply_to=None, attachments=(),
             time.sleep(random.uniform(2.0, 4.0))
         nonce = send_nonce(channel_id, nonce_key or reply_to, parts, i)
         kw = {"mentions": mentions} if mentions else {}
-        if i == last_idx and attachments:
-            got = send_reply_with_files(channel_id, part, attachments,
-                                        reply_to if i == 0 else None, nonce,
-                                        **kw)
-        elif i == 0:
-            got = send_reply(channel_id, part, reply_to, nonce, **kw)
-        else:
-            got = send_reply(channel_id, part, nonce=nonce, **kw)
+        try:
+            if i == last_idx and attachments:
+                got = send_reply_with_files(
+                    channel_id, part, attachments,
+                    reply_to if i == 0 else None, nonce, **kw)
+            elif i == 0:
+                got = send_reply(channel_id, part, reply_to, nonce, **kw)
+            else:
+                got = send_reply(channel_id, part, nonce=nonce, **kw)
+        except Exception as e:
+            try:
+                e.failed_part, e.sent_ids = i, list(sent)
+            except Exception:
+                pass
+            raise
         if isinstance(got, dict) and got.get("id"):
             sent.append(str(got["id"]))
     return sent
@@ -6364,6 +6384,13 @@ def bind_started(state, item, settled, remaining, rejects):
     except Exception as e:   # never blocks the replies
         print(f"Proactive outbox error: {e}", flush=True)
         pro = None
+        if could_name_slot(item):
+            # Never left to the ordinary path: set aside.
+            why = "proactive: its slot could not be checked"
+            print(f"Refused outbox item: {why} (set aside in "
+                  f"{os.path.basename(OUTBOX_REJECTED_FILE)})", flush=True)
+            rejects.append((redact_nonces(item), why))
+            return None, True
     if pro is None:
         return None, False
     if pro.reject:
@@ -6375,6 +6402,20 @@ def bind_started(state, item, settled, remaining, rejects):
     if pro.spent:
         settled.append({"item": pro.spent})
     return None, True
+
+
+def could_name_slot(item):
+    """When proactive.py cannot say: an item shaped like a slot's answer
+    (its nonce field and no reply_nonce) or naming a queued slot."""
+    if item.get("owner_dm_nonce") and not item.get("reply_nonce"):
+        return True
+    names = {str(item[f]) for f in ("item", "reply_to") if item.get(f)}
+    try:
+        return any(isinstance(q, dict) and q.get("kind") == PRO_KIND
+                   and str(q.get("message_id")) in names
+                   for q in load_queue())
+    except Exception:
+        return True
 
 
 def hold_released_ok(state, item):
@@ -6449,7 +6490,13 @@ def bound_elsewhere(state, item):
     add another such binder. A reminder or watch firing is not one:
     watch_bind checks its place, and its reply_nonce still binds it to
     the run that was handed it."""
-    return hold_released_ok(state, item) or bool(PRO.names_slot(item))
+    if hold_released_ok(state, item):
+        return True
+    try:
+        return bool(PRO.names_slot(item))
+    except Exception as e:   # then the reply_nonce check binds it
+        print(f"Proactive: could not check for a slot ({e}).", flush=True)
+        return False
 
 
 def own_channel_problem(state, item, index):
@@ -7261,6 +7308,7 @@ def _watch_schedule(state, item, index):
     gid = None if dm else (meta.get("guild_id")
                            or (CHANNELS.get(cid) or {}).get("guild_id"))
     changes = item["schedule"]["changes"]
+    fresh = None   # decided on this pass (not read back)
     try:
         if meta.get("bot"):
             raise W.Refused(W.LINES["bot"])
@@ -7297,6 +7345,14 @@ def _watch_schedule(state, item, index):
                     prev = {"ok": False, "line": r.line,
                             "reason": r.reason, "detail": r.detail}
                 W.remember_done(data, qid, prev)
+                fresh = prev
+        for op, value in (fresh or {}).get("done") or []:
+            if op == "tz":
+                try:   # their quiet hours: only their own button moves them
+                    PRO.note_tz(uid, value)
+                except Exception as e:
+                    print(f"Proactive: time zone note error: {e}",
+                          flush=True)
     except W.Refused as r:
         prev = {"ok": False, "line": r.line, "reason": r.reason,
                 "detail": r.detail}
