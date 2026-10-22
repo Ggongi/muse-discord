@@ -210,7 +210,8 @@ def guard_target(cid):
 
 # The monitor's private files of live nonces (none may ever be posted):
 # flat {id: nonce} maps, and files whose records hold a "nonce" field.
-FLAT_NONCE_FILES = ("item_nonces.json", "web_nonces.json")
+FLAT_NONCE_FILES = ("item_nonces.json", "web_nonces.json",
+                    "proactive_nonce.json")
 RECORD_NONCE_FILES = ("web_watches_due.json",)
 
 
@@ -449,8 +450,9 @@ def cmd_thread(args):
     if upload:   # what the file holds is posted too
         with open(upload, "rb") as f:
             scrub(f.read().decode("latin-1"))
-    payload = {"name": scrub(title),
-               "message": {"content": scrub(text),
+    scrub(title + text)   # each, and a secret split across the two
+    payload = {"name": title,
+               "message": {"content": text,
                            "allowed_mentions": ALLOWED_MENTIONS},
                "auto_archive_duration": 1440}
     guard_target(forum_id)

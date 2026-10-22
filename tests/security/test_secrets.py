@@ -203,6 +203,25 @@ class Tool(unittest.TestCase):
         finally:
             os.remove(upload)
 
+    def test_slot_nonce_and_a_split_thread_are_refused(self):
+        import test_discord_api as td
+        td.D.TOKEN = TOKEN
+        td.write_owner_items(td.ITEMS)
+        slot = os.path.join(os.path.dirname(td.D.OWNER_ITEMS_FILE),
+                            "proactive_nonce.json")
+        with open(slot, "w") as f:
+            json.dump({"7": "7e" * 16}, f)
+        try:
+            for args in (["post", td.GEN_CH, "x " + "7e" * 16],
+                         ["thread", td.GEN_CH, TOKEN[:30], TOKEN[30:]]):
+                td.CALLS.clear()
+                with self.assertRaises(SystemExit), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    td.D.main(["discord-api.py", *td.SERVER, *args])
+                self.assertFalse([c for c in td.CALLS if c[0] == "POST"])
+        finally:
+            os.remove(slot)
+
 
 if __name__ == "__main__":
     unittest.main()
