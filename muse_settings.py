@@ -2433,15 +2433,13 @@ def _fold(config_path, plugins_dir):
     if not todo:
         return None, []
     data = copy.deepcopy(st.raw)
-    # Unquoted ids load as numbers; the paths below use strings.
-    servers = data.get("servers")
-    if isinstance(servers, dict):
-        data["servers"] = servers = {str(k): v for k, v in servers.items()}
-        for block in servers.values():
+    # The paths below use string ids.
+    if isinstance(data.get("servers"), dict):
+        data["servers"] = _by_str_id(data["servers"])
+        for block in data["servers"].values():
             if isinstance(block, dict) \
                     and isinstance(block.get("channels"), dict):
-                block["channels"] = {str(k): v for k, v in
-                                     block["channels"].items()}
+                block["channels"] = _by_str_id(block["channels"])
     folded = []
     for (path, key), entry in todo:
         spec = st.spec(key)
@@ -2476,6 +2474,26 @@ def _fold(config_path, plugins_dir):
         doc["history"] = _trim_history(doc["history"])
         _write_overlay_doc(st.overlay_path, doc)
     return bak, folded
+
+
+def _by_str_id(blocks):
+    """{id: block} with string ids. An id written both unquoted (a
+    number) and quoted is one block, merged as the loader reads them:
+    setting by setting, the later spelling winning."""
+    out = {}
+    for k, v in blocks.items():
+        k = _id_str(k) or str(k)
+        out[k] = _merged(out[k], v) if k in out else v
+    return out
+
+
+def _merged(a, b):
+    if not (isinstance(a, dict) and isinstance(b, dict)):
+        return b
+    out = dict(a)
+    for k, v in b.items():
+        out[k] = _merged(out[k], v) if k in out else v
+    return out
 
 
 def _old_spellings(key):
