@@ -1918,7 +1918,9 @@ def render(R, place, page):
     return page_home(R, place)
 
 
-def show(R, place, page):
+def show(R, place, page, banner=None):
+    if banner is not None:
+        R.banner = banner
     return message(R, render(R, place, page))
 
 
@@ -1973,26 +1975,23 @@ def do_changes(R, origin, changes, confirmed=False, named=(), notes=(),
     if changes and not confirmed and R.owner:
         changes = [c for c in changes if not ui_noop(R, c)]
         if not changes:
-            R.banner = [td("**No change:** it's already like that.")]
-            return show(R, place, page)
+            return show(R, place, page,
+                        [td("**No change:** it's already like that.")])
     if not changes:
-        R.banner = [td("**No change.**")]
-        return show(R, place, page)
+        return show(R, place, page, [td("**No change.**")])
     if R.st.overlay_error:
-        R.banner = banner_error(OVERLAY_BROKEN.lstrip("⚠ "))
-        return show(R, place, page)
+        return show(R, place, page,
+                    banner_error(OVERLAY_BROKEN.lstrip("⚠ ")))
     if R.owner:
         try:
             a = ms.assess(R.st, changes, R.ctx, R.look, named=named)
         except ms.SettingsError as e:
-            R.banner = banner_error(plain_error(e))
-            return show(R, place, page)
+            return show(R, place, page, banner_error(plain_error(e)))
         if a.risky and not confirmed:
             try:
                 planned = ms.plan_changes(R.st, changes)
             except ms.SettingsError as e:
-                R.banner = banner_error(plain_error(e))
-                return show(R, place, page)
+                return show(R, place, page, banner_error(plain_error(e)))
             tok = R.ctx.stash_put(R.uid, {
                 "kind": "apply",
                 "changes": [dict(c.to_dict(), revert=c.revert)
@@ -2016,12 +2015,11 @@ def do_changes(R, origin, changes, confirmed=False, named=(), notes=(),
     except ms.SettingsError as e:
         if R.admin:
             return notice(ADMIN_ONLY_QUIETER)
-        R.banner = banner_error(plain_error(e))
-        return show(R, place, page)
+        return show(R, place, page, banner_error(plain_error(e)))
     R.reload()
     if not res.changed:
-        R.banner = [td("**No change:** it's already like that.")]
-        return show(R, place, page)
+        return show(R, place, page,
+                    [td("**No change:** it's already like that.")])
     if R.admin:
         for p in res.written:
             try:
@@ -2040,8 +2038,7 @@ def do_changes(R, origin, changes, confirmed=False, named=(), notes=(),
         text += "\n" + "\n".join(notes)
     up = ms.Place.server(R.admin_gid) if R.admin \
         else written_place(res, place)
-    R.banner = banner_done(R, text, up, res.group)
-    return show(R, place, page)
+    return show(R, place, page, banner_done(R, text, up, res.group))
 
 
 def ui_noop(R, change):
@@ -2074,8 +2071,7 @@ def ui_noop(R, change):
 def do_undo(R, place, expect=None, origin=None, confirmed=False):
     origin = origin or (place, "h")
     if R.st.overlay_error:
-        R.banner = banner_error(OVERLAY_BROKEN.lstrip("⚠ "))
-        return show(R, *origin)
+        return show(R, *origin, banner_error(OVERLAY_BROKEN.lstrip("⚠ ")))
     if R.admin:
         if place.kind not in ("server", "channel") \
                 or place.guild_id != R.admin_gid:
@@ -2089,11 +2085,9 @@ def do_undo(R, place, expect=None, origin=None, confirmed=False):
                                     names=R.look, admin_gid=admin_gid)
         plan = ms.undo_plan(R.st, up, children, admin_gid)
     except ms.SettingsError as e:
-        R.banner = banner_error(plain_error(e))
-        return show(R, *origin)
+        return show(R, *origin, banner_error(plain_error(e)))
     if not gid:
-        R.banner = [td("Nothing to undo here.")]
-        return show(R, *origin)
+        return show(R, *origin, [td("Nothing to undo here.")])
     if not expect or expect != gid:
         text = clip(f"Something changed since. Undo now would make: "
                     f"{say_undo(R, plan)}", 900)
@@ -2124,11 +2118,9 @@ def do_undo(R, place, expect=None, origin=None, confirmed=False):
     except ms.SettingsError as e:
         if R.admin:
             return notice(ADMIN_ONLY_QUIETER)
-        R.banner = banner_error(plain_error(e))
-        return show(R, *origin)
+        return show(R, *origin, banner_error(plain_error(e)))
     if not keys:
-        R.banner = [td("Nothing to undo here.")]
-        return show(R, *origin)
+        return show(R, *origin, [td("Nothing to undo here.")])
     if R.admin:
         before = R.st
         R.reload()
@@ -2142,8 +2134,7 @@ def do_undo(R, place, expect=None, origin=None, confirmed=False):
             except Exception as e:
                 R.ctx.log(f"settings_ui: admin notice: {e}")
     R.reload()
-    R.banner = [td(clip(f"↩ **Undone.** {text}", 900))]
-    return show(R, *origin)
+    return show(R, *origin, [td(clip(f"↩ **Undone.** {text}", 900))])
 
 
 # ---------------------------------------------------------------------------
@@ -2331,14 +2322,14 @@ def gone(R, place):
         if chans and place.channel_id not in chans \
                 and place.channel_id not in R.st.channels_listed(
                     place.guild_id):
-            R.banner = [td("That channel no longer exists.")]
-            return show(R, ms.Place.server(place.guild_id), "h")
+            return show(R, ms.Place.server(place.guild_id), "h",
+                        [td("That channel no longer exists.")])
     if place.kind in ("server", "channel"):
         gs = R.guilds()
         if gs and place.guild_id not in gs \
                 and place.guild_id not in R.st.servers_listed():
-            R.banner = [td("I'm not in that server any more.")]
-            return show(R, R.here(), "h")
+            return show(R, R.here(), "h",
+                        [td("I'm not in that server any more.")])
     return None
 
 
@@ -2427,8 +2418,7 @@ def v_set(R, place, args, values):
         return notice(OUT_OF_DATE)
     origin = shown(R, place)
     if isinstance(changes, str):
-        R.banner = [td(f"**No change:** {changes}")]
-        return show(R, *origin)
+        return show(R, *origin, [td(f"**No change:** {changes}")])
     return do_changes(R, origin, changes)
 
 
@@ -2463,8 +2453,7 @@ def v_pre(R, place, args, values):
     try:
         changes = ms.preset_changes(R.st, name, place, R.ctx, big="skip")
     except ms.SettingsError as e:
-        R.banner = banner_error(plain_error(e))
-        return show(R, *shown(R, place))
+        return show(R, *shown(R, place), banner_error(plain_error(e)))
     title = ms.PRESETS[name][0]
     notes = []
     members = R.members(place.guild_id)
@@ -2604,8 +2593,8 @@ def v_pz(R, place, args, values, resume=False):
     if resume:
         changes = ms.resume_changes(R.st, place)
         if not changes:
-            R.banner = [td("**No change:** it isn't paused there.")]
-            return show(R, *origin)
+            return show(R, *origin,
+                        [td("**No change:** it isn't paused there.")])
     else:
         changes = ms.pause_changes(place)
     return do_changes(R, origin, changes)
@@ -2654,6 +2643,6 @@ def v_wy(R, place, args, values):
     return show(R, place, "y")
 
 
-VERBS = {"pg": v_pg, "wh": v_wh, "set": v_set, "val": v_val, "pre": v_pre, "ppl": v_ppl, "rm": v_rm,
-         "mod": v_mod, "sub": v_sub, "ok": v_ok, "un": v_un, "pz": v_pz,
-         "rs": v_rs, "fx": v_fx, "wy": v_wy}
+VERBS = {"pg": v_pg, "wh": v_wh, "set": v_set, "val": v_val, "pre": v_pre,
+         "ppl": v_ppl, "rm": v_rm, "mod": v_mod, "sub": v_sub, "ok": v_ok,
+         "un": v_un, "pz": v_pz, "rs": v_rs, "fx": v_fx, "wy": v_wy}
