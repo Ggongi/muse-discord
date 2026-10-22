@@ -40,6 +40,15 @@ New:
   server), you included, and it won't write to them first again unless
   they say it may.
 
+**Action needed:**
+
+- Render the worker prompt again: `python3 bin/render-worker-prompt.py`
+  with the options you used before. It teaches your Muse how to
+  answer a heartbeat. Until then the feature stays off in practice:
+  turning it on would wake a Muse that doesn't know what to do.
+- If your runtime registered a copy of `hooks/mention-watch.sh`, update
+  the copy.
+
 ## 2026-10-21: Replies stay where they belong
 
 Fixed (security):
