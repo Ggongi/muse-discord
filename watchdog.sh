@@ -317,7 +317,7 @@ if ! alive "[m]onitor.py"; then
       stop_proc "[m]onitor.py"
       if grep -q "TOKEN REJECTED" "$DIR/monitor.log" 2>/dev/null; then
         TOKEN_BAD=1
-        ALERT_SIG="monitor DOWN: Discord rejected the token; it was probably reset. Paste a fresh bot token into the token file and the watchdog will recover on its next run."
+        ALERT_SIG="monitor DOWN: Discord rejected the token; it was probably reset. Reset it again on the bot's Developer Portal page and give the new one to your Muse to connect; the watchdog recovers on its next run."
       else
         ALERT_SIG="monitor DOWN: restart attempted but the process is not healthy; check $DIR/monitor.log"
       fi
@@ -354,7 +354,7 @@ else
         else
           stop_proc "[p]resence.py"
           if grep -q "TOKEN REJECTED" "$DIR/presence.log" 2>/dev/null; then
-            ALERT_SIG="presence DOWN: Discord rejected the token; it was probably reset. Paste a fresh bot token into the token file and the watchdog will recover on its next run."
+            ALERT_SIG="presence DOWN: Discord rejected the token; it was probably reset. Reset it again on the bot's Developer Portal page and give the new one to your Muse to connect; the watchdog recovers on its next run."
           else
             ALERT_SIG="presence DOWN: restart attempted but no READY in presence.log; check $DIR/presence.log"
           fi

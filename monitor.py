@@ -984,7 +984,8 @@ def api_get(path):
 # every nonce file; the nonces bind what it writes to the outbox, but
 # only this filter keeps a secret it read from being posted. Before any
 # send to Discord (replies, fires, owner DMs and notices, edits,
-# interaction responses, uploads), the payload is checked: the bot token
+# interaction responses, uploads and their files), the payload is
+# checked: the bot token
 # itself, any nonce the monitor holds live, or anything shaped like a
 # Discord token (three base64url segments, the first decoding to a
 # snowflake) drops the send (SecretBlocked), logged without the value,
@@ -6175,8 +6176,8 @@ def _refuse(rejects, item, why, note=""):
 
 def bind_started(state, item, settled, remaining, rejects):
     """The one binding step for outbox items that answer an item the
-    monitor started, run before owner_dm_gate (PROTOCOL.md, "Items the
-    monitor starts"): a reminder or watch fire (watch_bind: its
+    monitor started, run before owner_dm_gate (PROTOCOL.md, "Fires: the
+    monitor starts a queue item"): a reminder or watch fire (watch_bind: its
     requester, its place) or a heartbeat slot (proactive.py: its
     targets, nonce and caps; sent there, never by the path below).
     Returns (fire, handled): handled means the item was settled, set
@@ -7161,6 +7162,9 @@ def watch_fire_allowed(uid, name, cid, gid, dm):
         return "none of the owners is in that server"
     if not who_allows({"author": {"id": uid}, "channel_id": cid}, gid, here):
         return "not allowed by who.allow / who.ignore"
+    # Unknown permissions (a failed lookup) let it through, unlike a
+    # match: a fire goes back where its requester asked, and a match it
+    # links was checked against their view when it matched.
     p = user_channel_perms(gid, uid, cid)
     if p is not None and not p & PERM_VIEW_CHANNEL:
         return "they can no longer read that channel"
