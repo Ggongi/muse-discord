@@ -204,6 +204,21 @@ def _words_problem(words, where):
     return None
 
 
+def _add_problems(c, where, keys):
+    """Unknown fields and the note: what every add checks."""
+    out = []
+    extra = set(c) - keys
+    if extra:
+        out.append(f"{where} has unknown fields: "
+                   f"{', '.join(sorted(map(str, extra)))} (the requester "
+                   f"and place are always the item's own)")
+    note = c.get("note")
+    if note is not None and (not isinstance(note, str)
+                             or len(note) > NOTE_MAX):
+        out.append(f"{where}.note is text up to {NOTE_MAX} characters")
+    return out
+
+
 def _change_problems(c, where):
     if not isinstance(c, dict):
         return [f"{where} is not an object"]
@@ -211,19 +226,10 @@ def _change_problems(c, where):
     if op == "add" and c.get("check") is not None:
         return _web_problems(c, where)
     if op == "add":
-        out = []
-        extra = set(c) - ADD_KEYS
-        if extra:
-            out.append(f"{where} has unknown fields: "
-                       f"{', '.join(sorted(map(str, extra)))} (the "
-                       f"requester and place are always the item's own)")
+        out = _add_problems(c, where, ADD_KEYS)
         kind = c.get("kind")
         if kind not in KINDS:
             return out + [f'{where}.kind must be "remind" or "watch"']
-        note = c.get("note")
-        if note is not None and (not isinstance(note, str)
-                                 or len(note) > NOTE_MAX):
-            out.append(f"{where}.note is text up to {NOTE_MAX} characters")
         if kind == "remind":
             if ("at" in c) == ("after" in c):
                 out.append(f'{where}: a reminder takes "at" (ISO-8601 UTC) '
@@ -285,12 +291,7 @@ def _change_problems(c, where):
 
 
 def _web_problems(c, where):
-    out = []
-    extra = set(c) - WEB_KEYS
-    if extra:
-        out.append(f"{where} has unknown fields: "
-                   f"{', '.join(sorted(map(str, extra)))} (the requester "
-                   f"and place are always the item's own)")
+    out = _add_problems(c, where, WEB_KEYS)
     if c.get("kind") != "watch" or c.get("check") != "web":
         out.append(f'{where}: a web watch is "kind": "watch", "check": '
                    f'"web"')
@@ -306,10 +307,6 @@ def _web_problems(c, where):
         out.append(f"{where}.until must be an ISO-8601 UTC time")
     if "repeat" in c and not isinstance(c["repeat"], bool):
         out.append(f"{where}.repeat is true or false")
-    note = c.get("note")
-    if note is not None and (not isinstance(note, str)
-                             or len(note) > NOTE_MAX):
-        out.append(f"{where}.note is text up to {NOTE_MAX} characters")
     return out
 
 
