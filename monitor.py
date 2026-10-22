@@ -7393,7 +7393,8 @@ def _watch_hold(data, fid, uid, cid, es, kind, now, next_at, held=None,
     """Keep a fire for later (data["held"]). Into one already held for
     the same person, place and kind it folds: the same watch again
     counts as `more` on its entry ("3 more mentions"), never a second
-    notice. Returns the held record's id."""
+    notice, and nothing is dropped (distinct entries are bounded by the
+    person's own reminders and watches). Returns the held record's id."""
     held_all = data.setdefault("held", {})
     for hid, h in held_all.items():
         if hid != fid and isinstance(h, dict) and h.get("uid") == uid \
@@ -7405,7 +7406,7 @@ def _watch_hold(data, fid, uid, cid, es, kind, now, next_at, held=None,
                     old["more"] = old.get("more", 0) + 1 + e.get("more", 0)
                     if e.get("matched"):
                         old["matched"] = e["matched"]
-                elif len(h["es"]) < W.PER_PERSON_MAX:
+                else:
                     h["es"].append([r, e])
             return hid
     rec = dict(held or {})
