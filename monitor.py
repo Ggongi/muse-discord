@@ -1096,10 +1096,13 @@ def api_patch(path, data):
     return _api_send("PATCH", path, data)
 
 
-def atomic_write(path, obj, mode=None):
-    """Write JSON to path via a unique temp file and a rename (two writers
-    on one fixed "<path>.tmp" could rename each other's half-written
-    file into place). The file keeps its mode unless mode is given."""
+def atomic_write(path, obj, mode=None, text=None):
+    """Write JSON (obj, or text already serialized) to path via a unique
+    temp file and a rename (two writers on one fixed "<path>.tmp" could
+    rename each other's half-written file into place). The file keeps its
+    mode unless mode is given."""
+    if text is None:
+        text = json.dumps(obj)
     if mode is None:
         try:
             mode = os.stat(path).st_mode & 0o777
@@ -1111,7 +1114,7 @@ def atomic_write(path, obj, mode=None):
     try:
         with os.fdopen(fd, "w") as f:
             os.fchmod(f.fileno(), mode)
-            json.dump(obj, f)
+            f.write(text)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -1229,10 +1232,17 @@ def load_state():
     return state
 
 
+_STATE_WRITTEN = {"text": None}
+
+
 def save_state(state):
-    # Bound the replied_to list so state.json doesn't grow forever
+    """Write state.json, unless it holds exactly this already (the main
+    loop saves several times a tick, mostly with nothing changed)."""
     state["replied_to"] = state["replied_to"][-200:]
-    atomic_write(STATE_FILE, state)
+    text = json.dumps(state)
+    if text != _STATE_WRITTEN["text"] or not os.path.exists(STATE_FILE):
+        atomic_write(STATE_FILE, None, text=text)
+        _STATE_WRITTEN["text"] = text
 
 
 def is_suspicious(content):
@@ -4391,8 +4401,9 @@ def typing_clear(keys, sent_in=None):
             _typing_last.pop(sent_in, None)
 
 
-def typing_refresh(state):
-    """Publish the channels that are waiting on a reply (see above)."""
+def typing_refresh(state, queue=None):
+    """Publish the channels that are waiting on a reply (see above).
+    queue: this tick's queue, when the caller has read it already."""
     now = time.time()
     bursts = {}
     for key, entry in state.get("pending", {}).items():
@@ -4404,7 +4415,7 @@ def typing_refresh(state):
                                       entry.get("first_seen", now))
     typing_sync("burst:", bursts)
     items = {}
-    for item in load_queue():
+    for item in load_queue() if queue is None else queue:
         if not isinstance(item, dict) or not item.get("channel_id") \
                 or not item.get("message_id"):
             continue
@@ -8929,7 +8940,7 @@ def main():
             # staged bursts too, so the user sees it while the burst is
             # being "read", not after the hold. The typing thread pings;
             # this only tells it which channels are waiting.
-            typing_refresh(state)
+            typing_refresh(state, queue)
         except Exception as e:
             print(f"Typing error: {e}", flush=True)
 
