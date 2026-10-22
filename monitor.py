@@ -1903,10 +1903,11 @@ def _join_summary(gid, ginfo, channels):
 # shared-servers. Membership is checked when the bot joins a server (it
 # counts as ownerless until a check says otherwise), then hourly while no
 # owner is there; failed checks back off and the oldest due go first, a
-# few per pass. Servers the bot was in before (the first run's, or from
-# before this check existed) are not checked: the owner set the bot up
-# there. An owner's own message in a server settles it at once. The
-# record lives in state.json, so a restart keeps it.
+# few per pass. A first run (no state.json, or a lost one) checks every
+# server at once: a lost state.json must not open the gate. Servers
+# known from before this check existed are not checked. An owner's own
+# message in a server settles it at once. The record lives in
+# state.json, so a restart keeps it.
 # state["owner_in_guild"]: {gid: {"in": an owner is a member,
 #   "checked": a check has answered, "next": when to check, "fails": n}}
 # OWNER_IN_GUILD mirrors it: True, False (no owner), None (not checked
@@ -1960,10 +1961,10 @@ def note_guild_join_for_owners(state, gid):
     OWNER_IN_GUILD.setdefault(gid, None)
 
 
-def check_owner_presence(state, guilds, joined=()):
+def check_owner_presence(state, guilds, joined=(), every=False):
     """Check the servers due for an owner check (just joined, or still
-    ownerless), oldest due first, a few per pass; then refresh the
-    mirror."""
+    ownerless), oldest due first, a few per pass (every: all of them);
+    then refresh the mirror."""
     mirror_owner_presence(state)
     seen = state["owner_in_guild"]
     now = time.time()
@@ -1976,7 +1977,7 @@ def check_owner_presence(state, guilds, joined=()):
     if OWNER_USER_IDS and not rest_backing_off():
         due = sorted((e["next"], gid) for gid, e in seen.items()
                      if not e["in"] and e["next"] <= now and gid in guilds)
-        for _next, gid in due[:OWNER_CHECKS_PER_PASS]:
+        for _next, gid in due[:None if every else OWNER_CHECKS_PER_PASS]:
             e = seen[gid]
             res = owner_member(gid)
             if res is None:
@@ -2026,8 +2027,8 @@ def configure_button(gid):
 
 def sync_guilds(state, guilds, channels):
     """Record each guild's join watermark and greet newly joined guilds
-    (observe mode, owner DM). The first run seeds the known set silently:
-    the owner just set the bot up there."""
+    (owner DM). The first run seeds the known set silently, but checks
+    every server for an owner (see check_owner_presence)."""
     if not guilds:
         return  # discovery failed; a partial view must not look like joins
     first_run = "known_guilds" not in state
@@ -2046,8 +2047,9 @@ def sync_guilds(state, guilds, channels):
                   flush=True)
             if gid not in notices:
                 notices.append(gid)
-    check_owner_presence(state, guilds,
-                         [g for g in notices if g in guilds])
+    check_owner_presence(state, guilds, list(guilds) if first_run
+                         else [g for g in notices if g in guilds],
+                         every=first_run)
     flush_join_notices(state, guilds, channels)
     try:
         warn_stale_labels()
