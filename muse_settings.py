@@ -1682,6 +1682,8 @@ def atomic_write_text(path, text):
         with os.fdopen(fd, "w") as f:
             os.fchmod(f.fileno(), mode)
             f.write(text)
+            f.flush()
+            os.fsync(f.fileno())   # never an empty file after a crash
         os.replace(tmp, path)
     except BaseException:
         try:
