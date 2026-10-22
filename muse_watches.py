@@ -769,11 +769,13 @@ def _backoff(rec, now):
                                   * 2 ** max(0, rec.get("fails", 0)))
 
 
-def web_issue(data, now=None):
+def web_issue(data, now=None, owners=None):
     """Expire checks nobody reported on (a failure each: back off, and
     give up after WEB_MAX_FAILS), then issue the due ones, each with a
-    fresh nonce, within today's budgets (over budget: tomorrow).
-    Returns [(id, record)] of the watches that gave up (removed)."""
+    fresh nonce, within today's budgets (over budget: tomorrow). A
+    watch whose requester is not among owners (the owners now, when
+    given) ends. Returns [(id, record)] of the watches that ended
+    (removed)."""
     now = time.time() if now is None else now
     day = _utc_day(now)
     used = data.setdefault("web", {})
@@ -794,9 +796,11 @@ def web_issue(data, now=None):
                 continue
             _backoff(r, now)
             continue
-        if not r.get("owner"):
-            # Set before web watches were the owners' only: it ends (the
-            # requester is told, as for one that gave up).
+        if not r.get("owner") or (owners is not None
+                                  and str(r.get("requester")) not in owners):
+            # Set before web watches were the owners' only, or by someone
+            # no longer an owner: it ends (the requester is told, as for
+            # one that gave up).
             gave_up.append((i, data["items"].pop(i)))
             continue
         if chk or r.get("next_check", 0) > now:
