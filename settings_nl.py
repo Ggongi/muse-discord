@@ -139,10 +139,14 @@ def known_spec(key, plugins_dir=None):
     manifests alone (config.yaml is not read), else None."""
     if not isinstance(key, str):
         return None
-    try:   # moved_key: an older worker's plugins.media.*
-        return MS.spec_of(MS.moved_key(key), MS.load_manifests(plugins_dir))
-    except MS.SettingsError:
-        return None
+    key = MS.moved_key(key)  # an older worker's plugins.media.*
+    manifests = {}
+    if key.startswith("plugins."):
+        try:
+            manifests = MS.load_manifests(plugins_dir)
+        except (MS.SettingsError, OSError):
+            return None
+    return MS.spec_of(key, manifests)
 
 
 def _list_key(key, spec):
@@ -1274,7 +1278,7 @@ def new_cli_groups(st, state, names=None):
     for n, h in enumerate(new):
         if not _cli_line(h):
             continue
-        gid = h.get("group") or f"line:{n}"
+        gid = h.get("group") or ("line", n)   # never a group id
         if gid not in groups:
             groups[gid] = {"group": h.get("group"),
                            "by": str(h.get("by") or "?"), "lines": [],
