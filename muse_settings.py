@@ -210,8 +210,8 @@ CORE = {
     "limits.per_person_per_day": Spec("number", None, "EDS", min=0,
                                       max=10000, none=True),
     # Image and video generation (the worker generates, the monitor
-    # attaches; see monitor.py). Off by default. who: a list replaces
-    # the owners (add them to keep them). per_day counts replies with
+    # attaches; see monitor.py). On by default, for the owners only.
+    # who: a list replaces the owners (add them to keep them). per_day counts replies with
     # generated files actually sent, in the scope where it is set.
     # legacy: the old plugin's param names (see moved_key).
     "media.enabled": Spec("on-off", True, "EDASC"),

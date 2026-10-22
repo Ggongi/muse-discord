@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""muse-discord reminders and watches (2026-10-21).
+"""muse-discord reminders and watches.
 
 One concept for people ("reminders and watches": one list, one cancel),
 three kinds inside:

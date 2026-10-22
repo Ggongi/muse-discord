@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""/settings in Discord, the moderate design: one screen with a few
-direct settings and one level of "Where". As one pure function of an interaction and a Ctx (see handle).
-monitor.py owns the plumbing (registering the commands, routing "mdset:"
-interactions here, building the Ctx, answering Discord); this module
-never touches the network, so it answers well inside Discord's 3
-seconds, and it never raises.
+"""/settings in Discord: one screen with a few direct settings and a
+Where select, as one pure function of an interaction and a Ctx (see
+handle). monitor.py owns the plumbing (registering the commands,
+routing "mdset:" interactions here, building the Ctx, answering
+Discord); this module never touches the network, so it answers well
+inside Discord's 3 seconds, and it never raises.
 
 What each person gets:
 
@@ -44,7 +44,8 @@ custom_id grammar ("mdset:3:" + colon-separated parts, <= 100 chars):
     ppl:<place>:ig           admins: add to the ignore list
     rm:<place>:ig            admins: take their additions off it
     pz:<place> | rs:<place>  pause / resume
-    un:<place>[:<grp>]       undo the newest group there (+ channels)
+    un:<place>:<grp>         undo the newest group there (+ channels),
+                             if it is still <grp>
     ok:<place>:<tok>         apply what a confirm card stashed
     fx:<place>:<k>:<op>      a "Why no reply?" fix: = | v<value>
                              | -<id> | +<id>

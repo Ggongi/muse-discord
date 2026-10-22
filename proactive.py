@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""muse-discord proactive (2026-10-21): the bot starts a conversation on
+"""muse-discord proactive: the bot starts a conversation on
 its own now and then, like a person would, instead of only replying.
 
 Off by default (proactive.enabled; the Friends preset turns it on for
