@@ -1410,10 +1410,7 @@ _LEDGER_CODES = (
 
 def ledger_code(status, reason=""):
     """A ledger entry's reason code: replied, queued, quarantined, or why
-    a message was skipped (replies-off, ownerless, dm-off, bots-ignore,
-    not-allowed, dm-not-allowed, cap, bot-exchange, suspicious-ignored,
-    predates-join, no-send, internal, worker-skipped, send-failed,
-    never-share, watch-cap, watch-not-allowed, watch-held, other)."""
+    a message was skipped (dm-off, a _LEDGER_CODES code, else other)."""
     if status in ("replied", "queued", "quarantined"):
         return status
     if status == "enqueue_failed":
@@ -2334,6 +2331,15 @@ def ephemeral(text):
                                 "allowed_mentions": {"parse": []}}}
 
 
+def closed_card(ix, line):
+    """The clicked message, buttons removed, with line added: what was
+    chosen."""
+    original = (ix.get("message") or {}).get("content") or ""
+    return {"type": 7, "data": {
+        "content": original[:1990 - len(line)] + "\n\n" + line,
+        "components": [], "allowed_mentions": {"parse": []}}}
+
+
 def interaction_user_id(ix):
     user = (ix.get("member") or {}).get("user") or ix.get("user") or {}
     return str(user.get("id") or "")
@@ -2425,10 +2431,7 @@ def on_update_button(ix, rest, uid, record):
                 f"newer versions.")
     record({"kind": "update_choice", "version": version, "action": action,
             "by": uid, "at": now})
-    original = (ix.get("message") or {}).get("content") or ""
-    return {"type": 7, "data": {
-        "content": original[:1990 - len(line)] + "\n\n" + line,
-        "components": [], "allowed_mentions": {"parse": []}}}
+    return closed_card(ix, line)
 
 
 register_interaction("mdupd", on_update_button)
@@ -2536,12 +2539,9 @@ def on_hold_button(ix, rest, uid, record):
     _holds_live.pop(hid, None)  # one decision per hold
     record({"kind": "hold_choice", "hold": hid, "action": action,
             "by": uid, "at": int(time.time())})
-    line = ("**Send anyway** chosen: posting it now." if action == "send"
-            else "**Discarded**: it will not be posted.")
-    original = (ix.get("message") or {}).get("content") or ""
-    return {"type": 7, "data": {
-        "content": original[:1990 - len(line)] + "\n\n" + line,
-        "components": [], "allowed_mentions": {"parse": []}}}
+    return closed_card(ix, "**Send anyway** chosen: posting it now."
+                       if action == "send"
+                       else "**Discarded**: it will not be posted.")
 
 
 register_interaction("mdhold", on_hold_button)
@@ -5103,14 +5103,8 @@ def collect_media(msg):
     (truncated); unviewable lists skipped files so the worker can be honest
     about limits."""
     os.makedirs(MEDIA_DIR, exist_ok=True)
-    media = []
-    documents = []
-    unviewable = []
-    candidates = []
-
-    video_candidates = []
-    doc_candidates = []
-
+    media, documents, unviewable = [], [], []
+    candidates, video_candidates, doc_candidates = [], [], []
     for att in msg.get("attachments", []):
         url = att.get("url")
         if not url:
@@ -8109,19 +8103,17 @@ def drain_gateway(state, inbox, channels):
             # (dms_from: owners) everyone else's DMs are dropped unread
             # and unrecorded; dms.who.replies: off drops all of them.
             author = _who(m)
-            if author.get("id") == BOT_ID:
-                record_history(state, cid, [m])
-                note_gateway_seen(state, cid, m["id"])
-                continue  # own messages are context only
-            TM.count("messages_seen",
-                     int(m.get("type", 0) in CONVERSATION_TYPES))
-            if not dm_sender_allowed(author):
-                note_dm_refused(m)
-                continue
+            own = author.get("id") == BOT_ID
+            if not own:
+                TM.count("messages_seen",
+                         int(m.get("type", 0) in CONVERSATION_TYPES))
+                if not dm_sender_allowed(author):
+                    note_dm_refused(m)
+                    continue
             record_history(state, cid, [m])
             note_gateway_seen(state, cid, m["id"])
-            if m.get("type", 0) not in CONVERSATION_TYPES:
-                continue  # a system notice (a pin): context only
+            if own or m.get("type", 0) not in CONVERSATION_TYPES:
+                continue  # its own messages, system notices: context only
             if hold_fragment(state, cid, m):
                 continue  # folded into a burst already being coalesced
             dms.append((m, "DM with " + (author.get("username") or cid)))
