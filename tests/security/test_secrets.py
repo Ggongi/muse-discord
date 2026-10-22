@@ -80,6 +80,9 @@ class Outbox(tb.Base):
                           if TOKEN in json.dumps(d)], [])
         # The real helpers: nothing reaches the network.
         opened = []
+        leak = os.path.join(m.tmp, "cat.png")    # a secret in a file
+        with open(leak, "w") as f:
+            f.write("x " + TOKEN)
         calls = [
             lambda: m.real_api_post(f"/channels/{CH}/messages",
                                     {"content": "x " + TOKEN}),
@@ -88,6 +91,7 @@ class Outbox(tb.Base):
             lambda: m.send_reply_with_files(CH, TOKEN, []),
             lambda: m.send_reply_with_files(CH, "ok",          # file name
                                             [("/x", TOKEN + ".png")]),
+            lambda: m.send_reply_with_files(CH, "ok", [(leak, "cat.png")]),
             lambda: m.interaction_callback(
                 {"id": "1", "token": "t"},
                 {"type": 4, "data": {"content": TOKEN}}),
@@ -157,10 +161,17 @@ class Tool(unittest.TestCase):
             json.dump({"5": "9f" * 16}, f)
         td.write_owner_items(td.ITEMS)
         msg = "300000000000000009"
+        td.D.GENERATED_DIR = os.path.dirname(nonces)
+        td.D.api_multipart = lambda path, payload, f: td.CALLS.append(
+            ("POST", path, payload))
+        upload = os.path.join(td.D.GENERATED_DIR, "cat.png")
         try:
             for text in (TOKEN, "9f" * 16, token_like()):
+                with open(upload, "w") as f:      # a secret in a file
+                    f.write(f"x {text}")
                 for args in (["post", td.GEN_CH, f"x {text}"],
-                             ["edit", td.GEN_CH, msg, f"x {text}"]):
+                             ["edit", td.GEN_CH, msg, f"x {text}"],
+                             ["thread", td.GEN_CH, "t", "ok", upload]):
                     td.CALLS.clear()
                     with self.assertRaises(SystemExit) as e, \
                             contextlib.redirect_stdout(io.StringIO()):
@@ -170,6 +181,7 @@ class Tool(unittest.TestCase):
                                       if c[0] in ("POST", "PATCH")])
         finally:
             os.remove(nonces)
+            os.remove(upload)
 
 
 if __name__ == "__main__":

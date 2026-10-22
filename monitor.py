@@ -4563,6 +4563,13 @@ def send_reply_with_files(channel_id, text, files, reply_to=None,
     boundary = "----MuseDiscord%d" % int(time.time() * 1000)
     guard_outgoing({"content": text,
                     "files": [fname for _, fname in files]}, channel_id)
+    blobs = []
+    for path, _ in files:
+        with open(path, "rb") as f:
+            blobs.append(f.read())
+    # And what the files hold: a worker can write a secret into one.
+    guard_outgoing({"files": [b.decode("latin-1") for b in blobs]},
+                   channel_id)
     payload = {"content": text,
                "allowed_mentions": mentions or SEND_ALLOWED_MENTIONS}
     if reply_to:
@@ -4574,11 +4581,9 @@ def send_reply_with_files(channel_id, text, files, reply_to=None,
     body += (f'--{boundary}\r\nContent-Disposition: form-data; name="payload_json"\r\n'
              f'Content-Type: application/json\r\n\r\n').encode()
     body += json.dumps(payload).encode() + b"\r\n"
-    for i, (path, fname) in enumerate(files):
+    for i, ((_, fname), data) in enumerate(zip(files, blobs)):
         ext = os.path.splitext(fname)[1].lower()
         ctype = ATTACH_CTYPES.get(ext, "application/octet-stream")
-        with open(path, "rb") as f:
-            data = f.read()
         body += (f'--{boundary}\r\nContent-Disposition: form-data; '
                  f'name="files[{i}]"; filename="{fname}"\r\n'
                  f'Content-Type: {ctype}\r\n\r\n').encode()

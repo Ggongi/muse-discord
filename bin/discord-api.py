@@ -470,6 +470,9 @@ def cmd_thread(args):
     """
     forum_id, title, text = snowflake(args[0]), args[1], args[2]
     upload = generated_file(args[3]) if len(args) > 3 else None
+    if upload:   # what the file holds is posted too
+        with open(upload, "rb") as f:
+            scrub(f.read().decode("latin-1"))
     payload = {"name": scrub(title),
                "message": {"content": scrub(text),
                            "allowed_mentions": ALLOWED_MENTIONS},
