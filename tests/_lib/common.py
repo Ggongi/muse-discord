@@ -71,3 +71,22 @@ def redirect_files(mod, tmp):
         if (name.endswith("_FILE") and isinstance(val, str)
                 and val.startswith(base + os.sep)):
             setattr(mod, name, os.path.join(tmp, os.path.relpath(val, base)))
+
+
+def signed(mod, state, item):
+    """An outbox item as the wake holding its queue item writes it: with
+    that item's reply_nonce (monitor.py mints one for every item it
+    queues; minted here too for an item a test queued by hand). A
+    reply_nonce the item already sets is kept, and reply_nonce=None
+    drops it (a run that was not handed the item)."""
+    item = dict(item)
+    if "reply_nonce" in item:
+        if item["reply_nonce"] is None:
+            del item["reply_nonce"]
+        return item
+    qid = mod._answered_id(state, item)
+    if qid:
+        frags = mod.queue_index(state)["frags"]
+        item["reply_nonce"] = mod.reply_nonce_mint(
+            state, mod.trigger_of(state, qid, frags))
+    return item

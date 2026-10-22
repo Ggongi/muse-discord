@@ -123,6 +123,7 @@ def load_monitor(cfg_text, tmp=None, channels=True):
         setattr(mod, attr, os.path.join(tmp, fn))
     api = FakeAPI()
     mod.api = api
+    mod.real_api_post = mod.api_post   # for tests of the helper itself
     mod.api_get = api.get
     mod.api_post = api.post
     mod.send_typing = lambda cid: None

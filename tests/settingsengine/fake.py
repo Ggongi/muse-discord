@@ -13,8 +13,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MUT = os.path.abspath(os.environ.get("MUT_DIR")
                       or os.path.join(HERE, "..", ".."))
 sys.path.insert(0, MUT)
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_lib"))
 sys.dont_write_bytecode = True
 import muse_settings as MS  # noqa: E402
+from common import redirect_files  # noqa: E402
 
 PLUGINS = os.path.join(MUT, "plugins")
 
@@ -131,6 +133,7 @@ def load_monitor(test, text):
     finally:
         sys.argv = argv
     d = os.path.dirname(cfg)
+    redirect_files(mod, d)   # every *_FILE (nonce files too), then these
     for attr, fn in [("STATE_FILE", "state.json"),
                      ("QUEUE_FILE", "reply_queue.json"),
                      ("OUTBOX_FILE", "reply_outbox.json"),

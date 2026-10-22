@@ -22,7 +22,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "_lib"))
-from common import HOOK_RUNTIME, MUT_DIR  # noqa: E402
+from common import HOOK_RUNTIME, MUT_DIR, signed  # noqa: E402
 from settings_harness import (CH, G1, OWNER, U1, HTTPErr,  # noqa: E402
                               dmsg, gmsg, load_monitor, quiet, state)
 
@@ -76,11 +76,18 @@ class Base(unittest.TestCase):
     def nonce(self, mid):
         return self.st["nl_nonces"][mid]["nonce"]
 
+    def held(self, item):
+        """item as the wake holding its queue item writes it (with its
+        reply_nonce)."""
+        return signed(self.mod, self.st, item)
+
     def reply(self, msg, text="Good!", **extra):
+        """The reply the wake holding msg's item writes (its reply_nonce
+        included; reply_nonce=None for a run that was not handed it)."""
         it = {"item": msg["id"], "channel_id": msg["channel_id"],
               "reply_to": msg["id"], "text": text}
         it.update(extra)
-        return it
+        return signed(self.mod, self.st, it)
 
     def outbox(self, *items):
         self.n_rejected = len(self.rejected())
@@ -215,9 +222,9 @@ class StrangerWakeAttacks(Base):
         self.assert_open(trig)
         self.assertNotIn(frag["id"], self.st["replied_to"])
         # The real one, under the last fragment, with the nonce.
-        self.outbox({"item": trig["id"], "channel_id": DM,
-                     "reply_to": frag["id"], "text": "real",
-                     "owner_dm_nonce": self.nonce(trig["id"])})
+        self.outbox(self.held({"item": trig["id"], "channel_id": DM,
+                               "reply_to": frag["id"], "text": "real",
+                               "owner_dm_nonce": self.nonce(trig["id"])}))
         self.assertEqual([s["content"] for s in self.sends(DM)], ["real"])
         self.assertEqual(self.queued(), [])
 
@@ -313,11 +320,13 @@ class LegitPathAndCompat(Base):
                                             for m in (a, b, c)})
         self.outbox(self.reply(a, None, parts=["one", "two"],
                                owner_dm_nonce=self.nonce(a["id"])),
-                    {"item": b["id"], "channel_id": DM, "reply_to": b["id"],
-                     "silent": True, "owner_dm_nonce": self.nonce(b["id"])},
-                    {"item": c["id"], "channel_id": DM, "reply_to": c["id"],
-                     "reactions": ["\U0001F44D"],
-                     "owner_dm_nonce": self.nonce(c["id"])})
+                    self.held({"item": b["id"], "channel_id": DM,
+                               "reply_to": b["id"], "silent": True,
+                               "owner_dm_nonce": self.nonce(b["id"])}),
+                    self.held({"item": c["id"], "channel_id": DM,
+                               "reply_to": c["id"],
+                               "reactions": ["\U0001F44D"],
+                               "owner_dm_nonce": self.nonce(c["id"])}))
         self.assertEqual([s["content"] for s in self.sends(DM)],
                          ["one", "two"])
         self.assertEqual(self.reactions, [(DM, c["id"], "\U0001F44D")])
@@ -371,8 +380,8 @@ class LegitPathAndCompat(Base):
         self.assertNotIn(u["id"], self.st.get("nl_nonces", {}))
         self.assertNotIn(o["id"], self.st.get("nl_nonces", {}))
         self.outbox(self.reply(s, "hi stranger"), self.reply(u, "hi u1"),
-                    {"item": o["id"], "channel_id": CH, "reply_to": o["id"],
-                     "silent": True})
+                    self.held({"item": o["id"], "channel_id": CH,
+                               "reply_to": o["id"], "silent": True}))
         self.assertEqual([x["content"] for x in self.sends(CH)],
                          ["hi stranger"])
         self.assertEqual([x["content"] for x in self.sends(DM_U1)],

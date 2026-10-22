@@ -340,12 +340,19 @@ class Doctor(unittest.TestCase):
                     f'token_from: {tf}\n')
         with open(os.path.join(pkg, "monitor.pid"), "w") as f:
             f.write("999999999\n")  # no such process
+        # The monitor's mark of an outdated worker prompt.
+        with open(os.path.join(pkg, "prompt_outdated.json"), "w") as f:
+            f.write('{"since": 1}')
         r = run(pkg, home, "doctor.py", ["--json", "--quick"],
                 api=fake.base)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         res = json.loads(r.stdout)
         self.assertFalse(res["ok"])
         self.assertTrue(any(x["status"] == "problem" for x in res["results"]))
+        stale = [x for x in res["results"] if "prompt is out of date"
+                 in x["what"]]
+        self.assertEqual(len(stale), 1, res)
+        self.assertIn("UPDATING.md", stale[0]["fix"])
         self.assertEqual(fake.requests, [])  # no "I'm online" DM
 
 

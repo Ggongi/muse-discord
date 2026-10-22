@@ -14,6 +14,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "_lib"))
+from common import signed  # noqa: E402
 from settings_harness import (BOT, CAT, CH, CH2, CH_G2, G1, G2,  # noqa: E402
                               MS, MUT, OTHER_BOT, OWNER, ROLE, THREAD, U1, U2,
                               bump, dmsg, gmsg, load_monitor, quiet,
@@ -650,6 +651,7 @@ class MonitorBase(unittest.TestCase):
             out.setdefault("owner_dm_nonce", nonce)
         with open(self.m.QUEUE_FILE, "w") as f:
             json.dump([item], f)
+        out = signed(self.m, self.st, out)   # the wake holding the item
         with open(self.m.OUTBOX_FILE, "w") as f:
             json.dump([out], f)
         with quiet() as buf:

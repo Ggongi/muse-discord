@@ -156,11 +156,8 @@ CORE = {
     # can; a list names the others who may.
     "abilities.reminders": Spec("people", "everyone", "EDS",
                                 values=("owners", "everyone")),
-    # Who can set web watches (checked on the web by a checker session
-    # of the owner's Muse; each check is a Muse turn): owners by default.
-    "abilities.web_watches": Spec("people", "owners", "EDS",
-                                  values=("owners", "everyone"),
-                                  risky=True),
+    # (Web watches are the owners' only: no setting. An old
+    # abilities.web_watches is ignored, see RETIRED_KEYS.)
     "privacy.memory": Spec("choice", "public-only", "EDS",
                            values=("everything", "public-only", "nothing"),
                            steers=True, risky=True),
@@ -196,6 +193,10 @@ MOVED_PLUGINS = {"media": "media", "media_generation": "media"}
 # (one log line, see Settings.retired_notice), their Discord-side
 # changes dropped.
 RETIRED_PLUGINS = ("welcome",)
+# Core settings that were removed: ignored wherever they are set (one
+# log line, Settings.retired_notice; overlay entries dropped).
+# abilities.web_watches: web watches are the owners' only, always.
+RETIRED_KEYS = ("abilities.web_watches",)
 
 
 def moved_key(key):
@@ -214,6 +215,8 @@ def moved_key(key):
 
 
 def _retired_key(key):
+    if str(key) in RETIRED_KEYS:
+        return True
     parts = str(key).split(".", 2)
     return len(parts) == 3 and parts[0] == "plugins" \
         and parts[1] in RETIRED_PLUGINS
@@ -936,6 +939,9 @@ class _Parser:
         never overrides the current spelling at the same layer."""
         spec = self.spec(key)
         kind = _scope_kind(path)
+        if spec is None and key in RETIRED_KEYS:
+            self.retired.add(key)
+            return
         if spec is None:
             if key.startswith("plugins."):
                 parts = key.split(".", 2)
@@ -1698,10 +1704,19 @@ def load(config_path, plugins_dir=None, overlay_path=None,
         raise SettingsError("\n".join(p.errors))
     retired = p.retired | {str(n) for n in (raw.get("plugins") or {})
                            if st.layout == "old" and n in RETIRED_PLUGINS}
-    if retired:
-        st.retired_notice = (
-            f"Note: config.yaml still sets the {', '.join(sorted(retired))} "
-            f"plugin, which was removed; those settings are ignored.")
+    keys = sorted(r for r in retired if r in RETIRED_KEYS)
+    plugins = sorted(r for r in retired if r not in RETIRED_KEYS)
+    notes = []
+    if plugins:
+        notes.append(f"config.yaml still sets the {', '.join(plugins)} "
+                     f"plugin, which was removed; those settings are "
+                     f"ignored.")
+    if keys:
+        notes.append(f"config.yaml still sets {', '.join(keys)}, which "
+                     f"was removed (web watches are for owners only); it "
+                     f"is ignored.")
+    if notes:
+        st.retired_notice = "Note: " + " ".join(notes)
     st.file_values = p.values
     st.labels = p.labels
     st.aliases = {a: True for a in aliases}
@@ -2636,7 +2651,6 @@ BIG_FOR_CONVERSATIONAL = 500
 BIG_FOR_CAPS = 500           # members: removing a reply cap is risky
 MEDIA_PER_DAY_RISKY = 20
 BOT_EXCHANGE_RISKY = 10
-WEB_CHECKS_PER_DAY = 48    # muse_watches.WEB_PLACE_PER_DAY
 ADMIN_REPLIES = ("off", "when-addressed")
 ADMIN_QUIETER = ("Server admins can make the bot quieter, or undo their own "
                  "changes back to what the owners set; never louder.")
@@ -2849,8 +2863,7 @@ BASIC_KEYS = ("who.replies", "who.dms_from", "privacy.memory", "style.notes",
               "style.length", "limits.per_person_per_day", "media.enabled")
 MORE_KEYS = ("who.allow", "who.ignore", "who.bots", "who.bot_exchange_limit",
              "limits.per_day", "privacy.suspicious", "media.who",
-             "media.per_day", "abilities.reminders",
-             "abilities.web_watches")
+             "media.per_day", "abilities.reminders")
 BOT_WIDE_KEYS = ("presence.status", "updates.notify")
 HIDDEN_KEYS = ("abilities.owner_commands", "presence.kind",
                "privacy.never_share")
@@ -2937,7 +2950,6 @@ LABELS = {
     "limits.per_person_per_day": "Replies per person per day",
     "abilities.owner_commands": "Owner requests (pin, post, react, threads)",
     "abilities.reminders": "Who can set reminders and watches",
-    "abilities.web_watches": "Who can set web watches",
     "media.enabled": "Image and video generation",
     "media.who": "Who can ask for images and video",
     "media.per_day": "Generations per day",
@@ -2971,8 +2983,6 @@ VALUE_LABELS = {
     ("media.who", "everyone"): "Everyone",
     ("abilities.reminders", "owners"): "Only you",
     ("abilities.reminders", "everyone"): "Everyone",
-    ("abilities.web_watches", "owners"): "Only you",
-    ("abilities.web_watches", "everyone"): "Everyone",
 }
 CATEGORY_TYPE = 4
 
@@ -4292,17 +4302,6 @@ def assess(st, changes, info=None, names=None, named=()):
         out.warnings.append(f"Anyone in {_join(everyone)} can ask for "
                             f"generated images and video. Generation "
                             f"can cost real money.")
-    # Web watches: each check is a Muse turn reading web pages for
-    # someone else's condition.
-    web = [where(k) for k, sc in scopes.items() if len(k) == 1
-           and after.get("abilities.web_watches", sc) != "owners"
-           and st.get("abilities.web_watches", sc) == "owners"]
-    if web:
-        out.warnings.append(f"People other than you in {_join(web)} can "
-                            f"set web watches: your Muse then reads web "
-                            f"pages for them, a turn per check (up to "
-                            f"{WEB_CHECKS_PER_DAY} checks a day per "
-                            f"server).")
     if uncapped:
         out.warnings.append(
             f"Generations per day: more than "

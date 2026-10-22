@@ -28,7 +28,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_lib"))
-from common import MUT_DIR, scratch  # noqa: E402
+from common import MUT_DIR, scratch, signed  # noqa: E402
 from settings_harness import (BOT, CH, G1, MS, OWNER, U1, U2,  # noqa: E402
                               author, gmsg, load_monitor, quiet, state)
 
@@ -206,9 +206,10 @@ class NeverIdentifying(Base):
             m.queue_edit(add=q)
         self.assertEqual([i["message_id"] for i in q], [mention["id"]])
         with open(m.OUTBOX_FILE, "w") as f:
-            json.dump([{"item": mention["id"], "channel_id": CH,
-                        "reply_to": mention["id"],
-                        "text": f"Sure alice_secret_name, {secret}"}], f)
+            json.dump([signed(m, self.st, {
+                "item": mention["id"], "channel_id": CH,
+                "reply_to": mention["id"],
+                "text": f"Sure alice_secret_name, {secret}"})], f)
         with quiet():
             m.process_outbox(self.st)
         self.assertTrue(m.api.channel_posts(CH))

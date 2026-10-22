@@ -23,7 +23,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "_lib"))
-from common import HOOK_RUNTIME, MUT_DIR, scratch  # noqa: E402
+from common import HOOK_RUNTIME, MUT_DIR, scratch, signed  # noqa: E402
 from settings_harness import (BOT, CH, CH2, G1, OWNER, ROLE,  # noqa: E402
                               THREAD, U1, U2, HTTPErr, dmsg, gmsg,
                               load_monitor, quiet, state)
@@ -105,7 +105,12 @@ class Base(unittest.TestCase):
         if changes is not None:
             it["schedule"] = {"v": 1, "changes": changes}
         it.update(extra)
-        return it
+        return signed(self.mod, self.st, it)
+
+    def held(self, item):
+        """item as the wake holding its queue item writes it (with the
+        item's reply_nonce)."""
+        return signed(self.mod, self.st, item)
 
     def outbox(self, *items):
         self.n_rejected = len(self.rejected())
@@ -184,15 +189,15 @@ class Reminders(Base):
         self.tick(ahead=130)
         self.assertEqual(len(self.fires()), 1)        # once
         # The worker answers it, naming another channel: refused.
-        self.outbox({"item": f["message_id"], "channel_id": CH2,
-                     "reply_to": f["message_id"], "text": "hey"})
+        self.outbox(self.held({"item": f["message_id"], "channel_id": CH2,
+                               "reply_to": f["message_id"], "text": "hey"}))
         self.assertTrue(self.was_rejected())
         self.assertEqual(self.new_sends(), [])
         # Properly, trying to ping someone else too: it goes out under
         # the original request and can ping the requester only.
-        self.outbox({"item": f["message_id"], "channel_id": CH,
-                     "reply_to": f["message_id"],
-                     "text": f"Reminder: look into it <@{U2}>"})
+        self.outbox(self.held({"item": f["message_id"], "channel_id": CH,
+                               "reply_to": f["message_id"],
+                               "text": f"Reminder: look into it <@{U2}>"}))
         sends = self.new_sends()
         self.assertEqual(len(sends), 1, self.out)
         path, data = sends[0]
@@ -205,8 +210,8 @@ class Reminders(Base):
         self.assertEqual(self.mod.watch_store().read()["fires"], {})
         self.assertEqual(self.fires(), [])
         # A second answer to it is never sent.
-        self.outbox({"item": f["message_id"], "channel_id": CH,
-                     "text": "again"})
+        self.outbox(self.held({"item": f["message_id"], "channel_id": CH,
+                               "text": "again"}))
         self.assertEqual(self.new_sends(), [])
 
     def test_original_gone_pings_requester_in_place(self):
@@ -214,8 +219,8 @@ class Reminders(Base):
         self.alive.discard(msg["id"])                 # deleted meanwhile
         self.tick(ahead=61)
         f = self.fires()[0]
-        self.outbox({"item": f["message_id"], "channel_id": CH,
-                     "text": "Reminder!"})
+        self.outbox(self.held({"item": f["message_id"], "channel_id": CH,
+                               "text": "Reminder!"}))
         (path, data), = self.new_sends()
         self.assertNotIn("message_reference", data)
         self.assertTrue(data["content"].startswith(f"<@{U1}>"))
@@ -592,8 +597,8 @@ class OwnerDMs(Base):
         self.outbox(answer)
         self.assertTrue(self.was_rejected())
         self.assertEqual(self.new_sends(), [])
-        self.outbox(dict(answer,
-                         owner_dm_nonce=self.st["nl_nonces"][fid]["nonce"]))
+        self.outbox(self.held(dict(
+            answer, owner_dm_nonce=self.st["nl_nonces"][fid]["nonce"])))
         self.assertEqual(len(self.new_sends()), 1, self.out)
 
     @unittest.skipUnless(shutil.which("jq"), "jq not installed")

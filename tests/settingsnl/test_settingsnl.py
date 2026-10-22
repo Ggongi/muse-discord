@@ -20,6 +20,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_lib"))
+from common import signed  # noqa: E402
 from settings_harness import (CAT, CH, CH2, CH_G2, G1, G2, MS,  # noqa: E402
                               OTHER_BOT, OWNER, THREAD, U1, HTTPErr,
                               dmsg, gmsg, load_monitor, quiet, sf, state,
@@ -100,6 +101,7 @@ class Base(unittest.TestCase):
                 msg, "DM with owner" if dm else "#general", self.st, q,
                 dm=dm, guild_id=guild)
         self.assertTrue(ok)
+        self.mod.queue_edit(add=q)
         return q[0]
 
     def owner_dm(self, text="change something", uid=OWNER, channel=DM,
@@ -134,7 +136,7 @@ class Base(unittest.TestCase):
         if text is not None:
             item["text"] = text
         item.update(extra)
-        return item
+        return signed(self.mod, self.st, item)   # the wake holding it
 
     def ask(self, changes, text="Sure.", **kw):
         m = self.owner_dm(**kw)

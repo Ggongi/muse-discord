@@ -7,11 +7,12 @@
     python3 bin/doctor.py --wait-mention 600 # wait for an owner's
                                              # @mention to be answered
 
-Checks: the config and token; the monitor process; that Discord accepted
-the token and the realtime connection is up (Message Content intent
-on); the /settings command; that the three hooks ran recently (each
-leaves a .seen-<hook> stamp in the package dir), and a note when the
-optional web watch hook does not; the last reply sent.
+Checks: the config and token; a worker prompt too old to reply; the
+monitor process; that Discord accepted the token and the realtime
+connection is up (Message Content intent on); the /settings command;
+that the three hooks ran recently (each leaves a .seen-<hook> stamp in
+the package dir), and a note when the optional web watch hook does
+not; the last reply sent.
 Each problem is printed with its fix, in plain words. Then, unless
 --no-dm, it DMs each owner that the bot is online (the only thing it
 ever changes), with the invite to the Muse Agent server.
@@ -128,6 +129,14 @@ def check(d, st, args):
         if tf and os.path.exists(tf) and os.stat(tf).st_mode & 0o077:
             d.add("problem", f"The token file {tf} is readable by other "
                   f"accounts.", f"chmod 600 {tf}")
+
+    # An outdated worker prompt: every reply refused (the monitor marks
+    # it, PROTOCOL.md, Replies stay with their run).
+    if os.path.exists(d.path("prompt_outdated.json")):
+        d.add("problem", "The worker prompt is out of date, so the bot "
+              "can't send replies (they carry no reply_nonce).",
+              "follow UPDATING.md: it re-renders the prompt (python3 "
+              "bin/render-worker-prompt.py with the options used before).")
 
     # The monitor.
     log = d.log_tail("monitor.log")

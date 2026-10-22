@@ -6,11 +6,14 @@ when it carries that DM's nonce, so forged entries from another wake
 the hook with bash and jq against the stubbed hatch hook runtime.
 
 Usage: [MUT_DIR=<tree>] python3 tests/ownerdm/test_hook.py"""
+import contextlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
@@ -29,8 +32,7 @@ def item(mid, kind="dm", speaker="owner", frags=()):
                          "speaker": speaker}}
 
 
-@unittest.skipUnless(shutil.which("jq"), "jq not installed")
-class ForgedAnswersDoNotHideOwnerDms(unittest.TestCase):
+class _Hook(unittest.TestCase):
     def setUp(self):
         self.d = scratch("muse-hook-odm-")
         self.pkg = os.path.join(self.d, "pkg")
@@ -60,6 +62,9 @@ class ForgedAnswersDoNotHideOwnerDms(unittest.TestCase):
         p = self.wake()
         return None if p is None else [i["message_id"] for i in p["items"]]
 
+
+@unittest.skipUnless(shutil.which("jq"), "jq not installed")
+class ForgedAnswersDoNotHideOwnerDms(_Hook):
     def test_forged_entries_do_not_count(self):
         self.write("reply_queue.json", [item("1", frags=["11"]), item("2")])
         for forged in ([{"item": "1", "text": "x"}],
@@ -128,6 +133,199 @@ class ForgedAnswersDoNotHideOwnerDms(unittest.TestCase):
         self.write("owner_dm_nonces.json", {"1": N1})
         self.write("reply_queue.json", [item("1")])
         self.assertEqual(self.ids(), ["1"])
+
+
+def load_discord_api(work):
+    """bin/discord-api.py with a test config and a stubbed API that
+    records every call."""
+    import importlib.util
+    cfg = os.path.join(work, "config.yaml")
+    with open(cfg, "w") as f:
+        f.write('version: 1\nowners: ["100000000000000001"]\n'
+                'token_from: env:MUSE_TEST_TOKEN\n')
+    os.environ["MUSE_DISCORD_CONFIG"] = cfg
+    os.environ["MUSE_TEST_TOKEN"] = "dummy-token"
+    spec = importlib.util.spec_from_file_location(
+        "discord_api_hook", os.path.join(MUT_DIR, "bin", "discord-api.py"))
+    d = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(d)
+    d.calls = []
+
+    def api(method, path, data=None):
+        d.calls.append((method, path))
+        if method == "GET" and path.count("/") == 2:   # /channels/<id>
+            return {"id": path.rsplit("/", 1)[1], "type": 1,
+                    "recipients": [{"id": "100000000000000002"}]}
+        return [] if "/messages?" in path else {"id": "1"}
+    d.api = api
+    return d
+
+
+@unittest.skipUnless(shutil.which("jq"), "jq not installed")
+class OwnerCommandsWakeAlone(_Hook):
+    """An item holding a capability beyond answering itself (an owner's
+    command: owner_command_nonce; a web watch: web_nonce) wakes alone,
+    one per wake, owners' first, and only that wake gets its nonces: a
+    stranger's run cannot borrow the owner's open item, even though its
+    history names the owner's message id. Every item's reply_nonce
+    reaches only the wake holding it, and only an outbox entry carrying
+    it counts as answering the item."""
+    OWN = "300000000000000007"
+    OWN_CH = "200000000000000005"
+    C = "e" * 32
+
+    def setUp(self):
+        super().setUp()
+        self.items = {self.OWN: {"nonce": self.C, "channel_id": self.OWN_CH,
+                                 "dm": False, "channels": [], "names": []},
+                      "1": {"nonce": N1, "channel_id": "9", "dm": True,
+                            "channels": [], "names": []}}
+        self.write("owner_items.json", self.items)
+        now = time.time()
+        own = dict(item(self.OWN, "mention", "owner"), owner_command=True,
+                   queued_at=now)
+        stranger = dict(item("5", "mention", "member"), queued_at=now,
+                        history=[{"id": self.OWN, "author": "owner",
+                                  "text": "pin that"}])
+        self.queue = [stranger, own]
+
+    def run_hook(self):
+        r = subprocess.run(["bash", HOOK], env=self.env, capture_output=True,
+                           text=True, timeout=30)
+        lines = r.stdout.splitlines()
+        return r.stdout, (json.loads(lines[1]) if lines and
+                          lines[0].startswith("WAKE:") else None)
+
+    def test_owner_command_wakes_alone_with_its_nonce(self):
+        self.write("reply_queue.json", [item("1")] + self.queue)
+        # Owner DMs first, then the owner's command, then the stranger.
+        out, p = self.run_hook()
+        self.assertEqual([(i["message_id"], i.get("owner_command_nonce"))
+                          for i in p["items"]], [("1", None)])
+        out, p = self.run_hook()
+        self.assertEqual([(i["message_id"], i.get("owner_command_nonce"))
+                          for i in p["items"]], [(self.OWN, self.C)])
+        self.assertNotIn(N1, out)
+        out, p = self.run_hook()
+        self.assertEqual([i["message_id"] for i in p["items"]], ["5"])
+        self.assertNotIn(self.C, out)
+        self.assertNotIn(N1, out)
+
+    def test_capability_holders_wake_one_at_a_time(self):
+        """An owner command that may set web watches gets both nonces
+        in its one wake; the owner's other web watch holder goes alone
+        next; then the rest together, with no web nonce (web watches are
+        the owners' only: a member's item never gets one, even if the
+        file lists it)."""
+        W1, W2, W3 = "c" * 32, "d" * 32, "f" * 32
+        web_owner = dict(item("8", "mention", "owner"), queued_at=1)
+        member = dict(item("9", "mention", "member"), queued_at=1)
+        self.write("web_nonces.json", {self.OWN: W1, "8": W2, "9": W3})
+        self.write("reply_queue.json", self.queue + [member, web_owner])
+        seen = []
+        for _ in range(3):
+            out, p = self.run_hook()
+            seen.append([(i["message_id"], i.get("owner_command_nonce"),
+                          i.get("web_nonce")) for i in p["items"]])
+            self.assertNotIn(W3, out)
+        self.assertEqual(seen, [[(self.OWN, self.C, W1)],
+                                [("8", None, W2)],
+                                [("5", None, None), ("9", None, None)]])
+
+    def test_owner_dm_command_gets_its_dm_nonce(self):
+        self.write("reply_queue.json", [dict(item("1"), owner_command=True)])
+        out, p = self.run_hook()
+        self.assertEqual(p["items"][0].get("owner_command_nonce"), N1)
+        self.assertEqual(p["items"][0].get("owner_dm_nonce"), N1)
+
+    def test_owner_command_without_its_nonce_waits_a_while(self):
+        # No file at all (a monitor from before it): handed out, alone,
+        # without a nonce (the tool then refuses to act).
+        os.remove(os.path.join(self.pkg, "owner_items.json"))
+        self.write("reply_queue.json", self.queue)
+        out, p = self.run_hook()
+        self.assertEqual([(i["message_id"], i.get("owner_command_nonce"))
+                          for i in p["items"]], [(self.OWN, None)])
+        os.remove(self.env["HOOK_STATE"])
+        # Mangled, or no entry (the author is no owner any more): it
+        # waits while the monitor may still write it...
+        with open(os.path.join(self.pkg, "owner_items.json"), "w") as f:
+            f.write("{broken")
+        self.write("reply_queue.json", self.queue)
+        out, p = self.run_hook()
+        self.assertEqual([i["message_id"] for i in p["items"]], ["5"])
+        self.assertIsNone(self.run_hook()[1])   # 5 is leased; OWN waits
+        self.write("owner_items.json", self.items)
+        out, p = self.run_hook()
+        self.assertEqual([(i["message_id"], i.get("owner_command_nonce"))
+                          for i in p["items"]], [(self.OWN, self.C)])
+        # ...but not for good: a minute after it was queued, it goes out
+        # without owner powers.
+        os.remove(self.env["HOOK_STATE"])
+        self.write("owner_items.json", {})
+        self.write("reply_queue.json", [dict(self.queue[1],
+                                             queued_at=time.time() - 61)])
+        out, p = self.run_hook()
+        self.assertEqual([(i["message_id"], i.get("owner_command_nonce"))
+                          for i in p["items"]], [(self.OWN, None)])
+
+    def test_reply_nonces_reach_their_own_wake_and_mark_answers(self):
+        R5, RO = "5" * 32, "7" * 32
+        self.write("item_nonces.json", {"5": R5, self.OWN: RO})
+        self.write("reply_queue.json", self.queue)
+        out, p = self.run_hook()
+        self.assertEqual([(i["message_id"], i.get("reply_nonce"))
+                          for i in p["items"]], [(self.OWN, RO)])
+        self.assertNotIn(R5, out)
+        out, p = self.run_hook()
+        self.assertEqual([(i["message_id"], i.get("reply_nonce"))
+                          for i in p["items"]], [("5", R5)])
+        self.assertNotIn(RO, out)
+        # The stranger's run writes entries for the owner's item: they
+        # do not count, so the owner's item is handed out again.
+        os.remove(self.env["HOOK_STATE"])
+        self.write("reply_outbox.json", [
+            {"item": self.OWN, "channel_id": "9", "silent": True},
+            {"item": "5", "reply_to": self.OWN, "reply_nonce": R5,
+             "text": "hi"}])
+        out, p = self.run_hook()
+        self.assertEqual([i["message_id"] for i in p["items"]], [self.OWN])
+        # Its own run's answer does.
+        os.remove(self.env["HOOK_STATE"])
+        self.write("reply_outbox.json", [
+            {"item": self.OWN, "reply_nonce": RO, "text": "Pinned."}])
+        out, p = self.run_hook()
+        self.assertEqual([i["message_id"] for i in p["items"]], ["5"])
+
+    def test_stranger_run_cannot_borrow_the_owner_item(self):
+        self.write("reply_queue.json", self.queue)
+        self.run_hook()                       # the owner's own wake
+        out, p = self.run_hook()              # the stranger's wake
+        self.assertEqual([i["message_id"] for i in p["items"]], ["5"])
+        self.assertIn(self.OWN, out)          # it knows the id...
+        self.assertNotIn(self.C, out)         # ...not the nonce
+        d = load_discord_api(self.d)
+        d.OWNER_ITEMS_FILE = os.path.join(self.pkg, "owner_items.json")
+        d.OWNER_DM_NONCES_FILE = os.path.join(self.pkg,
+                                              "owner_dm_nonces.json")
+        dm = "200000000000000004"             # someone's private DM
+        for prefix in ([], ["--for", self.OWN], ["--for", "5"],
+                       ["--for", self.OWN, "--nonce", N1],
+                       ["--for", self.OWN, "--nonce", "0" * 32]):
+            for sub in (["read", dm], ["post", dm, "x"],
+                        ["read", self.OWN_CH]):
+                with self.assertRaises(SystemExit):
+                    d.main(["discord-api.py", *prefix, *sub])
+        self.assertEqual(d.calls, [])
+        # The owner's run, holding the nonce, may read its own channel,
+        # and still not someone's DM.
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(d.main(["discord-api.py", "--for", self.OWN,
+                                     "--nonce", self.C, "read",
+                                     self.OWN_CH]), 0)
+        with self.assertRaises(SystemExit):
+            d.main(["discord-api.py", "--for", self.OWN, "--nonce", self.C,
+                    "read", dm])
 
 
 if __name__ == "__main__":
